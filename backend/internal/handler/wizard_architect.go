@@ -384,25 +384,32 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		return nil, nil, fail(404, "NOT_FOUND", "requirement not found")
 	}
 
-	// regenerate=true is reserved for the explicit "重新生成" CTA, which is
-	// only meaningful once a plan exists. Server-side whitelist: status must
-	// be {designing, designed}; anything outside that set means the user
-	// either hit the button on a phase that doesn't support regenerating
-	// (draft / analyzing / done / archived / developing / …) or the
-	// frontend's button guard let a stale state through. We reject early
-	// with 409 so a misbehaving client gets a clear error instead of an
-	// empty no-op. NB: designing is allowed because the in-flight design
-	// run might have produced a partial plan the user wants to discard.
-	// developing is deliberately excluded — the coding stage forks the
-	// design session, so a regenerate there would silently invalidate the
-	// coding run's premise.
+	// regenerate=true is reserved for the explicit 「重新生成方案」 CTA, which
+	// is only meaningful once a plan exists. Server-side whitelist: status
+	// must be {designing, designed, developing}; anything outside that set
+	// means the user either hit the button on a phase that doesn't support
+	// regenerating (draft / analyzing / done / archived) or the frontend's
+	// button guard let a stale state through. We reject early with 409 so a
+	// misbehaving client gets a clear error instead of an empty no-op.
+	//
+	// designing is allowed because the in-flight design run might have
+	// produced a partial plan the user wants to discard.
+	//
+	// developing is allowed too: the requirement is already designed and the
+	// user is asking for a fresh plan mid-development, which is exactly the
+	// "方案设计完成后仍需重新设计" case. The run lands back on 'designed'
+	// (developing→designed is a legal transition), so the new plan has to be
+	// re-approved before development continues; coding_session_id and the
+	// worktree are untouched, so continuing development afterwards resumes the
+	// same coding thread. done / archived stay excluded — reopening a
+	// finished requirement is a different (status-machine) decision.
 	if regenerate {
 		switch req.Status {
-		case "designing", "designed":
+		case "designing", "designed", "developing":
 			// allowed; fall through
 		default:
 			return nil, nil, fail(409, "INVALID_STATUS",
-				"重新生成仅在 designing / designed 状态下可用，当前状态: "+req.Status)
+				"重新生成仅在 designing / designed / developing 状态下可用，当前状态: "+req.Status)
 		}
 	}
 
@@ -567,6 +574,15 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	if req.ApplyJobID != "" && h.jobs.Live(req.ApplyJobID) {
 		return nil, nil, fail(409, "DESIGN_JOB_ACTIVE",
 			"微调对话正在更新方案，请等待完成后再重新生成")
+	}
+	// A regenerate launched while the coding stage is still running would
+	// rewrite design_docs (and design_session_id) underneath an in-flight
+	// coding job whose premise is the plan it forked from. Only reachable on
+	// the regenerate path — a first design pass can't overlap coding because
+	// the frontend gates it behind the developer stage.
+	if regenerate && req.CodingJobID != "" && h.jobs.Live(req.CodingJobID) {
+		return nil, nil, fail(409, "DESIGN_JOB_ACTIVE",
+			"开发任务正在执行，请等待完成或暂停开发后再重新生成方案")
 	}
 
 	// Freeze the current design plan as a version snapshot BEFORE the new

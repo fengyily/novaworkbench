@@ -4993,7 +4993,17 @@ export default function RequirementDetail() {
                   {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
                 </button>
               )}
-              {(req.status === 'designing' || req.status === 'designed') && hasDesign && (
+              {/* 「重新生成方案」 — available from the moment a plan exists.
+                  designing = a partial in-flight plan the user wants to throw
+                  away; designed = the finished plan they want a second take
+                  on; developing = the user already moved on to coding and is
+                  asking for a fresh plan (the run lands back on 'designed',
+                  so the new plan is re-approved before dev continues). done /
+                  archived stay excluded — reopening a finished requirement is
+                  a status-machine decision, not a regenerate. The backend
+                  mirrors this whitelist and additionally 409s while a coding
+                  job is live. */}
+              {(req.status === 'designing' || req.status === 'designed' || req.status === 'developing') && hasDesign && (
                 <button className="btn btn-sm" onClick={() => requestRegenerateDesign()} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
               )}
               {hasDesign && (

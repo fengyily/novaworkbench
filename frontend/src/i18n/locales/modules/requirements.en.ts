@@ -427,15 +427,16 @@ export const requirements = {
     // Architect-stage CTAs.
     processToggleHide: '▼ Hide thinking process',
     processToggleShow: '▶ Show thinking process',
-    regenerateBtn: 'Re-analyze & regenerate',
-    regenerateBtnTitle: 'Regenerate from the requirements analysis; the refinement conversation is not included',
+    regenerateBtn: 'Regenerate plan',
+    regenerateBtnTitle: 'Regenerate the design plan on a brand-new session; earlier refinement turns are not inherited',
     // 重新生成 confirm dialog (req_11e485759f583db8): shown after the
-    // user clicks "Re-analyze & regenerate". The body explains that the
+    // user clicks "Regenerate plan". The body explains that the
     // current plan will be FROZEN as a history version (not destroyed)
-    // and re-derived from the analyst session, so the existing
-    // doc-refine conversation is NOT carried over.
+    // and that a brand-new session produces the new plan, so the existing
+    // doc-refine conversation is NOT carried over. Wording deliberately
+    // avoids the analysis stage — it has been removed from the flow.
     regenerateConfirmTitle: 'Regenerate the design plan?',
-    regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). The new plan re-forks from the analyst session; the existing design session + refinement turns will not be inherited.',
+    regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). A brand-new session will generate a new plan; the existing design session + refinement turns will not be inherited.',
     regenerateConfirmYes: 'Regenerate',
     regenerateConfirmCancel: 'Cancel',
     // Version dropdown (req_11e485759f583db8): a per-requirement

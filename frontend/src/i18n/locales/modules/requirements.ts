@@ -449,14 +449,15 @@ export const requirements = {
     // Architect-stage CTAs.
     processToggleHide: '▼ 收起思考过程',
     processToggleShow: '▶ 思考过程',
-    regenerateBtn: '重新分析生成',
-    regenerateBtnTitle: '从需求分析重新开始生成方案，不包含微调对话内容',
-    // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新分析生成" 后
+    regenerateBtn: '重新生成方案',
+    regenerateBtnTitle: '以全新会话重新生成技术方案，此前的微调对话不会被继承',
+    // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新生成方案" 后
     // 看到的对话框,清楚说明旧方案会被冻结成历史版本而不是丢掉,避免「以
     // 为旧方案没了」的误操作。Cancel + Confirm 两个按钮,文案比浏览器原生
-    // confirm() 更可控也更好翻译。
+    // confirm() 更可控也更好翻译。文案刻意不提「需求分析」——该阶段已从
+    // 流程中移除,提了反而让人以为按钮属于已被下线的分析功能。
     regenerateConfirmTitle: '确认重新生成技术方案?',
-    regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并重新从需求分析开始生成新方案。本次会话与微调对话不会被继承。',
+    regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
     regenerateConfirmYes: '确认重新生成',
     regenerateConfirmCancel: '取消',
     // 版本下拉 (req_11e485759f583db8): 设计工具条上的版本选择器,只

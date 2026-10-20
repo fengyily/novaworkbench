@@ -574,13 +574,18 @@ func TestNonRegenerateStillResumesDesignSession(t *testing.T) {
 
 // TestRegenerateRejectsWrongStatus pins the status whitelist around
 // the regenerate field. A regenerate=true on anything outside
-// {designing, designed} returns 409 INVALID_STATUS. Server-side mirror
-// of the front-end's button guard: if a future UI bug lets a
-// regenerate CTA through on `developing` or `done`, the backend still
-// rejects so the coding context (which forks design) doesn't get
-// silently invalidated.
+// {designing, designed, developing} returns 409 INVALID_STATUS. Server-side
+// mirror of the front-end's button guard: if a future UI bug lets a
+// regenerate CTA through on `draft` / `done`, the backend still rejects so
+// the requirement isn't yanked out of a finished state.
 //
-// The two "allowed" statuses are pinned by TestRegenerateAllowsDesignedStatus
+// `developing` moved INTO the allow-list: the user reaching for a second
+// plan after design has already been handed off to development is the
+// primary "方案设计完成后仍需重新设计" case. The run lands back on
+// 'designed' (developing→designed is a legal transition), so the new
+// plan is re-approved before development continues.
+//
+// The allowed statuses are pinned by TestRegenerateAllowsPostDesignStatus
 // (which actually drives the full Snapshot path on a fresh fixture).
 // Splitting avoids cross-subtest pollution from the in-memory JobStore
 // (a successful allowed run mints a live design_job_id that subsequent
@@ -594,7 +599,6 @@ func TestRegenerateRejectsWrongStatus(t *testing.T) {
 	}{
 		{"draft", true},
 		{"analyzing", true},
-		{"developing", true},
 		{"done", true},
 		{"archived", true},
 	}
@@ -618,15 +622,15 @@ func TestRegenerateRejectsWrongStatus(t *testing.T) {
 	}
 }
 
-// TestRegenerateAllowsDesignedStatus pins the allow-list half of the
-// whitelist: status in {designing, designed} lets the call pass the
-// guard. We don't drive the full run (no real worktree / git fixture),
-// just assert that no INVALID_STATUS failure surfaces and the live-job
-// guard short-circuits the rest of the synchronous path with a
+// TestRegenerateAllowsPostDesignStatus pins the allow-list half of the
+// whitelist: status in {designing, designed, developing} lets the call
+// pass the guard. We don't drive the full run (no real worktree / git
+// fixture), just assert that no INVALID_STATUS failure surfaces and the
+// live-job guard short-circuits the rest of the synchronous path with a
 // downstream DESIGN_JOB_ACTIVE / worktree-related error rather than an
 // upstream whitelist one.
-func TestRegenerateAllowsDesignedStatus(t *testing.T) {
-	for _, status := range []string{"designing", "designed"} {
+func TestRegenerateAllowsPostDesignStatus(t *testing.T) {
+	for _, status := range []string{"designing", "designed", "developing"} {
 		t.Run(status, func(t *testing.T) {
 			d, reqID, h, _ := newRegenerateTestEnv(t)
 			if _, err := d.Exec(`UPDATE requirements SET status=?, design_docs='' WHERE id=?`, status, reqID); err != nil {
@@ -748,6 +752,45 @@ func TestArchitectDesignRejectsLiveApplyJob(t *testing.T) {
 	)
 	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
 		t.Fatalf("cleared apply_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
+	}
+}
+
+// TestArchitectDesignRejectsLiveCodingJob pins the third concurrency
+// guard: now that a regenerate is allowed from 'developing', it must not
+// race a coding run that is still streaming. The coding job forked from
+// the CURRENT plan, so rewriting design_docs / design_session_id
+// underneath it leaves both halves describing different requirements.
+func TestArchitectDesignRejectsLiveCodingJob(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if _, err := d.Exec(`UPDATE requirements SET status='developing', design_docs='existing' WHERE id=?`, reqID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	live := h.jobs.Create(reqID) // a live coding-job pointer
+	if uerr := reqSvc.UpdateCodingJob(reqID, live.ID); uerr != nil {
+		t.Fatalf("seed coding_job_id: %v", uerr)
+	}
+
+	_, _, af := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af == nil {
+		t.Fatalf("prepareArchitectDesign accepted regenerate while coding job alive — must reject")
+	}
+	if af.Code != "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("error code = %q, want DESIGN_JOB_ACTIVE", af.Code)
+	}
+
+	// Clear the live pointer; downstream failure (no worktree) is fine,
+	// but DESIGN_JOB_ACTIVE must no longer appear.
+	if uerr := reqSvc.UpdateCodingJob(reqID, ""); uerr != nil {
+		t.Fatalf("clear coding_job_id: %v", uerr)
+	}
+	_, _, af2 := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("cleared coding_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
 	}
 }
 
