@@ -21,7 +21,7 @@ import {
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
-import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import { RequirementTreeToggle, RequirementTreeChildMark, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
 import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
@@ -318,7 +318,7 @@ export default function RequirementsList() {
 
   // Wrapped for the mobile card, which has no dedicated cell of its own.
   const treeToggleInCell = (r: Requirement, depth: number) => (
-    <div className={`req-tree-cell${depth > 0 ? ' req-tree-guide' : ''}`}>
+    <div className="req-tree-cell">
       {treeToggle(r, depth)}
     </div>
   );
@@ -441,7 +441,7 @@ export default function RequirementsList() {
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
           onClick={() => navigate(`/requirements/${r.id}`)}
-          className={`req-row req-tree-row${depth > 0 ? ' req-row-child' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
+          className={`req-row req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${depth === 0 && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
           draggable
           onDragStart={e => onDragStart(e, r)}
           onDragEnd={endDrag}
@@ -449,8 +449,8 @@ export default function RequirementsList() {
           onDragLeave={() => dropId === r.id && setDropId(null)}
           onDrop={e => onRowDrop(e, r)}
         >
-          <td className={`req-tree-col${depth > 0 ? ` req-tree-guide${last ? ' req-tree-last' : ''}` : ''}${depth === 0 && open ? ' req-tree-open' : ''}`}>
-            {treeToggle(r, depth)}
+          <td className="req-tree-col">
+            {depth > 0 ? <RequirementTreeChildMark /> : treeToggle(r, depth)}
           </td>
           <td data-label={t('requirements.list.colType')}>
             {/* Priority dot folded INTO the Type cell, ahead of the
