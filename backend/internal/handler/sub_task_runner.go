@@ -404,6 +404,14 @@ type SubTaskRunner struct {
 	// working tree lives on the agent host, so a local run would edit a stale
 	// (or missing) checkout. Nil keeps every child local.
 	agentSvrSvc *service.AgentServerService
+	// attachSvc is used to inject the parent requirement's attachment
+	// manifest into the sub-task prompt so the child Claude can read the
+	// same evidence as the wizard stages. Optional — when nil the entire
+	// attachment-injection block is skipped, mirroring how WizardHandler
+	// guards against an un-wired service. Wired from main via
+	// SetAttachmentSvc so we don't have to grow NewSubTaskRunner's already
+	// long parameter list.
+	attachSvc *service.AttachmentService
 	// runSem caps the number of claude CLI subprocesses that may be alive
 	// at once ACROSS ALL PROJECTS — the process-wide OOM ceiling. Buffered
 	// channel used as a counting semaphore: every Run acquires a slot on entry
@@ -493,6 +501,17 @@ func NewSubTaskRunner(
 // always run locally).
 func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStreamOutcome) {
 	r.remoteCoding = fn
+}
+
+// SetAttachmentSvc injects the shared attachment service used to render the
+// parent requirement's attachment manifest into the sub-task prompt. Wired
+// by main right after SetRemoteCoding so the existing constructor
+// (NewSubTaskRunner) keeps its current parameter list. Passing nil
+// disables attachment injection — the child sees the same prompt the old
+// (pre-attachment) runner would have produced, which keeps tests that
+// construct SubTaskRunner by hand working unchanged.
+func (r *SubTaskRunner) SetAttachmentSvc(svc *service.AttachmentService) {
+	r.attachSvc = svc
 }
 
 // NewPendingSubTask is a convenience that performs the three pre-Run writes

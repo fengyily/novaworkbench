@@ -10,11 +10,6 @@ package handler
 
 import (
 	"context"
-	"log"
-	"path/filepath"
-	"strings"
-
-	gossh "github.com/novaworkbench/backend/internal/ssh"
 
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/llm"
@@ -170,63 +165,19 @@ func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 //
 // attachDir is the directory Claude should treat as the attachment root.
 // Local execution passes the local root; remote Agent-server execution
-// passes the synced mirror on the agent host (see syncAttachmentsToRemote).
+// passes the synced mirror on the agent host (see resolveAttachDirFor).
 // Passing "" falls back to the local root as a safe default.
 func (h *WizardHandler) attachManifestFor(reqID, attachDir string) string {
 	return attachManifestFor(h.attachSvc, reqID, attachDir)
-}
-
-// syncAttachmentsToRemote copies the requirement's attachments to the
-// named Agent Server (when remote execution is being used) and returns
-// the canonical remote directory Claude should treat as the attachment
-// root. Returns "" when there's nothing to sync, the service isn't
-// wired, or anything failed — callers fall back to the local path.
-//
-// The dial is intentionally short-lived (sync-then-close). The actual
-// claude subprocess later opens its own persistent SSH session via
-// runRemoteCoding / runRemoteArchitectDesign; sharing the connection
-// would couple those lifecycles in ways that have not been worth the
-// refactor yet. The sync cost is bounded: a single SFTP upload per file
-// whose sha256 has changed since the last successful sync (state lives
-// on agent_servers.attachment_sync_state).
-func (h *WizardHandler) syncAttachmentsToRemote(ctx context.Context, reqID, serverID string) string {
-	if h.attachSvc == nil || h.agentSvrSvc == nil {
-		return ""
-	}
-	if strings.TrimSpace(reqID) == "" || strings.TrimSpace(serverID) == "" {
-		return ""
-	}
-	srv, plain, err := h.agentSvrSvc.GetWithCredential(serverID)
-	if err != nil {
-		log.Printf("[wizard] attachment sync: agent_servers lookup %s failed: %v (using local paths)", serverID, err)
-		return ""
-	}
-	sshClient, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
-	if err != nil {
-		log.Printf("[wizard] attachment sync: SSH dial %s failed: %v (using local paths)", srv.Name, err)
-		return ""
-	}
-	defer sshClient.Close()
-	rd, err := h.attachSvc.SyncToAgentServer(ctx, serverID, sshClient, reqID)
-	if err != nil {
-		log.Printf("[wizard] attachment sync to %s failed: %v (using local paths)", srv.Name, err)
-		return ""
-	}
-	return rd
 }
 
 // resolveAttachDir returns the directory the wizard should pass into
 // attachManifestFor. Local runs get the local root; remote runs first
 // attempt a sync to the agent server and on success use the canonical
 // remote path, otherwise silently fall back to local paths so a
-// intermittent SSH error doesn't break the run.
+// intermittent SSH error doesn't break the run. Thin delegate to the
+// package-level resolveAttachDirFor so SubTaskRunner can share one
+// implementation without depending on WizardHandler.
 func (h *WizardHandler) resolveAttachDir(ctx context.Context, reqID, serverID string) string {
-	local := filepath.Join(service.AttachmentRoot(), reqID)
-	if strings.TrimSpace(serverID) == "" {
-		return local
-	}
-	if rd := h.syncAttachmentsToRemote(ctx, reqID, serverID); rd != "" {
-		return rd
-	}
-	return local
+	return resolveAttachDirFor(ctx, h.attachSvc, h.agentSvrSvc, reqID, serverID)
 }

@@ -492,9 +492,10 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// Append the per-requirement attachment manifest so the architect sees
 	// the same files the analyst did and can ground the design on real
 	// evidence (logs / specs / repro screenshots). When the user picked an
-	// Agent Server for the design stage, syncAttachmentsToRemote copies
-	// every file over to ~/.nova/attachments/<req_id>/ first; on sync
-	// failure the prompt silently falls back to local paths.
+	// Agent Server for the design stage, resolveAttachDir (which delegates
+	// to the package-level resolveAttachDirFor) copies every file over to
+	// ~/.nova/attachments/<req_id>/ first; on sync failure the prompt
+	// silently falls back to local paths.
 	attachDir := h.resolveAttachDir(context.Background(), requirementID, agentServerID)
 	if m := h.attachManifestFor(requirementID, attachDir); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m

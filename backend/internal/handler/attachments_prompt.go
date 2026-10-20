@@ -1,8 +1,12 @@
 package handler
 
 import (
+	"context"
+	"log"
 	"path/filepath"
 	"strings"
+
+	gossh "github.com/novaworkbench/backend/internal/ssh"
 
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -31,4 +35,46 @@ func attachManifestFor(svc *service.AttachmentService, ownerID, attachDir string
 		attachDir = filepath.Join(service.AttachmentRoot(), ownerID)
 	}
 	return svc.BuildManifest(ownerID, attachDir)
+}
+
+// resolveAttachDirFor returns the directory the caller should pass into
+// attachManifestFor for the given execution context.
+//
+//   - Local execution (serverID == ""): returns the local attachment root
+//     for the owner (~/.novaworkbench/attachments/<reqID>).
+//   - Remote Agent-server execution: opens a short-lived SSH/SFTP session
+//     and reconciles the owner's attachments into the agent host's mirror
+//     (~/.nova/attachments/<reqID>) via AttachmentService.SyncToAgentServer.
+//     On success the canonical remote directory is returned; on any failure
+//     (missing dep, agent_servers lookup error, SSH dial error, sync error)
+//     we log and silently fall back to the local directory so an
+//     intermittent remote hiccup never breaks a wizard / sub-task run.
+//
+// Package-level so SubTaskRunner (no WizardHandler dep — would cycle) can
+// share one implementation. WizardHandler.resolveAttachDir delegates here.
+func resolveAttachDirFor(ctx context.Context, attachSvc *service.AttachmentService, agentSvrSvc *service.AgentServerService, reqID, serverID string) string {
+	local := filepath.Join(service.AttachmentRoot(), reqID)
+	if strings.TrimSpace(reqID) == "" || strings.TrimSpace(serverID) == "" {
+		return local
+	}
+	if attachSvc == nil || agentSvrSvc == nil {
+		return local
+	}
+	srv, plain, err := agentSvrSvc.GetWithCredential(serverID)
+	if err != nil {
+		log.Printf("[attachments] remote attach-dir lookup %s failed: %v (using local paths)", serverID, err)
+		return local
+	}
+	sshClient, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		log.Printf("[attachments] remote attach-dir SSH dial %s failed: %v (using local paths)", srv.Name, err)
+		return local
+	}
+	defer sshClient.Close()
+	rd, err := attachSvc.SyncToAgentServer(ctx, serverID, sshClient, reqID)
+	if err != nil {
+		log.Printf("[attachments] remote attach-dir sync to %s failed: %v (using local paths)", srv.Name, err)
+		return local
+	}
+	return rd
 }
