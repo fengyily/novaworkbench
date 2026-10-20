@@ -578,7 +578,9 @@
   }
 
   /* Sub-requirements (mobile): toggle sits beside the card; children indent
-     16px with a 2px guide line. Same card styling as top-level cards. */
+     12px with a 3px group rail and the card itself picks up the same
+     tinted background as the desktop group block. Same card styling as
+     top-level cards. */
   .req-card-mobile-wrap {
     display: flex;
     align-items: flex-start;
@@ -594,10 +596,15 @@
     margin-top: 12px;
   }
   .req-card-mobile-child {
-    margin-left: 16px;
-    border-left: 2px solid var(--color-border);
+    /* wrap 上的轨道：桌面端色轨的移动端对应物 */
+    margin-left: 12px;
+    border-left: 3px solid var(--req-group-rail, var(--color-border, #E2E8F0));
     padding-left: 8px;
   }
+  /* tint 落在卡片本体（wrap 会被卡片的不透明白底盖住），
+     但保留卡片自己的 kind 色左边框 */
+  .req-card-mobile-child .req-card-mobile { background: var(--req-group-bg); }
+  .req-card-mobile-child .req-card-mobile:hover { background: var(--req-group-bg-hover); }
 }
 
 /* ── Master / sub-requirement hierarchy (desktop) ───────────────────── */
@@ -631,8 +638,9 @@
   outline-offset: -2px;
   background: var(--color-active);
 }
-
-.req-row-child { background: var(--color-bg); }
+/* drop-target 的 background 原本画在 tr 上，会被分组行的 td 底色盖住，
+   这里补一份 td 版本。outline 由 tr 的盒子绘制，不受影响。 */
+.req-row.drop-target > td { background: var(--color-active); }
 
 .req-dropout {
   height: 44px;

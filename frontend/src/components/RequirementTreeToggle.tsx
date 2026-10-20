@@ -12,6 +12,11 @@
 //                sub-requirement" picker. Drawn as a `+` glyph to make
 //                it discoverable (an idle chevron at #CBD5E1 read as a
 //                rendering artifact before this split).
+//
+// Child rows render nothing in their leading column: the directory-tree
+// connector (elbow + vertical run) is drawn there by CSS pseudo-elements
+// on the cell itself — see the "Tree line" section of
+// RequirementTreeToggle.css.
 
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';

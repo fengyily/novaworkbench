@@ -12,7 +12,7 @@
                                        reads as a rendering artifact)
 
    The whole tree column is 32px so the chevron (centered at x=16px)
-   and the elbow guide line below it share the same axis. */
+   and the tree line running below it share the same axis. */
 
 .req-tree-toggle {
   position: relative;
@@ -65,7 +65,7 @@
 }
 
 /* Dedicated leading tree column on desktop tables. Widened 28px → 32px
-   so the chevron (centered at x=16px) and the elbow guide below it
+   so the chevron (centered at x=16px) and the tree line below it
    share the same axis; max-width is set so a long content in another
    column can't squeeze this one narrower. */
 td.req-tree-col,
@@ -85,67 +85,109 @@ td.req-tree-col .req-tree-spacer {
   margin: 0 auto;
 }
 
-/* Child-row guide — an elbow plus a downward run, drawn inside the
-   leading column and sharing the chevron's axis (left:50% of the 32px
-   column = x 16px). Nothing here is measured in row height: a row grows
-   to two lines when the title is long or a tag strip wraps, so every
-   segment is anchored to top / 50% / bottom instead.
+/* Group visual tokens. .req-tree-row is shared by both requirement tables
+   AND by the mobile card wrap, so the tokens cascade naturally without a
+   global :root rule. `--req-group-base` is overridden per-table in
+   ProjectDetail.css because .pr-table sits bare on --color-bg(#F8FAFC)
+   while .req-table sits inside .req-table-wrap on --color-surface(#FFF).
 
-   - non-last child: ::before draws the elbow (border L-shape, left +
-     bottom, rounded lower-left corner so the turn doesn't look sharp),
-     ::after continues from the mid-line to the row bottom so the next
-     sibling hangs off the same vertical run.
-   - last child (.req-tree-last): the elbow only — ::after is suppressed
-     so the branch terminates instead of trailing to the row edge.
-   - expanded master (.req-tree-open): a stub from the chevron's mid-line
-     to the row bottom so the parent and its first child read as one
-     connected branch.
-   1px at --color-border-strong — an undeclared token that always falls
-   back to #CBD5E1, same call the previous rules made. pointer-events:
-   none keeps the guide from stealing drag/drop events on the row. */
-.req-tree-col.req-tree-guide::before {
+   `--color-border-muted` is undeclared (only used with fallback at
+   index.css:367), so it gets an explicit fallback here too. */
+.req-tree-row {
+  --req-group-base: var(--color-surface, #fff);
+  --req-group-bg: color-mix(in srgb, var(--color-primary) 4%, var(--req-group-base));
+  --req-group-bg-hover: color-mix(in srgb, var(--color-primary) 9%, var(--req-group-base));
+  --req-group-rail: color-mix(in srgb, var(--color-primary) 38%, var(--req-group-base));
+  --req-group-line: color-mix(in srgb, var(--color-primary) 45%, var(--req-group-base));
+  --req-group-edge: var(--color-border, #E2E8F0);
+}
+
+/* Group block — one master plus its children reads as a single tinted
+   unit, exactly like a folder in a file tree.
+
+   Everything lives on <td>: tr-level backgrounds paint BEHIND td
+   backgrounds, so any hover or drop-target background must be
+   re-declared on td too.
+
+   Specificity checks (must beat the resting rules they override):
+   - tr.req-tree-row-open > td (0,2,2) beats index.css .req-table tbody
+     td (0,1,2) and ProjectDetail.css .pr-table td (0,1,1).
+   - tr.req-tree-row-last > td (0,3,2) beats the rules above.
+
+   NO row divider is drawn anywhere inside the block — not between the
+   master and its first child, not between siblings. That is what lets the
+   tree line below run unbroken: a divider spanning the full row width
+   would be crossed by the gutter's vertical run at x=16px, which is
+   exactly the tangle this visual was rebuilt to avoid. The block is
+   delimited by its tint and closed by a single edge under the last row. */
+tr.req-tree-row-open > td,
+tr.req-tree-row-child > td { background: var(--req-group-bg); }
+tr.req-tree-row-open:hover > td,
+tr.req-tree-row-child:hover > td { background: var(--req-group-bg-hover); }
+tr.req-tree-row-open > td,
+tr.req-tree-row-child > td { border-bottom-color: transparent; }
+tr.req-tree-row-last > td { border-bottom-color: var(--req-group-edge); }
+
+/* ── Tree line ───────────────────────────────────────────────────
+   A directory-tree connector on the gutter axis (left:50% of the 32px
+   column = x 16px, the chevron's own centre):
+
+        ▾ master
+        │
+        ├── child 1
+        ├── child 2
+        └── child 3
+
+   - master (expanded): a stub from the chevron's mid-line to the row
+     edge, so the parent and its first child read as one branch.
+   - child: a full-height vertical run plus an elbow at mid-line. The
+     run is dropped on the last child so the branch terminates there.
+
+   Every segment is anchored to top / 50% / bottom rather than a fixed
+   height, so a title that wraps to two lines never distorts them, and
+   the runs overhang the row edge by 1px (top/bottom: -1px) so adjacent
+   rows join seamlessly across the shared (transparent) border instead
+   of showing a dashed seam. */
+tr.req-tree-row-open > td.req-tree-col::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  bottom: -1px;
+  width: 1px;
+  background: var(--req-group-line);
+  pointer-events: none;
+}
+tr.req-tree-row-child > td.req-tree-col::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--req-group-line);
+  pointer-events: none;
+}
+/* Last child — the run stops; its own elbow is the end of the branch. */
+tr.req-tree-row-last > td.req-tree-col::before { content: none; }
+tr.req-tree-row-child > td.req-tree-col::after {
   content: '';
   position: absolute;
   left: 50%;
   top: 0;
   height: 50%;
-  width: 14px;
-  border-left: 1px solid var(--color-border-strong, #CBD5E1);
-  border-bottom: 1px solid var(--color-border-strong, #CBD5E1);
-  border-bottom-left-radius: 6px;
-  pointer-events: none;
-}
-.req-tree-col.req-tree-guide::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  bottom: 0;
-  width: 1px;
-  background: var(--color-border-strong, #CBD5E1);
-  pointer-events: none;
-}
-/* Last child — the branch terminates: no downward run. */
-.req-tree-col.req-tree-guide.req-tree-last::after { content: none; }
-/* Expanded master — stub from below the chevron down to the row edge,
-   meeting the first child's vertical run. */
-.req-tree-col.req-tree-open::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  bottom: 0;
-  width: 1px;
-  background: var(--color-border-strong, #CBD5E1);
+  width: 16px;
+  border-left: 1px solid var(--req-group-line);
+  border-bottom: 1px solid var(--req-group-line);
+  border-bottom-left-radius: 5px;
   pointer-events: none;
 }
 
-/* Children get a tiny extra indent on the title so the content visually
-   nestles inside the guide, not just sits in line with it. */
-.req-tree-child-title { padding-left: 12px; }
-
-/* Row tint to reinforce the hierarchy without competing with the guide. */
-.req-tree-row-child { background: var(--color-bg); }
+/* Children sit one indent in, so the title steps right of the master's.
+   Scoped to `tr…> td` because the bare class loses to the table's own
+   cell padding (`.req-table tbody td` = 0,1,2 beats 0,1,0) — which is
+   why the indent silently never applied. */
+tr.req-tree-row-child > td.req-tree-child-title { padding-left: 20px; }
 
 /* "Attach a sub-requirement" — the affordance only this master has none.
    Drawn as a `+` (not a chevron): it answers a different question than
