@@ -796,6 +796,9 @@ export const requirements = {
     sizeLimit: '单文件最大 2 GB',
     archiveEntries: '共 {{count}} 个条目,{{size}} 解压后',
     archiveBadge: '📦 压缩包',
+    insertRef: '引用',
+    insertRefHint: '插入引用到光标位置',
+    refInsert: '[附件：{{name}}]',
   },
   tree: {
     expand: '展开子需求',

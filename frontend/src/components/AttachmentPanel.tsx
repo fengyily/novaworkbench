@@ -27,6 +27,12 @@ interface Props {
   ownerId: string;
   /** Which backend collection owns the files. Defaults to requirements. */
   resource?: AttachmentResource;
+  /** When provided, each uploaded attachment row shows a "cite" button that
+   *  calls this with (filename, id) so the parent can insert a reference. */
+  onInsertRef?: (filename: string, id: string) => void;
+  /** Compact mode: hide the header and collapse the dropzone to a single
+   *  small button row — suitable for embedding inside a creation form. */
+  compact?: boolean;
 }
 
 interface PendingUpload {
@@ -55,7 +61,7 @@ function archiveUncompressedSize(a: Attachment): string | null {
   return m ? m[1] : null;
 }
 
-export default function AttachmentPanel({ ownerId, resource = 'requirements' }: Props) {
+export default function AttachmentPanel({ ownerId, resource = 'requirements', onInsertRef, compact = false }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<Attachment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -169,12 +175,14 @@ export default function AttachmentPanel({ ownerId, resource = 'requirements' }: 
 
   return (
     <div className="attachment-panel">
-      <div className="attachment-panel__header">
-        <div>
-          <div className="attachment-panel__title">{t('requirements.attachment.sectionTitle')}</div>
-          <div className="attachment-panel__hint">{t('requirements.attachment.sectionHint')}</div>
+      {!compact && (
+        <div className="attachment-panel__header">
+          <div>
+            <div className="attachment-panel__title">{t('requirements.attachment.sectionTitle')}</div>
+            <div className="attachment-panel__hint">{t('requirements.attachment.sectionHint')}</div>
+          </div>
         </div>
-      </div>
+      )}
 
       {error && (
         <div className="attachment-panel__error" role="alert" onClick={() => setError(null)}>
@@ -183,24 +191,44 @@ export default function AttachmentPanel({ ownerId, resource = 'requirements' }: 
       )}
 
       {/* picker / dropzone */}
-      <div
-        className={`attachment-panel__dropzone ${dragging ? 'is-dragging' : ''}`}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
-        onClick={onPickClick}
-      >
-        <div className="attachment-panel__dropzone-icon">📎</div>
-        <div className="attachment-panel__dropzone-hint">{t('requirements.attachment.dragDropHint')}</div>
-        <div className="attachment-panel__dropzone-limit">{t('requirements.attachment.sizeLimit')}</div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          style={{ display: 'none' }}
-          onChange={onFileInputChange}
-        />
-      </div>
+      {compact ? (
+        <div
+          className={`attachment-panel__dropzone--compact ${dragging ? 'is-dragging' : ''}`}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={onPickClick}
+        >
+          <span className="attachment-panel__compact-icon">📎</span>
+          <span className="attachment-panel__compact-label">{t('requirements.attachment.uploadBtn')}</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={onFileInputChange}
+          />
+        </div>
+      ) : (
+        <div
+          className={`attachment-panel__dropzone ${dragging ? 'is-dragging' : ''}`}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={onPickClick}
+        >
+          <div className="attachment-panel__dropzone-icon">📎</div>
+          <div className="attachment-panel__dropzone-hint">{t('requirements.attachment.dragDropHint')}</div>
+          <div className="attachment-panel__dropzone-limit">{t('requirements.attachment.sizeLimit')}</div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={onFileInputChange}
+          />
+        </div>
+      )}
 
       {/* queue — staged uploads not yet committed */}
       {pending.length > 0 && (
@@ -268,6 +296,16 @@ export default function AttachmentPanel({ ownerId, resource = 'requirements' }: 
                   </a>
                   <span className="attachment-panel__size">{formatSize(a.size_bytes)}</span>
                   <span className="attachment-panel__row-actions">
+                    {onInsertRef && (
+                      <button
+                        type="button"
+                        className="attachment-panel__insert-ref"
+                        onClick={() => onInsertRef(a.filename, a.id)}
+                        title={t('requirements.attachment.insertRefHint') ?? ''}
+                      >
+                        {t('requirements.attachment.insertRef')}
+                      </button>
+                    )}
                     <button type="button" onClick={() => onDelete(a)} title={t('requirements.attachment.delete') ?? ''}>
                       🗑
                     </button>
