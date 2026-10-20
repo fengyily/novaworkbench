@@ -194,6 +194,22 @@ Beyond the linear stages: **Sub-task 自动编排** — coding 阶段后,Claude 
 
 The gates map to status transitions: `draft → analyzing` (enter analyst chat) → `designing` (architect-design) → `designed` (manual 方案完成) → `developing` (start-coding) → `done` (manual 开发完成,触发 auto commit-push-PR).
 
+#### 子需求方案参考主需求 (`prompt/parent_context.go` + `handler/wizard_architect.go`)
+
+`requirements.parent_id` 是**仅一层、同项目**的父子嵌套。子需求做 `architect-design` 时原本只看得到自己的标题/描述/附件,主需求里已定的方案、规格、日志、截图全部不可见 —— 于是子需求方案要么与主需求冲突,要么重复设计。`BuildParentContextBlock` 补上这一段,但它是**输入 + 输出**两层:
+
+- **输入层**:`buildParentBlock`(在 `prepareArchitectDesign` 里同步构造,与自身的 attachment manifest 并列)读主需求 → 校验「存在 + 同项目 + 自身非子需求」→ 用 `resolveAttachDir` 解析附件目录(远端执行会把主需求附件同步到该 Agent Server 自己按 `parent_id` 分的目录,与子需求互不覆盖)→ 渲染成 `## 主需求参考（本需求是其子需求）`。描述截断 4KB、方案截断 16KB,**按 rune 截**(按字节会劈开中文字符产生乱码);`design_docs` 为空或遗留 `"[]"` 一律按「主需求尚无方案」处理;附件清单自带的 `## 📎 已附加文件` 标题被改写成 `#### 主需求的附件`,否则父子两个同名清单模型分不清谁的附件是谁的。
+- **输出层**:块里同时写死契约,要求方案必须含 `## 主需求关联上下文`(`prompt.ParentContextHeading`)章节,固定四个三级小节(来源 / 继承的约束与决策 / 分工边界 / 相关附件)。**为什么必须提炼进子需求自己的方案**:下游只读子需求自己的 `design_docs` —— `wizard_coding.go` / `wizard_coding_plan.go` 的 `effectiveDesignDocs`、`wizard_subtask.go` 拆子任务、`wizard_docs.go` 的 refine/apply,都不去读主需求。提炼一旦进了 `design_docs`,这些链路**一行都不用改**就带上了主需求上下文,子需求方案因此自包含。
+
+几处不显然的取舍:
+
+- **放用户 prompt 而非 system prompt**:system prompt 已经承载子需求自己的附件清单;而且 design 阶段经常是 `--resume` 分析会话或带 `DesignContextSummary` 的全新会话,两者都没见过主需求 —— prompt 才是每轮必带的位置。本地 claude 与远端 worker 共用 `p.Prompt`,所以 `wizard_remote.go` 无需改动。
+- **追加点只有一处**:`prepareDesignWorkspace` 在三个 prompt 分支(analyst resume / skip-analysis 全新 / 带 `DesignContextSummary` 前缀)**之后**统一 append,而不是抄进三个分支(抄三遍必然漂移)。
+- **prompt 契约是软保证,落库校验是硬保证**:`finalizeArchitectRun` 在 `UpdateDesign` 前调 `HasParentContextSection`,缺失就往 job 流打一条 `phase` 告警并在方案末尾追加 `BuildParentContextFallback(p.Parent)`,**不自动重跑**(省一轮 token)。`HasParentContextSection` 是围栏感知(fenced block 里引用章节不算)+ 严格二级(`###` 不算),宁可漏判(多一段附录)也不能误判(静默丢掉主需求上下文)。附录标题是 `## 主需求关联上下文（自动附录）`,仍满足 `HasParentContextSection`,所以**粘得住**,refine 不会反复追加。
+- **refine / apply 保护**:`parentContextKeepRule` 在 `req.ParentID != ""` 且文档确实含该章节时,给 refine / apply 的 prompt 追加保留规则 —— 否则模型会把它当「对话里没提过的冗余」删掉。文档里没这节时不追加规则(让模型保留一个不存在的章节,只会诱发它凭空编一节)。`doc_type == "coding"` 路径不受影响。
+- **一切失败降级为「无父需求」**,绝不阻塞设计(与 `roleConfig` 的「broken config 不阻塞」同构):主需求被删、跨项目、主需求自身也是子需求(防御性复查,仅一层由 schema 保证)都只记日志返回空。`ParentBlock == ""` 时 prompt 与落库行为**逐字不变**,由单测钉住。
+- 存量子需求的旧方案不含该章节,重新设计或 refine 后才产生,**不做批量回填**。主需求后续再改也不会自动同步(自包含的代价),要更新就重跑设计或在 refine 里让模型重新提炼。
+
 ### Preflight (`internal/preflight/`)
 
 `preflight.New(CLAUDE_BIN)` builds a registry of runtime deps (`claude`, `node`, `npm`, `git`, `docker`) — `claude`/`node`/`npm` are required, `git`/`docker` are optional (docker enables the runner's compose sessions). `Registry.CheckAll` is network-free (LookPath + `--version`, 5s timeout); runs at startup, never halts the server. Surfaced at `GET /api/preflight` and folded into `/api/health` (`ready` flag = claude installed).

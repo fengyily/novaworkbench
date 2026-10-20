@@ -26,6 +26,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -401,6 +402,9 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			"完整列出每一个修改点的具体内容（包含涉及的表/字段/接口/逻辑），不要中途截断或留空。" +
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
 	}
+	if req.DocType == "design" {
+		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
+	}
 
 	skillText := req.UserMessage
 	if requirement != nil {
@@ -759,6 +763,11 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				"  \"risks\": [\"实现风险\"]\n" +
 				"}"
 		}
+		// Re-emit (not merely preserve) the parent-context section on the apply
+		// pass. Apply rewrites the whole doc from the conversation, so without
+		// this a legacy-JSON → plan-markdown conversion could drop the section
+		// that the design run had appended.
+		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
 	}
 
 	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
@@ -929,6 +938,28 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 // for adjust-coding — it keeps execution consistent with the environment
 // the doc actually lives in, and avoids silently re-pointing a running
 // requirement to a different host.
+// parentContextKeepRule returns the retain-the-parent-section instruction for
+// a refine / apply prompt, or "" when the rule doesn't apply.
+//
+// Both conditions matter. DocType is gated by the caller (the coding path
+// produces a plain-text dev instruction with no sections to preserve), and the
+// doc must actually carry the section: telling a model to preserve a section
+// that isn't there just invites it to invent one.
+//
+// Why this exists at all: refine rewrites the doc from scratch each turn, and
+// the 「主需求关联上下文」 section looks like context the conversation never
+// discussed — exactly the kind of thing a model prunes as redundant. The rule
+// makes it load-bearing instead.
+func parentContextKeepRule(req *model.Requirement, doc string) string {
+	if req == nil || strings.TrimSpace(req.ParentID) == "" {
+		return ""
+	}
+	if !promptpkg.HasParentContextSection(doc) {
+		return ""
+	}
+	return promptpkg.ParentContextKeepRule()
+}
+
 func stageAgentServerID(req *model.Requirement, docType string) string {
 	switch docType {
 	case "design":
