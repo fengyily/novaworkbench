@@ -26,6 +26,7 @@ import AtMentionTextarea from '../AtMentionTextarea';
 import MarkdownRender from '../MarkdownRender';
 import { useAttachmentUpload, type UploadTask } from './useAttachmentUpload';
 import { rewriteNovaLinks } from './rewriteNovaLinks';
+import { extractImageFiles, extractImageFilesFromList, spliceAt } from './imageIngest';
 import './RichDescriptionEditor.css';
 
 export interface RichDescriptionEditorHandle {
@@ -50,46 +51,8 @@ export interface RichDescriptionEditorProps {
 
 type Mode = 'edit' | 'preview';
 
-const IMAGE_MIME_PREFIX = 'image/';
-
-function extractImageFiles(items: DataTransferItemList | null): File[] {
-  if (!items) return [];
-  const out: File[] = [];
-  for (let i = 0; i < items.length; i += 1) {
-    const it = items[i];
-    if (it.kind !== 'file') continue;
-    if (!it.type.startsWith(IMAGE_MIME_PREFIX)) continue;
-    const f = it.getAsFile();
-    if (f) out.push(f);
-  }
-  return out;
-}
-
-function extractImageFilesFromList(files: FileList | null): File[] {
-  if (!files) return [];
-  const out: File[] = [];
-  for (let i = 0; i < files.length; i += 1) {
-    const f = files[i];
-    if (f.type.startsWith(IMAGE_MIME_PREFIX)) out.push(f);
-  }
-  return out;
-}
-
-/** Splice `text` into `value` at the given cursor/selection range, return
- *  the new value and the post-insert cursor position (immediately after the
- *  inserted text). */
-function spliceAt(
-  value: string,
-  start: number,
-  end: number,
-  text: string,
-): { next: string; cursor: number } {
-  return {
-    next: value.slice(0, start) + text + value.slice(end),
-    cursor: start + text.length,
-  };
-}
-
+// extractImageFiles / extractImageFilesFromList / spliceAt live in
+// ./imageIngest — the sub-task composer pastes through the same helpers.
 const RichDescriptionEditor = forwardRef<RichDescriptionEditorHandle, RichDescriptionEditorProps>(function RichDescriptionEditor({
   value,
   onChange,

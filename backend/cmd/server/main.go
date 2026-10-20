@@ -327,6 +327,7 @@ func main() {
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
+	subTaskRunner.SetAttachmentSvc(attachmentSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
 	// its Create handler can dispatch the optional 启动计划 (immediate wizard
 	// run / scheduled task) atomically. See requirement_launch.go and

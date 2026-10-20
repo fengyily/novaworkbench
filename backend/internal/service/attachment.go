@@ -323,12 +323,19 @@ func (s *AttachmentService) TotalSize(ownerID string) (int64, error) {
 // Each entry renders as:
 //
 //	### <n>. <filename>  (<size>)
-//	**用户描述**：<description>          (omitted when blank)
-//	**位置**：`<attach_dir>/<filename>`  (always shown)
+//	**用户描述**：<description>                 (omitted when blank)
+//	**位置**：`<attach_dir>/<stored_basename>`  (always shown)
 //	```
-//	<manifest_text>                       (only for archives — empty otherwise)
+//	<manifest_text>                              (only for archives — empty otherwise)
 //	```
-//	_(用户未写描述)_                      (only when description is blank)
+//	_(用户未写描述)_                             (only when description is blank)
+//
+// `stored_basename` is the on-disk file name, shaped like
+// `<att_id>__<sha8>__<safe_name>` (see Upload below — the file is RENAMED
+// from the user-supplied filename to that prefixed form before being moved
+// into the per-requirement directory). It is NOT the `filename` column; using
+// the bare original name would point Claude's Read tool at a path that
+// doesn't exist on disk.
 //
 // Callers pass attachDir = the directory the LLM should treat as root (local
 // exec → ~/.novaworkbench/attachments/<req_id>; remote → synced mirror on
@@ -349,7 +356,7 @@ func (s *AttachmentService) BuildManifest(ownerID, attachDir string) string {
 		} else {
 			b.WriteString("**用户描述**：_(用户未写描述,请根据文件名 / Read 后内容自行判断用途)_\n")
 		}
-		fmt.Fprintf(&b, "**位置**：`%s`\n", filepath.Join(attachDir, a.Filename))
+		fmt.Fprintf(&b, "**位置**：`%s`\n", filepath.Join(attachDir, filepath.Base(filepath.FromSlash(a.StoredPath))))
 		if strings.TrimSpace(a.ManifestText) != "" {
 			fmt.Fprintf(&b, "\n```\n%s\n```\n", strings.TrimRight(a.ManifestText, "\n"))
 		}

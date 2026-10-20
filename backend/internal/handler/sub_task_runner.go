@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -404,6 +405,14 @@ type SubTaskRunner struct {
 	// working tree lives on the agent host, so a local run would edit a stale
 	// (or missing) checkout. Nil keeps every child local.
 	agentSvrSvc *service.AgentServerService
+	// attachSvc is used to inject the parent requirement's attachment
+	// manifest into the sub-task prompt so the child Claude can read the
+	// same evidence as the wizard stages. Optional — when nil the entire
+	// attachment-injection block is skipped, mirroring how WizardHandler
+	// guards against an un-wired service. Wired from main via
+	// SetAttachmentSvc so we don't have to grow NewSubTaskRunner's already
+	// long parameter list.
+	attachSvc *service.AttachmentService
 	// runSem caps the number of claude CLI subprocesses that may be alive
 	// at once ACROSS ALL PROJECTS — the process-wide OOM ceiling. Buffered
 	// channel used as a counting semaphore: every Run acquires a slot on entry
@@ -493,6 +502,17 @@ func NewSubTaskRunner(
 // always run locally).
 func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStreamOutcome) {
 	r.remoteCoding = fn
+}
+
+// SetAttachmentSvc injects the shared attachment service used to render the
+// parent requirement's attachment manifest into the sub-task prompt. Wired
+// by main right after SetRemoteCoding so the existing constructor
+// (NewSubTaskRunner) keeps its current parameter list. Passing nil
+// disables attachment injection — the child sees the same prompt the old
+// (pre-attachment) runner would have produced, which keeps tests that
+// construct SubTaskRunner by hand working unchanged.
+func (r *SubTaskRunner) SetAttachmentSvc(svc *service.AttachmentService) {
+	r.attachSvc = svc
 }
 
 // NewPendingSubTask is a convenience that performs the three pre-Run writes
@@ -939,6 +959,20 @@ func (r *SubTaskRunner) Run(
 		job.Append(store.LogLine{Type: "message", Content: "🪶 简洁模式：本子任务直接执行，不生成三段式报告。"})
 	}
 
+	// 附件清单：本次执行要交给 Claude 的附件根目录。远端执行先把附件同步到
+	// Agent Server 再用远端目录；同步失败静默回退本地路径（resolveAttachDirFor 内部处理）。
+	goesRemote := effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil
+	remoteID := ""
+	if goesRemote { remoteID = effectiveServerID }
+	attachDir := resolveAttachDirFor(context.Background(), r.attachSvc, r.agentSvrSvc, req.ID, remoteID)
+	// body 里 `nova://attachment/<id>` 占位符换成该附件在本次执行环境下的真实
+	// 绝对路径，避免 AI 拿到无法解析的 URI（前端无法在 prompt 里写绝对磁盘路径，
+	// 所以用占位符 + 后端改写这一步）。必须在 `var prompt string`（prompt 与 body
+	// 拼接）之前；body 是值参数，重赋值仅作用于本 goroutine。
+	if r.attachSvc != nil && strings.TrimSpace(req.ID) != "" {
+		body = rewriteAttachmentMarkers(r.attachSvc, req.ID, attachDir, body)
+	}
+
 	var prompt string
 	switch {
 	case !fork:
@@ -961,6 +995,13 @@ func (r *SubTaskRunner) Run(
 	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
 	// rule). Push-pr children get forPR=true so they also see PRLangRules.
 	prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
+	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
+	// 因此需判空后再追加——未满足时 prompt 与改动前逐字节一致。必须拼到 user prompt
+	// 而非 systemPrompt：bare 模式会把 systemPrompt 强制置空。
+	if m := attachManifestFor(r.attachSvc, req.ID, attachDir); m != "" {
+		prompt += "\n" + m
+		job.Append(store.LogLine{Type: "message", Content: "📎 已注入需求附件清单，AI 可直接 Read 查看。"})
+	}
 	// Bare ("新会话（裸 claude）") path: skip --resume, skip parent context
 	// injection, skip the executor role system prompt — invoke claude with
 	// only the user's free-text body. Takes priority over freshSession so
@@ -1062,7 +1103,7 @@ func (r *SubTaskRunner) Run(
 	// success, so the requirement's branch stays the single source of truth.
 	// This covers every child dispatch that goes through Run: manual sub-tasks,
 	// orchestrated children, and the merge push+PR sub-task.
-	if effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
+	if goesRemote {
 		// Fresh-session path on the remote: pass freshSession=true so
 		// wizard_remote skips SFTP upload entirely and drops --resume
 		// / --fork-session from the worker argv. The session id we

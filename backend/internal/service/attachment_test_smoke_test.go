@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/novaworkbench/backend/internal/db"
@@ -46,4 +47,71 @@ func getFirstReqID(t *testing.T, d *db.DB) string {
 		t.Fatalf("read req: %v", err)
 	}
 	return id
+}
+
+// TestBuildManifestUsesStoredPathBasename pins down the on-disk filename
+// contract: BuildManifest's `**位置**:` line must print the `stored_path`
+// basename (which carries the `<att_id>__<sha8>__<safe_name>` prefix that
+// Upload enforces), NOT the bare `filename` column. A previous version of
+// the function used `a.Filename` and produced paths that did not exist on
+// disk, so Claude's Read tool failed to open any pasted image.
+//
+// Hermetic: spins up a fresh sqlite DB under t.TempDir, inserts one project
+// + requirement + attachment row, then asserts the rendered manifest.
+func TestBuildManifestUsesStoredPathBasename(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "t.db")})
+	if err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	defer d.Close()
+
+	if _, err := d.Exec(
+		`INSERT INTO projects (id, name, local_path) VALUES (?, ?, ?)`,
+		"proj_manifest", "manifest test", filepath.Join(dir, "proj"),
+	); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := d.Exec(
+		`INSERT INTO requirements (id, project_id, kind, title, description, status) VALUES (?, ?, ?, ?, ?, ?)`,
+		"req_x", "proj_manifest", "feature", "manifest test req", "desc", "draft",
+	); err != nil {
+		t.Fatalf("seed requirement: %v", err)
+	}
+	// The interesting row: stored_path carries the hash prefix; filename does not.
+	if _, err := d.Exec(`
+		INSERT INTO requirement_attachments
+		  (id, requirement_id, filename, stored_path, mime_type,
+		   size_bytes, sha256, description, manifest_text, uploaded_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"att_abc", "req_x",
+		"shot.png", "req_x/att_abc__deadbeef__shot.png",
+		"image/png", 1234,
+		"deadbeef0000000000000000000000000000000000000000000000000000000000",
+		"test desc", "", "usr_t",
+	); err != nil {
+		t.Fatalf("seed attachment: %v", err)
+	}
+
+	svc := NewAttachmentService(d)
+	attachDir := filepath.Join(dir, "attachments")
+	got := svc.BuildManifest("req_x", attachDir)
+	if got == "" {
+		t.Fatal("BuildManifest returned empty for a row with one attachment")
+	}
+
+	// The fix: the `**位置**:` line must contain the on-disk basename, not
+	// the bare original filename.
+	wantPath := filepath.Join(attachDir, "att_abc__deadbeef__shot.png")
+	wantLine := "**位置**：`" + wantPath + "`"
+	if !strings.Contains(got, wantLine) {
+		t.Fatalf("manifest missing stored-basename path line\nwant substring: %q\nactual:\n%s", wantLine, got)
+	}
+
+	// Guard against the old bug: a backticked path composed of the bare
+	// filename must NOT appear in the output.
+	bareLine := "**位置**：`" + filepath.Join(attachDir, "shot.png") + "`"
+	if strings.Contains(got, bareLine) {
+		t.Fatalf("manifest still emits the bare filename (regression):\n%s", got)
+	}
 }
