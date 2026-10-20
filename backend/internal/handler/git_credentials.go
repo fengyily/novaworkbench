@@ -38,7 +38,7 @@ func SetGitCredentialService(svc *service.GitCredentialService) {
 // so the existing call sites (sub_task_runner / merge / wizard_coding /
 // wizard_orchestration) keep compiling without business-code changes.
 func gitCredentialEnv(
-	projectSvc *service.ProjectService,
+	projectSvc projectService,
 	platformSvc *service.PlatformTokenService,
 	reqRow *model.Requirement,
 ) ([]string, func()) {

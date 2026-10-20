@@ -1320,7 +1320,7 @@ type codeTransport interface {
 type originTransport struct {
 	originURL  string // resolved via project.OriginURL before dispatch
 	projectID  string // for stamping projects.sync_status after the SSH fetch
-	projectSvc *service.ProjectService
+	projectSvc projectService
 	// reqSvc stamps the freshly-fetched origin/<base> SHA onto the
 	// requirement's design_base_sha column (mirrors the local path's
 	// resolveWorkDirSynced). settingSvc resolves the hard-sync timeout.

@@ -71,7 +71,7 @@ import (
 // The function never panics. Any unexpected DB error is logged and the
 // "only GitCommitConvention" path is taken instead.
 func gitProjectBlock(
-	projectSvc *service.ProjectService,
+	projectSvc projectService,
 	platformSvc *service.PlatformTokenService,
 	reqRow *model.Requirement,
 	forPR bool,
@@ -115,7 +115,7 @@ func gitProjectBlock(
 // its contract; empty values mean "未解析" but the script still exits
 // cleanly.
 func platformRunEnv(
-	projectSvc *service.ProjectService,
+	projectSvc projectService,
 	platformSvc *service.PlatformTokenService,
 	reqRow *model.Requirement,
 	workDir string,

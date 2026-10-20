@@ -683,9 +683,17 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// onto projects.sync_status. Failures are surfaced as job lines but
 		// do not abort the coding run (EnsureWorktreeLogged below will still
 		// branch off the local checkout).
-		_, _ = h.projectSvc.EnsureClonedAndSynced(context.Background(), reqRow.ProjectID, func(msg string) {
-			job.Append(store.LogLine{Type: "phase", Content: msg})
-		})
+		//
+		// Agent Server 模式下跳过本地 fetch：本地可能因网络环境到 github 不可达，
+		// 而 Agent Server 是可达的；同步责任由远端 SSH 侧 (PrepareRemote) 接管。
+		// EnsureCloned（auto-clone）保留 —— 本地目录缺失时仍尝试从项目 remote_url 恢复。
+		if p.AgentServerID == "" {
+			_, _ = h.projectSvc.EnsureClonedAndSynced(context.Background(), reqRow.ProjectID, func(msg string) {
+				job.Append(store.LogLine{Type: "phase", Content: msg})
+			})
+		} else {
+			job.Append(store.LogLine{Type: "phase", Content: "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"})
+		}
 		if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
 			job.Finish(1, store.JobError)
@@ -836,9 +844,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				job.Append(store.LogLine{Type: "message", Content: "🧹 已清理上一个分支模式 run 残留的 branch_name / worktree_path"})
 			}
 		}
-		h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, baseBranch, func(s string) {
-			job.Append(store.LogLine{Type: "message", Content: s})
-		})
+		// Agent Server 模式下跳过本地 syncBaseBranch —— 同步由远端 SSH 侧接管。
+		if p.AgentServerID == "" {
+			h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, baseBranch, func(s string) {
+				job.Append(store.LogLine{Type: "message", Content: s})
+			})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"})
+		}
 		// 强制切到 base(detached HEAD / 其他 ref 状态兜底)。失败只警告不终止 —
 		// 工作区脏时切不过去,后续的 `git pull --rebase` 会再次尝试。
 		if out, cerr := gitRun(p.ProjectPath, "checkout", baseBranch); cerr != nil {
@@ -870,9 +883,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发: " + branchDir})
 		} else {
-			h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), branchDir, baseBranch, func(s string) {
-				job.Append(store.LogLine{Type: "message", Content: s})
-			})
+			// Agent Server 模式下跳过本地 syncBaseBranch —— 同步由远端 SSH 侧接管。
+			// 本地 checkout 仍正常执行（用于本地 manifest 路径 / SFTP 上传等）。
+			if p.AgentServerID == "" {
+				h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), branchDir, baseBranch, func(s string) {
+					job.Append(store.LogLine{Type: "message", Content: s})
+				})
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"})
+			}
 			checkoutOK := false
 			var lastErrOut string
 			attempt := func(args ...string) (string, bool) {
@@ -2275,7 +2294,7 @@ type runCallbacks struct {
 // (the raw PAT lives only on disk in platform_tokens.token, AES-decrypted
 // in service.Get — see service/platform.go:267).
 func secretsForAdjustRedaction(
-	projectSvc *service.ProjectService,
+	projectSvc projectService,
 	platformSvc *service.PlatformTokenService,
 	reqRow *model.Requirement,
 ) []string {

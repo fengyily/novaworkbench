@@ -147,8 +147,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// Idea-kind requirements need the latest main-branch source to discuss
 		// "can it be done with existing code" (analyst-chat concept phase),
 		// so we hard-sync origin/<base> first via resolveWorkDirSynced —
-		// same path the architect stage uses. Requirement / Issue kinds keep
-		// the legacy resolveWorkDir call (no origin sync, pre-read is enough).
+		// same path the architect stage uses. Requirement / Issue kinds call
+		// resolveWorkDir with skipLocalSync=remote so the local git fetch is
+		// skipped under Agent Server mode (matching the Agent Server path),
+		// and otherwise behaves like the legacy 4-arg variant.
 		var workDir string
 		if requirement.Kind == "idea" {
 			job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + defaultBranch + "…"})
@@ -167,7 +169,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			}
 			workDir = wd
 		} else {
-			wd, err := h.resolveWorkDir(context.Background(), requirement, projectPath, defaultBranch)
+			wd, err := h.resolveWorkDir(context.Background(), requirement, projectPath, defaultBranch, remote)
 			if err != nil {
 				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
 				job.Finish(1, store.JobError)
@@ -386,7 +388,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch, false)
 	if err != nil {
 		sendStatus(w, rc, "error", err.Error())
 		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")

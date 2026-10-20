@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/novaworkbench/backend/internal/service"
 	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -104,7 +103,7 @@ func ensureRemoteOrigin(ctx context.Context, client *gossh.Client, job *store.Jo
 // into the remote origin URL for this project. Mirrors the gate
 // gitCredentialEnv applies on the local path (token present + non-SSH remote)
 // so both surfaces agree on when a credential is actually in play.
-func remoteOriginAuthed(projectSvc *service.ProjectService, projectID string) bool {
+func remoteOriginAuthed(projectSvc projectService, projectID string) bool {
 	if projectSvc == nil || projectID == "" {
 		return false
 	}
