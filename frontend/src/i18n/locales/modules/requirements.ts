@@ -86,6 +86,12 @@ export const requirements = {
       compressedBadge: '已压缩',
     },
   },
+  edit: {
+    discardConfirm: '编辑中有未保存的改动，确定放弃吗？已上传的图片会保留。',
+    errNeedTitle: '标题不能为空',
+    uploadKept: '已上传的图片会直接保存到该需求',
+    shortcut: '⌘/Ctrl + Enter 保存',
+  },
   exportDesign: {
     pdfSuffix: '技术方案',
     designFallback: '技术方案',

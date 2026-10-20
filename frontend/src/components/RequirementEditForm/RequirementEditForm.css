@@ -1,0 +1,49 @@
+/* RequirementEditForm — only edit-specific rules. Everything else comes from
+   the shared `.create-req-form` / `create-req-*` styles so edit and create
+   read as one family. */
+
+.create-req-form.req-edit-form {
+  margin: 0 0 20px;
+}
+
+.req-edit-form .req-edit-id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.req-edit-form .req-edit-title-input {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.req-edit-form .req-edit-desc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.req-edit-form .req-edit-desc-head label { margin-bottom: 0; }
+
+.req-edit-form .req-edit-priority { display: flex; }
+
+.req-edit-form .req-edit-priority .create-req-kind-tab { text-transform: capitalize; }
+
+/* Long descriptions scroll the page; keep Save within reach. */
+.req-edit-form .req-edit-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 8px -18px -16px;
+  padding: 12px 18px;
+  background: var(--color-surface, #fff);
+  border-top: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 0 0 8px 8px;
+}
+
+.req-edit-form .create-req-toggle { margin-bottom: 14px; }
+
+@media (max-width: 640px) {
+  .req-edit-form .req-edit-id { display: none; }
+  .req-edit-form .create-req-shortcut { display: none; }
+}

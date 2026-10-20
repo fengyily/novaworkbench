@@ -86,6 +86,12 @@ export const requirements = {
       compressedBadge: 'Compressed',
     },
   },
+  edit: {
+    discardConfirm: 'You have unsaved changes. Discard them? Images already uploaded are kept.',
+    errNeedTitle: 'Title is required',
+    uploadKept: 'Uploaded images are saved to this requirement right away',
+    shortcut: '⌘/Ctrl + Enter to save',
+  },
   exportDesign: {
     pdfSuffix: 'design',
     designFallback: 'design',
