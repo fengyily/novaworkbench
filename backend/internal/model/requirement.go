@@ -33,6 +33,13 @@ type Requirement struct {
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`
 	DesignSessionID     string `json:"design_session_id"`
+	// DesignRevisionNo is which version of the design plan the requirement
+	// currently holds (0 = no design yet, 1 = first run, 2 = first regenerate,
+	// …). Matches the rev_no of the newest design_revisions row. Read paths
+	// that don't need history (the detail page, doc-refine chat, coding
+	// stage's plan-mode resumption) keep reading design_docs as before;
+	// design_revisions exists for the version switcher only.
+	DesignRevisionNo int `json:"design_revision_no"`
 	// WikiDocs stores the Markdown document body for a wiki-kind requirement.
 	// Produced by the plan-mode "生成知识库文档" wizard stage (handler/wizard_wiki.go
 	// GenerateWikiDoc). Mirrors DesignDocs but is owned exclusively by the

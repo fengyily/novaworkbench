@@ -20,6 +20,7 @@ var copyOrder = []string{
 	"memories",
 	"requirements",
 	"requirement_attachments",
+	"design_revisions",
 	// Review sessions own their attachments — parent before child.
 	"code_reviews",
 	"code_review_attachments",

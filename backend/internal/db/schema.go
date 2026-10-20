@@ -809,6 +809,30 @@ CREATE TABLE IF NOT EXISTS code_review_revisions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_crr_rev ON code_review_revisions(review_id, rev_no);
 CREATE INDEX IF NOT EXISTS idx_crr_review ON code_review_revisions(review_id, rev_no);
+
+-- design_revisions: frozen history of a requirement's design_doc, so
+-- 「重新生成技术方案」 can replace the current version without destroying
+-- the one the user has already read. Mirror of code_review_revisions with
+-- owner = requirement_id. requirements.design_docs is ALWAYS the current
+-- version (every existing read path stays untouched). This table holds
+-- every version that was ever current. trigger_kind = 'initial' (a first
+-- design pass) or 'regenerate' (some explicit re-generation by the user).
+CREATE TABLE IF NOT EXISTS design_revisions (
+	id              TEXT PRIMARY KEY,
+	requirement_id  TEXT NOT NULL,
+	rev_no          INTEGER NOT NULL DEFAULT 1,
+	-- trigger_kind: 'initial' (首次生成的方案) | 'regenerate' (某次重新生成的产物).
+	-- Named *_kind because a bare "trigger" column is a reserved word in MySQL.
+	trigger_kind    TEXT NOT NULL DEFAULT 'initial',
+	design_docs     TEXT NOT NULL DEFAULT '',
+	design_base_sha TEXT NOT NULL DEFAULT '',
+	model           TEXT NOT NULL DEFAULT '',
+	claude_config_id TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_dr_rev ON design_revisions(requirement_id, rev_no);
+CREATE INDEX IF NOT EXISTS idx_dr_req ON design_revisions(requirement_id, rev_no);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -856,6 +880,12 @@ var alterColumns = []string{
 	`ALTER TABLE agent_servers ADD COLUMN worktree_root TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
+	// design_revision_no: which version of the design plan requirements currently holds.
+	// Starts at 0 so a database written before design_revisions existed reads as "v0",
+	// mirroring code_reviews.revision_no (DEFAULT 1 there because every code-review
+	// row has at least one stored report, whereas a requirement may have zero designs).
+	// Bumped on Snapshot; the UI renders it as 「当前版 · vN」.
+	`ALTER TABLE requirements ADD COLUMN design_revision_no INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,

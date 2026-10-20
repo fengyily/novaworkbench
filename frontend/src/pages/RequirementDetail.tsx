@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName } from '../api/client';
 import { configIdForModel } from '../utils/modelConfig';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -75,7 +75,7 @@ import {
   buildLegacyDesignMarkdown,
   downloadDesignMarkdown,
 } from '../utils/designExport';
-import { fmtDateTime, fmtNumber } from '../utils/intl';
+import { fmtDateTime, fmtNumber, fmtDate } from '../utils/intl';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import { ContextUsageBar } from '../components/ContextUsageBar';
@@ -1259,6 +1259,23 @@ export default function RequirementDetail() {
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
+  // req_11e485759f583db8 — 重新生成 modal: shown between the
+  // 「重新分析生成」 button click and the knowledge-pre-read modal. Body
+  // explains "old plan will be frozen as a history version, not destroyed";
+  // confirm routes to the same knowledge modal (with regenerate=true).
+  const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
+  // Ref-flags the regenerate intent across the knowledge modal hop. The
+  // confirmDesignKnowledge callback is shared with first-time generate,
+  // so this ref is what differentiates the two intent shapes.
+  const designRegenerateRef = useRef(false);
+  // req_11e485759f583db8 — design version dropdown. listDesignRevisions
+  // fetches once after every load (and refreshes after a successful run
+  // or restore). The dropdown only mounts when revision count > 0 so the
+  // first-time UX stays clean.
+  const [designRevisions, setDesignRevisions] = useState<DesignRevision[]>([]);
+  const [designCurrentRevisionNo, setDesignCurrentRevisionNo] = useState(0);
+  const [showRevisionDropdown, setShowRevisionDropdown] = useState(false);
+  const [restoringRevisionNo, setRestoringRevisionNo] = useState<number | null>(null);
   // Titles read by the backend, surfaced via the SSE "knowledge" event.
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeEntry[]>([]);
   const [knowledgeEmpty, setKnowledgeEmpty] = useState(false);
@@ -1570,6 +1587,18 @@ export default function RequirementDetail() {
     const updated = await requirementsApi.get(id);
     setReq(updated);
     loadUsage();
+    // req_11e485759f583db8: reload the design-revision list so the
+    // version dropdown picks up the newest frozen version (or, after a
+    // restore, the unchanged list but a refreshed current_revision_no).
+    // Failure here is non-fatal — the dropdown stays empty until the
+    // next refresh; a 404 means this backend predates the feature.
+    try {
+      const { revisions, current_revision } = await wizardApi.listDesignRevisions(id);
+      setDesignRevisions(revisions || []);
+      setDesignCurrentRevisionNo(current_revision || 0);
+    } catch {
+      // intentionally ignored
+    }
   }, [id, loadUsage]);
 
   // The summary round writes requirements.coding_plan on the
@@ -2118,7 +2147,7 @@ export default function RequirementDetail() {
     wikiEsRef.current = null;
   }, []);
 
-  const runArchitectDesign = async (useKnowledge: boolean) => {
+  const runArchitectDesign = async (useKnowledge: boolean, regenerate: boolean = false) => {
     if (!id) return;
     setDesigning(true);
     setDesignLines([]);
@@ -2174,6 +2203,14 @@ export default function RequirementDetail() {
           // (the wizard's "stamp if non-empty" prologue keeps an empty
           // sync_mode from silently overwriting a previous value).
           ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
+          // req_11e485759f583db8: when true, the wizard RE-FORKS the
+          // analyst session instead of resuming the existing design
+          // session, and freezes the current design plan into
+          // design_revisions first. Old session + doc-refine turns are
+          // abandoned; the new plan starts from the same place the first
+          // generation did. Omitted when false so the wire shape stays
+          // backward-compatible (older backends ignore the field).
+          ...(regenerate ? { regenerate: true } : {}),
         }),
       });
       const json = await res.json();
@@ -2204,6 +2241,42 @@ export default function RequirementDetail() {
       await runArchitectDesign(useKnowledge);
     } else {
       await runArchitectDesign(useKnowledge);
+    }
+  };
+
+  // 重新生成（req_11e485759f583db8） — opens the confirmation dialog that
+  // warns the current plan WILL be replaced, then funnels through the same
+  // "read project knowledge?" modal as a first-time generate so the user
+  // can opt into knowledge pre-read consistently. The actual "regenerate"
+  // intent is then forwarded to runArchitectDesign via a ref-flag
+  // (designRegenerateRef), since the knowledge modal's confirm callback
+  // already has its own signature — see confirmDesignKnowledgeForRegenerate.
+  const requestRegenerateDesign = () => {
+    setShowRegenerateConfirm(true);
+  };
+  const cancelRegenerateConfirm = () => setShowRegenerateConfirm(false);
+  const proceedRegenerateConfirm = () => {
+    setShowRegenerateConfirm(false);
+    // Reuse the knowledge-pre-read modal with the regenerate flag on a
+    // dedicated ref so confirmDesignKnowledge can route to
+    // runArchitectDesign(useKnowledge, /*regenerate*/ true) instead of
+    // a status transition (status is already designed, NOT draft).
+    designRegenerateRef.current = true;
+    setReadKnowledgeDesign(false);
+    setShowDesignKnowledgeModal(true);
+  };
+
+  // Wraps the standard knowledge-confirm flow so we can pass regenerate=true
+  // without forking runArchitectDesign's signature. designRegenerateRef is
+  // set by proceedRegenerateConfirm and cleared on success/failure so a
+  // subsequent first-time generate doesn't accidentally carry the flag.
+  const confirmDesignKnowledgeForRegenerate = async () => {
+    setShowDesignKnowledgeModal(false);
+    const useKnowledge = readKnowledgeDesign;
+    try {
+      await runArchitectDesign(useKnowledge, /*regenerate*/ true);
+    } finally {
+      designRegenerateRef.current = false;
     }
   };
 
@@ -3080,9 +3153,16 @@ export default function RequirementDetail() {
       {showDesignKnowledgeModal && (
         <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3><IconTriangle size={16} className="icon-mr" />{t('requirements.detail2.intentGenerateDesign')}</h3>
+            <h3>
+              <IconTriangle size={16} className="icon-mr" />
+              {designRegenerateRef.current
+                ? t('requirements.detail2.regenerateConfirmTitle')
+                : t('requirements.detail2.intentGenerateDesign')}
+            </h3>
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-              {t('requirements.detail2.designKnowledgeHint')}
+              {designRegenerateRef.current
+                ? t('requirements.detail2.regenerateConfirmBody')
+                : t('requirements.detail2.designKnowledgeHint')}
             </p>
             {/* Show the current design base one more time so the user can
                 spot a stale value before clicking confirm (the input on the
@@ -3098,8 +3178,49 @@ export default function RequirementDetail() {
               <IconBook size={13} className="icon-mr" />{t('requirements.detail2.preflightReadKnowledgeDefault')}
             </label>
             <div className="modal-actions btn-row-2col">
-              <button className="btn btn-primary" onClick={confirmDesignKnowledge}>{t('requirements.detail2.btnConfirm')}</button>
-              <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>{t('requirements.detail2.btnCancel')}</button>
+              <button
+                className="btn btn-primary"
+                onClick={designRegenerateRef.current ? confirmDesignKnowledgeForRegenerate : confirmDesignKnowledge}
+              >
+                {designRegenerateRef.current
+                  ? t('requirements.detail2.regenerateConfirmYes')
+                  : t('requirements.detail2.btnConfirm')}
+              </button>
+              <button className="btn" onClick={() => {
+                setShowDesignKnowledgeModal(false);
+                designRegenerateRef.current = false;
+              }}>
+                {designRegenerateRef.current
+                  ? t('requirements.detail2.regenerateConfirmCancel')
+                  : t('requirements.detail2.btnCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* req_11e485759f583db8 — first-stage confirmation for a 重新生成.
+          Shown between the toolbar button click and the knowledge-modal
+          hop. Body explicitly states the old plan will be FROZEN as a
+          history version (not destroyed) and that the existing design
+          session + refinement turns will not be carried over. */}
+      {showRegenerateConfirm && (
+        <div className="modal-overlay" onClick={cancelRegenerateConfirm}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <h3>
+              <IconTriangle size={16} className="icon-mr" />
+              {t('requirements.detail2.regenerateConfirmTitle')}
+            </h3>
+            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+              {t('requirements.detail2.regenerateConfirmBody')}
+            </p>
+            <div className="modal-actions btn-row-2col">
+              <button className="btn btn-primary" onClick={proceedRegenerateConfirm}>
+                {t('requirements.detail2.regenerateConfirmYes')}
+              </button>
+              <button className="btn" onClick={cancelRegenerateConfirm}>
+                {t('requirements.detail2.regenerateConfirmCancel')}
+              </button>
             </div>
           </div>
         </div>
@@ -4872,8 +4993,8 @@ export default function RequirementDetail() {
                   {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
                 </button>
               )}
-              {req.status === 'designing' && hasDesign && (
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+              {(req.status === 'designing' || req.status === 'designed') && hasDesign && (
+                <button className="btn btn-sm" onClick={() => requestRegenerateDesign()} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
               )}
               {hasDesign && (
                 <div className="btn-group-split" role="group">
@@ -5129,6 +5250,63 @@ export default function RequirementDetail() {
                   >
                     📥 {t('requirements.detail2.importDesignBtn')}
                   </button>
+                )}
+                {/* req_11e485759f583db8 — version switcher dropdown. Only
+                    renders when design_revisions has at least one row (i.e.
+                    the user has regenerated at least once). The first item
+                    is the focus marker "Current · v{n}"; the rest are
+                    history versions — click calls
+                    wizardApi.restoreDesignRevision and refetches the
+                    requirement. Restoring does NOT increment the version
+                    list (per service.design_revision.go contract), so the
+                    dropdown is a "switch back" affordance, not "navigate
+                    forwards". */}
+                {designRevisions.length > 0 && (
+                  <div className="design-revision-dropdown">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setShowRevisionDropdown(v => !v)}
+                      aria-expanded={showRevisionDropdown}
+                      title={t('requirements.detail2.designRevisionsHint')}
+                    >
+                      ⤺ {t('requirements.detail2.designRevisionsLabel')} · v{designCurrentRevisionNo || 1}
+                      <IconChevronDown size={13} />
+                    </button>
+                    {showRevisionDropdown && (
+                      <>
+                        <div className="btn-split-backdrop" onClick={() => setShowRevisionDropdown(false)} />
+                        <div className="btn-split-dropdown" role="menu">
+                          <div className="btn-split-item current" aria-disabled="true">
+                            ● {t('requirements.detail2.designRevisionsCurrent')}{designCurrentRevisionNo || 1}
+                          </div>
+                          {designRevisions.map((rev) => (
+                            <button
+                              key={rev.id}
+                              type="button"
+                              role="menuitem"
+                              className="btn-split-item"
+                              disabled={restoringRevisionNo === rev.rev_no || rev.rev_no === designCurrentRevisionNo}
+                              onClick={async () => {
+                                setRestoringRevisionNo(rev.rev_no);
+                                try {
+                                  await wizardApi.restoreDesignRevision(req.id, rev.rev_no);
+                                  // Re-fetch the requirement so design_docs +
+                                  // design_revision_no swap in immediately.
+                                  await refresh();
+                                  setShowRevisionDropdown(false);
+                                } finally {
+                                  setRestoringRevisionNo(null);
+                                }
+                              }}
+                            >
+                              v{rev.rev_no} · {fmtDate(rev.created_at)}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
               <div

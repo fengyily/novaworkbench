@@ -429,6 +429,23 @@ export const requirements = {
     processToggleShow: '▶ Show thinking process',
     regenerateBtn: 'Re-analyze & regenerate',
     regenerateBtnTitle: 'Regenerate from the requirements analysis; the refinement conversation is not included',
+    // 重新生成 confirm dialog (req_11e485759f583db8): shown after the
+    // user clicks "Re-analyze & regenerate". The body explains that the
+    // current plan will be FROZEN as a history version (not destroyed)
+    // and re-derived from the analyst session, so the existing
+    // doc-refine conversation is NOT carried over.
+    regenerateConfirmTitle: 'Regenerate the design plan?',
+    regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). The new plan re-forks from the analyst session; the existing design session + refinement turns will not be inherited.',
+    regenerateConfirmYes: 'Regenerate',
+    regenerateConfirmCancel: 'Cancel',
+    // Version dropdown (req_11e485759f583db8): a per-requirement
+    // version switcher that only renders when there are >1 versions.
+    // "Current" is the focus-only marker, every other row shows rev_no
+    // + timestamp; clicking calls restoreDesignRevision.
+    designRevisionsLabel: 'Version',
+    designRevisionsCurrent: 'Current · v',
+    designRevisionsHint: 'Switch back to a history version',
+    designRevisionsEmpty: 'No history versions',
     exportPdfTitle: 'Export the design to PDF',
     exportPdfBtn: 'Export PDF',
     exportingPdf: 'Exporting…',

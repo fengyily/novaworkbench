@@ -97,6 +97,13 @@ func cliModelArg(effModel string) string {
 // empty system prompt + the resolved default model + the active config id
 // (or "" when no config exists), and log a one-line warning.
 func (h *WizardHandler) roleConfig(key string) (systemPrompt, model, configID string) {
+	// Nil-safe for unit tests that wire a partial WizardHandler (the role
+	// service isn't always relevant to the path under test — see
+	// wizard_architect_test.go's regenerate/snapshot tests). Production
+	// always has roleSvc wired by main.go.
+	if h.roleSvc == nil {
+		return "", h.effectiveModelFromConfig("", nil), h.activeConfigID()
+	}
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[wizard] role %q not found, using CLI defaults: %v", key, err)
@@ -131,7 +138,10 @@ func (h *WizardHandler) resolveConfigIDForRun(requestCl, model, devCfgID string)
 	if requestCl != "" {
 		return requestCl
 	}
-	if model != "" {
+	if model != "" && h.claudeCfg != nil {
+		// Nil-safe for unit tests that wire a partial WizardHandler (the
+		// claude config service isn't always relevant to the path under
+		// test — see wizard_architect_test.go's regenerate tests).
 		if cid, err := h.claudeCfg.ResolveConfigForModel(model); err == nil && cid != "" {
 			return cid
 		}

@@ -451,6 +451,21 @@ export const requirements = {
     processToggleShow: '▶ 思考过程',
     regenerateBtn: '重新分析生成',
     regenerateBtnTitle: '从需求分析重新开始生成方案，不包含微调对话内容',
+    // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新分析生成" 后
+    // 看到的对话框,清楚说明旧方案会被冻结成历史版本而不是丢掉,避免「以
+    // 为旧方案没了」的误操作。Cancel + Confirm 两个按钮,文案比浏览器原生
+    // confirm() 更可控也更好翻译。
+    regenerateConfirmTitle: '确认重新生成技术方案?',
+    regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并重新从需求分析开始生成新方案。本次会话与微调对话不会被继承。',
+    regenerateConfirmYes: '确认重新生成',
+    regenerateConfirmCancel: '取消',
+    // 版本下拉 (req_11e485759f583db8): 设计工具条上的版本选择器,只
+    // 在设计 >1 版时出现。「当前版」项是焦点选中态(不可点击),其它版列
+    // 出 rev_no + 时间,点击 → 切回 → 自动刷新。
+    designRevisionsLabel: '版本',
+    designRevisionsCurrent: '当前版 · v',
+    designRevisionsHint: '切回历史版本',
+    designRevisionsEmpty: '暂无历史版本',
     exportPdfTitle: '将技术方案导出为 PDF',
     exportPdfBtn: '导出 PDF',
     exportingPdf: '导出中...',

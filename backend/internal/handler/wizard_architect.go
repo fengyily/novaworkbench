@@ -98,6 +98,20 @@ type designRunParams struct {
 	SourceSID      string
 	Fork           bool
 	SkipAnalysis   bool
+	// Regenerate is true ONLY when the user explicitly clicked the
+	// "重新分析生成" CTA on a requirement that already has a designed
+	// plan. It widens the session decision (treat design_session_id as
+	// if it were absent so we re-fork from the analyst session) and
+	// disables the pre-mint-then-persist pattern that would otherwise
+	// clobber the user's old design_session_id at run start. False for
+	// every other entry point (HTTP first-run, scheduler, immediate,
+	// …  anything that isn't an explicit "重新生成" by the user).
+	//
+	// Set by ArchitectDesign's HTTP body when the user submits
+	// {regenerate: true}. All other prepareArchitectDesign call sites
+	// pass false explicitly so the compiler catches a forgotten wiring
+	// site.
+	Regenerate     bool
 	NewDesignSID   string
 	WorkDir        string
 	Prompt         string
@@ -146,9 +160,19 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// "main" if even that is empty. Mirrors the dev-stage
 		// BaseBranch behaviour in wizard_coding.go:458-481.
 		BaseBranch string `json:"base_branch"`
+		// Regenerate — when true, the run re-forks the analyst session
+		// instead of resuming the existing design session, pre-mints the
+		// new session id in memory only (NOT persisted at start), freezes
+		// the current plan into design_revisions before run start, and
+		// persists the new session id only on success. Enables the
+		// "设计完成后仍然可以重新生成" UX without clobbering the old plan.
+		//
+		// Only honored when the requirement is in {designing, designed}
+		// — see prepareArchitectDesign's status whitelist.
+		Regenerate bool `json:"regenerate"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch, body.Regenerate)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -313,7 +337,10 @@ func (h *WizardHandler) ImportDesignFile(w http.ResponseWriter, r *http.Request)
 // prepareArchitectDesign. Same fallback chain as the HTTP path so a cron
 // user can override the base per-schedule without touching project settings.
 func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, baseBranch string, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch)
+	// regenerate is reserved exclusively for the user-driven "重新生成"
+	// HTTP CTA in ArchitectDesign. Schedules treat every dispatch as a
+	// first-run / re-run, never a deliberate re-fork-from-scratch.
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch, false)
 	if af != nil {
 		return "", af
 	}
@@ -338,7 +365,15 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // scheduler; empty falls back to project.DefaultBranch, then to "main".
 // Resolution happens inside the function body so every caller (HTTP /
 // scheduler / immediate chained) shares the same fallback chain.
-func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string) (*designRunParams, *store.Job, *apiFailure) {
+//
+// regenerate — when true, the run re-forks the analyst session instead of
+// resuming the existing design session, pre-mints the new session id in
+// memory only (NOT persisted at run start), and freezes the current plan
+// into design_revisions BEFORE the new run starts. Reserved exclusively
+// for the user-driven "重新生成" HTTP body; scheduler / immediate /
+// import paths must pass false explicitly so the compiler catches a
+// forgotten wiring site (R1 in req_11e485759f583db8).
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string, regenerate bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -348,6 +383,29 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	if err != nil {
 		return nil, nil, fail(404, "NOT_FOUND", "requirement not found")
 	}
+
+	// regenerate=true is reserved for the explicit "重新生成" CTA, which is
+	// only meaningful once a plan exists. Server-side whitelist: status must
+	// be {designing, designed}; anything outside that set means the user
+	// either hit the button on a phase that doesn't support regenerating
+	// (draft / analyzing / done / archived / developing / …) or the
+	// frontend's button guard let a stale state through. We reject early
+	// with 409 so a misbehaving client gets a clear error instead of an
+	// empty no-op. NB: designing is allowed because the in-flight design
+	// run might have produced a partial plan the user wants to discard.
+	// developing is deliberately excluded — the coding stage forks the
+	// design session, so a regenerate there would silently invalidate the
+	// coding run's premise.
+	if regenerate {
+		switch req.Status {
+		case "designing", "designed":
+			// allowed; fall through
+		default:
+			return nil, nil, fail(409, "INVALID_STATUS",
+				"重新生成仅在 designing / designed 状态下可用，当前状态: "+req.Status)
+		}
+	}
+
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
 	// Resolve the design-stage base branch: explicit override (HTTP body
@@ -410,11 +468,20 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// stream and persist as design_session_id. On a re-run (design_session_id
 	// already set) we just --resume it. We do NOT re-feed Description /
 	// AcceptanceCriteria — the resumed conversation already has them.
+	//
+	// regenerate=true overrides the first branch: the old design_session_id
+	// is treated as if it were missing so we re-fork from the analyst
+	// session, producing a fresh conversation thread identical to the first
+	// design run (decision tree matches "no design yet + analysis exists").
+	// The old design session + all doc-refine turns (which resume the same
+	// design_session_id) are intentionally abandoned — restoring them is a
+	// separate RestoreAsCurrent action on the version switcher.
 	sourceSID := ""
 	fork := false
-	if req.DesignSessionID != "" {
+	switch {
+	case req.DesignSessionID != "" && !regenerate:
 		sourceSID = req.DesignSessionID
-	} else if req.AnalysisSessionID != "" {
+	case req.AnalysisSessionID != "":
 		sourceSID = req.AnalysisSessionID
 		fork = true
 	}
@@ -436,13 +503,26 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		}
 	}
 
-	// Pre-mint + persist the design session id BEFORE spawning claude so it
-	// survives a mid-run restart. Two cases produce a NEW id: forking off the
-	// analyst session (--resume <src> --fork-session --session-id <new>) and the
-	// skip-analysis fresh session (--session-id <new>). A re-run just resumes the
-	// stored design_session_id (no new id).
+	// Pre-mint the design session id so the CLI's `--session-id` flag locks it
+	// in for the duration of the run. Two cases produce a NEW id: forking off
+	// the analyst session (--resume <src> --fork-session --session-id <new>)
+	// and the skip-analysis fresh session (--session-id <new>). A re-run just
+	// resumes the stored design_session_id (no new id).
+	//
+	// Persistence is conditional on regenerate: a non-regenerate run writes
+	// the id to requirements.design_session_id RIGHT NOW so a backend crash
+	// mid-run still leaves a recoverable session id on the row (this is the
+	// original RC-2 defense: no mid-run crash can poison the row). A
+	// regenerate run pre-mints the id in memory only — writing it now would
+	// clobber the user's old design_session_id, so a failed regenerate would
+	// leave the user with a new (broken) session id they cannot resume their
+	// doc-refine chat against. The finalizeArchitectRun path stamps it on
+	// success only (see the conditional there), keeping the old id intact
+	// on every failure path.
 	newDesignSID := ""
-	if fork || sourceSID == "" {
+	if regenerate {
+		newDesignSID = util.NewUUID()
+	} else if fork || sourceSID == "" {
 		newDesignSID = util.NewUUID()
 		if perr := h.reqSvc.UpdateDesignSession(id, newDesignSID); perr != nil {
 			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
@@ -464,6 +544,47 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 			log.Printf("[architect-design] failed to promote status to designing for %s: %v", id, serr)
 		}
 		req.Status = "designing"
+	}
+
+	// Concurrency guard against double-clicks / multi-tab races: a design
+	// job or an apply-doc job already alive means another instance of this
+	// stage is currently writing design_docs. Allowing a concurrent run
+	// would silently destroy its progress (last writer wins). We return 409
+	// instead of queuing so the user gets immediate feedback and can decide
+	// to wait or refresh.
+	//
+	// Both pointers must be checked — design_job_id drives the
+	// architect-design run, apply_job_id drives the doc-refine chat, and
+	// BOTH paths write design_docs. wizard_immediate.go has the same pattern
+	// for the design_job_id check (immediatePreGate) but never checked
+	// apply_job_id; ArchitectDesign is the only HTTP entry that did not.
+	// Catching both here closes that gap so the 4 callers of
+	// prepareArchitectDesign all gate identically.
+	if req.DesignJobID != "" && h.jobs.Live(req.DesignJobID) {
+		return nil, nil, fail(409, "DESIGN_JOB_ACTIVE",
+			"已有方案任务在执行，请等待完成或刷新页面确认状态")
+	}
+	if req.ApplyJobID != "" && h.jobs.Live(req.ApplyJobID) {
+		return nil, nil, fail(409, "DESIGN_JOB_ACTIVE",
+			"微调对话正在更新方案，请等待完成后再重新生成")
+	}
+
+	// Freeze the current design plan as a version snapshot BEFORE the new
+	// run starts so the user can restore v(N) after the run replaces it
+	// with v(N+1). Only meaningful on regenerate (the first design pass has
+	// no v1 to freeze; Snapshot returns (nil, nil) when design_docs is
+	// empty). The reverse order — Snapshot AFTER the run — would lose the
+	// old plan on every success path. The cleanup inside UpdateDesign /
+	// ImportDesignDoc / Delete handles the rest.
+	//
+	// trigger = "regenerate" so the version dropdown's badge correctly
+	// identifies the origin of this frozen row in case the user later asks
+	// "why was v2 here?".
+	if regenerate {
+		snapReq, gerr := h.reqSvc.Get(id)
+		if gerr == nil {
+			_, _ = h.designRevSvc.Snapshot(snapReq, model.RevisionTriggerRegenerate)
+		}
 	}
 
 	// Create the job BEFORE resolveWorkDirLogged so the log echo closure can
@@ -514,6 +635,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		SourceSID:     sourceSID,
 		Fork:          fork,
 		SkipAnalysis:  skipAnalysis,
+		Regenerate:    regenerate,
 		NewDesignSID:  newDesignSID,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
@@ -835,10 +957,19 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 //     沿用 pre-mint 之外的路径，清空会误伤真实会话。
 //   - out.sessionID != ""：CLI 报告过 session_id（其赋值来源是 stream 里的
 //     system/init 事件，见 wizard_stream.go），说明会话确实建立了，不能清。
+//   - p.Regenerate：regenerate 路径下 pre-mint 的 id 从未落入需求行（参见
+//     prepareArchitectDesign 的 conditional persistence），所以「清除未
+//     建立会话」无意义；相反，clear 会让旧 design_session_id（被保护的旧会话）
+//     落空，用户就连 resume 微调对话的路都没了，直接 return。
 //
 // 注意：out.staleSession 分支有自己的清理逻辑（按 fork/design 维度清），
 // 不要在这里或那里重复调用，避免语义重叠。
 func (h *WizardHandler) clearUnestablishedDesignSession(p *designRunParams, out claudeStreamOutcome, id string) {
+	if p.Regenerate {
+		// 重新生成路径下，NewDesignSID 是「成功才落库」的新会话 id；
+		// 这里清的是设计阶段 pre-mint 而未落库的悬挂 id —— 不需要做任何事。
+		return
+	}
 	if p.NewDesignSID == "" || out.sessionID != "" {
 		return
 	}
@@ -905,21 +1036,33 @@ func (h *WizardHandler) finalizeArchitectRun(
 		return
 	}
 
-	// The design session id is already persisted upfront. Correct it only if
-	// the CLI reported a different id than the one we pre-minted (a safety
-	// net in case the --session-id override semantics ever change). The
-	// remote branch's parseStreamJSONFromReader emits session_id on the same
-	// `--session-id` events as the local CLI, so the correction path applies
-	// to both surfaces uniformly.
+	// Persist the design session id (no-op when we already resumed an
+	// existing one). The strategy depends on the regenerate flag:
 	//
-	// Edge case (Agent-server path): when neither run established a session
-	// (out.sessionID == "") — typically the remote CLI exited before
-	// emitting system/init, so no jsonl exists anywhere — the pre-minted
-	// newDesignSID is dangling. Leaving it on the row makes the next run
-	// treat it as a valid resume source and immediately hit the
-	// "会话已过期" branch again. Drop it here so the next attempt mints
-	// a fresh id (and won't stale on first contact).
-	if out.sessionID == "" {
+//   - Non-regenerate: NewDesignSID was already stamped at run start so a
+//     mid-run crash can recover. If the CLI reported a different id
+//     (out.sessionID != newDesignSID && out.sessionID != sourceSID)
+//     correct it for safety. If neither value appeared, the session
+//     never established — drop the dangling pre-mint so the next run
+//     won't stale on first contact.
+//   - Regenerate: NewDesignSID was deliberately NOT persisted at run
+//     start — overwriting the user's old design_session_id mid-run would
+//     silently break their doc-refine chat if this run failed. So:
+//       * CLI reported an id → stamp it now (the run succeeded enough
+//         to either capture a real conversation or at least not crash,
+//         and the user wants to keep going in this new thread).
+//       * CLI reported nothing (crashed before system/init) → leave the
+//         old design_session_id alone entirely. The user keeps their
+//         doc-refine chat intact and can retry the regenerate.
+//     clearUnestablishedDesignSession above is gated by p.Regenerate
+//     for the same reason so the two paths don't contradict each other.
+	if p.Regenerate {
+		if out.sessionID != "" {
+			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
+				log.Printf("[architect-design] failed to persist regenerated design session for %s: %v", id, perr)
+			}
+		}
+	} else if out.sessionID == "" {
 		if newDesignSID != "" {
 			if perr := h.reqSvc.UpdateDesignSession(id, ""); perr != nil {
 				log.Printf("[architect-design] failed to clear unestablished design session for %s: %v", id, perr)

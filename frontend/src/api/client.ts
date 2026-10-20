@@ -1643,6 +1643,26 @@ export const wizardApi = {
     fd.append('file', file);
     return api.upload<{ content: string }>('/api/wizard/import-design-file', fd);
   },
+  // ── 重新生成 + 版本历史 ──────────────────────────────────────────────────
+  // Parallel to codeReviewsApi.regenerate / listRevisions / getRevision /
+  // restoreRevision. The list endpoint also returns the requirement's
+  // current_revision + current_session_id so the UI can render "v3 of 5"
+  // without a second round-trip; restore returns the freshly-loaded
+  // Requirement so the page can swap it into local state immediately
+  // (mirrors the importDesign response shape).
+  listDesignRevisions: (requirementId: string) =>
+    api.get<{
+      revisions: DesignRevision[];
+      current_revision: number;
+      current_session_id: string;
+    }>(`/api/requirements/${requirementId}/design-revisions`),
+  getDesignRevision: (requirementId: string, revNo: number) =>
+    api.get<DesignRevision>(`/api/requirements/${requirementId}/design-revisions/${revNo}`),
+  restoreDesignRevision: (requirementId: string, revNo: number) =>
+    api.post<Requirement>(
+      `/api/requirements/${requirementId}/design-revisions/${revNo}/restore`,
+      {},
+    ),
 };
 
 /**
@@ -1959,6 +1979,26 @@ export interface CodeReviewRevision {
   /** How many 追问 turns were already folded in when this version was made. */
   followup_count: number;
   model: string;
+  created_at: string;
+}
+
+/**
+ * DesignRevision mirrors service/design_revision.go. requirements.design_docs
+ * is always the CURRENT plan; this type is the history behind it — every
+ * version that USED TO BE current, frozen by the wizard's 「重新生成技术方案」
+ * path so the user can switch back. trigger = "initial" (the first design
+ * pass) or "regenerate" (an explicit re-run by the user).
+ */
+export interface DesignRevision {
+  id: string;
+  requirement_id: string;
+  rev_no: number;
+  /** "initial" = first design run; "regenerate" = an explicit 重新生成 by the user. */
+  trigger: 'initial' | 'regenerate';
+  design_docs: string;
+  design_base_sha: string;
+  model: string;
+  claude_config_id: string;
   created_at: string;
 }
 

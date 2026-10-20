@@ -100,6 +100,16 @@ type WizardHandler struct {
 	// stages simply skip the manifest block when nil (no behavior change
 	// vs pre-feature).
 	attachSvc *service.AttachmentService
+	// designRevSvc handles the design_revisions table — the versioned
+	// history of each requirement's design plan. Wired after construction
+	// from main.go via SetDesignRevisionSvc because the wizard handler
+	// participates in a constructor cycle with both the service and the
+	// handlers that consume it. Required for the 「重新生成技术方案」 flow
+	// (freeze current plan → run → restore on demand); nil disables just
+	// the version-history wiring while every other wizard feature keeps
+	// working (a deployment that doesn't need regenerating can leave it
+	// nil without affecting any first-run path).
+	designRevSvc *service.DesignRevisionService
 }
 
 func NewWizardHandler(database *db.DB, projectSvc projectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
@@ -161,6 +171,17 @@ func (h *WizardHandler) SetIssueMonSvc(svc *service.IssueMonitorService) {
 // path if/when sync lands).
 func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 	h.attachSvc = svc
+}
+
+// SetDesignRevisionSvc injects the DesignRevisionService used by the
+// 「重新生成技术方案」 flow (wizard_architect.go) and the design-revisions
+// REST handlers (wizard_design_revision.go). Called from main.go AFTER
+// NewWizardHandler because the service participates in the wizard→service
+// dependency cycle. Passing nil is safe but disables both the freeze-on-
+// regenerate step inside prepareArchitectDesign and every read endpoint
+// the new handler registers.
+func (h *WizardHandler) SetDesignRevisionSvc(svc *service.DesignRevisionService) {
+	h.designRevSvc = svc
 }
 
 // attachManifestFor returns the attachment manifest markdown for a
