@@ -27,6 +27,7 @@ import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload';
 import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDescriptionEditor/imageIngest';
+import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
@@ -147,6 +148,20 @@ const statusChipClass: Record<SubTaskStatus, string> = {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + '…';
+}
+
+// NovaImageMarkerRe matches the bare `nova://attachment/<id>` placeholder the
+// composer splices into a sub-task prompt for every pasted image. See
+// RichDescriptionEditor/rewriteNovaLinks for the protocol's origin.
+const NovaImageMarkerRe = /nova:\/\/attachment\/[a-zA-Z0-9_-]+/g;
+
+// summarizePrompt strips image placeholders down to a readable `[图片]` token
+// before truncation. Used for the collapsed report-meta line and its tooltip,
+// where the raw 60-char marker would eat the entire 80-char budget and tell the
+// reader nothing. The full-fidelity Markdown rendering path uses
+// rewriteNovaLinks instead — this one is only for one-line summaries.
+function summarizePrompt(prompt: string | null | undefined): string {
+  return String(prompt ?? '').replace(NovaImageMarkerRe, '[图片]');
 }
 
 // extractFirstURL pulls the first http(s) URL out of a string, ignoring
@@ -536,8 +551,8 @@ function ReportHeader({ st }: { st: SubTask }) {
       <dl>
         <div>
           <dt>{t('components.subTaskCard.reportMetaPrompt')}</dt>
-          <dd className="is-mono" title={st.prompt ?? ''}>
-            {st.prompt ? truncate(st.prompt, 80) : '—'}
+          <dd className="is-mono" title={summarizePrompt(st.prompt)}>
+            {st.prompt ? truncate(summarizePrompt(st.prompt), 80) : '—'}
           </dd>
         </div>
         <div>
@@ -1705,7 +1720,18 @@ function SubTaskCard({
                 }
               >
                 <div className="sub-plan-body">
-                  <MarkdownRender content={String(st.prompt).trim().replace(/\n{3,}/g, '\n\n')} />
+                  {/* rewriteNovaLinks turns each pasted-image placeholder into the
+                      authenticated content endpoint URL, which MarkdownRender's
+                      <img> handler recognises — without it every image in a
+                      sub-task plan renders as a broken-image icon. Owner id
+                      comes from the row itself (same source ThinkingSection
+                      uses) so the card needs no extra prop. */}
+                  <MarkdownRender
+                    content={rewriteNovaLinks(
+                      String(st.prompt).trim().replace(/\n{3,}/g, '\n\n'),
+                      st.requirement_id,
+                    )}
+                  />
                 </div>
               </div>
               {isPlanLong && (
