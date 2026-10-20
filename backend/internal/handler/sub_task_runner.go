@@ -965,6 +965,13 @@ func (r *SubTaskRunner) Run(
 	remoteID := ""
 	if goesRemote { remoteID = effectiveServerID }
 	attachDir := resolveAttachDirFor(context.Background(), r.attachSvc, r.agentSvrSvc, req.ID, remoteID)
+	// body 里 `nova://attachment/<id>` 占位符换成该附件在本次执行环境下的真实
+	// 绝对路径，避免 AI 拿到无法解析的 URI（前端无法在 prompt 里写绝对磁盘路径，
+	// 所以用占位符 + 后端改写这一步）。必须在 `var prompt string`（prompt 与 body
+	// 拼接）之前；body 是值参数，重赋值仅作用于本 goroutine。
+	if r.attachSvc != nil && strings.TrimSpace(req.ID) != "" {
+		body = rewriteAttachmentMarkers(r.attachSvc, req.ID, attachDir, body)
+	}
 
 	var prompt string
 	switch {
