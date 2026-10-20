@@ -109,7 +109,7 @@ func BuildDSN(driver, host, port, user, password, dbname string) (string, error)
 		if port == "" {
 			port = "3306"
 		}
-		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&loc=UTC&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 			user, password, host, port, dbname), nil
 	case Postgres:
 		if port == "" {
@@ -230,13 +230,35 @@ func (d *DB) OnConflict(target, setClause string) string {
 // also rejects strings containing invalid UTF-8 or NUL bytes in TEXT columns
 // (SQLSTATE 22021), so we sanitize those centrally too — one malformed CLI
 // stdout line (subprocess split a rune mid-sequence, or produced a stray NUL)
-// would otherwise 500 the whole write. PostgreSQL-only — other dialects get
+// would otherwise 500 the whole write. Time arguments are converted to UTC on
+// every dialect; the bool/string fix-ups are PostgreSQL-only — other dialects get
 // the args unchanged.
 func (d *DB) normalizeArgs(args []any) []any {
-	if d.dialect != Postgres {
-		return args
-	}
 	for i, a := range args {
+		// Timestamps are stored as UTC on every dialect: pgx drops the zone of
+		// a time.Time written to a TIMESTAMP column (keeping the local wall
+		// clock), which then reads back as UTC and shifts the display.
+		switch v := a.(type) {
+		case time.Time:
+			if !v.IsZero() {
+				args[i] = v.UTC()
+			}
+			continue
+		case *time.Time:
+			if v != nil && !v.IsZero() {
+				args[i] = v.UTC()
+			}
+			continue
+		case sql.NullTime:
+			if v.Valid && !v.Time.IsZero() {
+				v.Time = v.Time.UTC()
+				args[i] = v
+			}
+			continue
+		}
+		if d.dialect != Postgres {
+			continue
+		}
 		switch v := a.(type) {
 		case bool:
 			if v {
