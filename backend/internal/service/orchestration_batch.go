@@ -473,6 +473,46 @@ func (s *OrchestrationBatchService) UpdateTotalChildren(id string, total int) er
 	return err
 }
 
+// ReleaseDispatchingChild drops one child from a still-dispatching batch's
+// expected total, because the row has left the batch for good. Its only
+// caller today is the sub-task 重做 / 继续 in-place reset, which clears the
+// row's batch_id (see SubTaskService.resetForManualRerun) so the manual run —
+// dispatched by the wizard handler, not by the queue — can't be double-claimed
+// by OrchestrationQueue.ClaimNextPending.
+//
+// The decrement is deliberately NOT unconditional:
+//
+//   - `AND status='dispatching'` keeps a batch that already moved on
+//     (summarizing / awaiting_summary / done / errored) reporting the child
+//     count it actually summarized. Touching it there would rewrite history in
+//     the API payload and in the batch's own record.
+//   - The CASE never goes below 0, so a double call (or a row that was already
+//     detached) can't push the counter negative and strand the done+errored>=
+//     total_children gate in a permanently-satisfied state.
+//
+// Callers MUST run this AFTER the sub_task row's batch_id has been cleared.
+// The reverse order opens a window where the batch could observe a smaller
+// done+errored count against the un-decremented total — harmless in that
+// direction — whereas decrementing first would let a tick read a count that
+// already satisfies the gate while a child is still in flight, flipping the
+// batch into summarizing early.
+//
+// Best-effort by design: the handler logs and continues if this fails. The
+// failure mode is a batch whose total stays one too high (it parks in
+// dispatching rather than summarizing), which the user can still drive by
+// hand via 生成汇总; the alternative — refusing the redo — would be far worse.
+func (s *OrchestrationBatchService) ReleaseDispatchingChild(id string) error {
+	if id == "" {
+		return errors.New("batch id is required")
+	}
+	_, err := s.db.Exec(`UPDATE orchestration_batches
+		SET total_children=CASE WHEN total_children > 0 THEN total_children - 1 ELSE 0 END,
+		    updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND status=?`,
+		id, model.BatchDispatching)
+	return err
+}
+
 // MarkCompleted is the terminal write for a happy-path run: status=completed,
 // summary_status=done, completed_at stamped, updated_at refreshed. There's
 // no guard on the prior status — both the summary goroutine (happy path)

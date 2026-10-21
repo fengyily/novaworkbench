@@ -567,11 +567,12 @@ export interface SubTask {
   // backends — the card hides the badge then.
   retry_count?: number;
   // Tree-form lineage marker: the id of the sub_task this row descends from,
-  // set on rows produced by Adjust / Redo / Continue (the user's "重做 / 继续 /
-  // 追加调整所产生的任务"). Empty on root rows (manually-created sub-tasks
-  // and auto-orchestrated children) — the SubTaskPanel uses this field to
-  // group rows into a parent → children tree with the empty string as the
-  // root key. Undefined on older backends — the panel treats them as roots.
+  // set on rows produced by Adjust (the user's 追加调整). 重做 / 继续 re-arm
+  // the clicked row in place and therefore never add a child. Empty on root
+  // rows (manually-created sub-tasks and auto-orchestrated children) — the
+  // SubTaskPanel uses this field to group rows into a parent → children tree
+  // with the empty string as the root key. Undefined on older backends — the
+  // panel treats them as roots.
   parent_subtask_id?: string;
   // v0.5.x: 三阶段（理解 / 实施 / 小结）输出。仅手动触发路径（source 为
   // 'manual' 或 ''）会产生非空内容；auto / push_pr 行永远是空串且

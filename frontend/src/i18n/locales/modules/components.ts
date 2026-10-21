@@ -225,17 +225,17 @@ export const components = {
     cancel: '取消',
     adjustBusy: '启动中…',
     adjustSubmit: '🚀 追加调整',
-    // Redo: 重新执行该任务，新行作为子节点挂在原任务下（不再原地更新）。
-    // 走一个全新的 claude session id，parent_subtask_id 指回原行。
-    redoHint: '重新执行该任务，新任务作为子节点显示',
+    // Redo: 重新执行该任务，就地重置原行（同一个 sub_task id、同一张卡片、
+    // 同一个 SSE 流）。走一个全新的 claude session id，从需求主会话干净 fork。
+    redoHint: '重新执行该任务，在原卡片上就地重跑',
     redoModelLabel: '重做模型',
     redoSubmit: '🚀 开始重做',
     errAdjust: '追加调整失败',
     errRedo: '仅失败的任务可重做',
-    // Continue: 在原会话上 --resume 续接，新行作为子节点挂在原任务下。
-    // 可在 error / stopped 状态下触发。Resume 比 Redo 便宜，能继承上次运行的中间产物。
+    // Continue: 在原会话上 --resume 续接，同样就地重置原行。可在 error /
+    // stopped 状态下触发。Resume 比 Redo 便宜，能继承上次运行的中间产物。
     continueToggle: '继续',
-    continueHint: '在原会话上 --resume 续接，新任务作为子节点显示',
+    continueHint: '在原会话上 --resume 续接，在原卡片上继续',
     continueSubmit: '▶ 继续执行',
     continueBusy: '续接中…',
     errContinue: '该子任务无法继续',
