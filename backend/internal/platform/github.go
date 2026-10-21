@@ -11,29 +11,45 @@ import (
 )
 
 type githubClient struct {
-	token string
+	// baseURL is the API root, normally https://api.github.com. It is a
+	// field rather than a hardcoded constant so GitHub Enterprise hosts
+	// work and so tests can point the client at an httptest server.
+	baseURL string
+	token   string
 }
 
 func (c *githubClient) parseRepo(repoURL string) (owner, repo string, err error) {
 	// Accepts: https://github.com/owner/repo.git  or  git@github.com:owner/repo.git
-	url := strings.TrimSuffix(repoURL, ".git")
-	if strings.HasPrefix(url, "git@github.com:") {
-		parts := strings.SplitN(strings.TrimPrefix(url, "git@github.com:"), "/", 2)
+	u := strings.TrimSuffix(repoURL, ".git")
+	if strings.HasPrefix(u, "git@github.com:") {
+		parts := strings.SplitN(strings.TrimPrefix(u, "git@github.com:"), "/", 2)
 		if len(parts) != 2 {
 			return "", "", fmt.Errorf("cannot parse GitHub SSH URL: %s", repoURL)
 		}
 		return parts[0], parts[1], nil
 	}
-	// HTTPS
-	idx := strings.Index(url, "github.com/")
-	if idx < 0 {
-		return "", "", fmt.Errorf("not a GitHub URL: %s", repoURL)
+	// HTTPS on github.com.
+	if idx := strings.Index(u, "github.com/"); idx >= 0 {
+		parts := strings.SplitN(u[idx+len("github.com/"):], "/", 2)
+		if len(parts) != 2 {
+			return "", "", fmt.Errorf("cannot parse GitHub URL: %s", repoURL)
+		}
+		return parts[0], parts[1], nil
 	}
-	parts := strings.SplitN(url[idx+len("github.com/"):], "/", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("cannot parse GitHub URL: %s", repoURL)
+	// Generic host-agnostic fallback (GitHub Enterprise, and the httptest
+	// servers the package tests run against): take the first two path
+	// segments after the host. Mirrors giteaClient.parseRepo.
+	idx := strings.Index(u, "://")
+	if idx >= 0 {
+		rest := u[idx+3:]
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			parts := strings.SplitN(rest[slash+1:], "/", 2)
+			if len(parts) == 2 {
+				return parts[0], parts[1], nil
+			}
+		}
 	}
-	return parts[0], parts[1], nil
+	return "", "", fmt.Errorf("not a GitHub URL: %s", repoURL)
 }
 
 func (c *githubClient) do(ctx context.Context, method, url string, body string) (*http.Response, error) {
@@ -57,7 +73,7 @@ func (c *githubClient) ListOpenPRs(ctx context.Context, repoURL string) ([]PR, e
 		return nil, err
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?state=open&per_page=50", owner, repo)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=50", c.baseURL, owner, repo)
 	resp, err := c.do(ctx, http.MethodGet, apiURL, "")
 	if err != nil {
 		return nil, err
@@ -121,7 +137,7 @@ func (c *githubClient) CreatePR(ctx context.Context, repoURL string, base, head,
 		return nil, err
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls", c.baseURL, owner, repo)
 	payload, _ := json.Marshal(map[string]string{"title": title, "head": head, "base": base, "body": body})
 	resp, err := c.do(ctx, http.MethodPost, apiURL, string(payload))
 	if err != nil {
@@ -158,7 +174,7 @@ func (c *githubClient) ListIssues(ctx context.Context, repoURL, label string) ([
 		return nil, err
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?state=open&per_page=50", owner, repo)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues?state=open&per_page=50", c.baseURL, owner, repo)
 	if label != "" {
 		// Use github's labels filter (comma-separated for OR). v0.5.x
 		// single-label only; multi-label OR is a documented open item.
@@ -229,7 +245,7 @@ func (c *githubClient) PostIssueComment(ctx context.Context, repoURL string, iss
 		return err
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, issueNumber)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.baseURL, owner, repo, issueNumber)
 	payload, _ := json.Marshal(map[string]string{"body": body})
 	resp, err := c.do(ctx, http.MethodPost, apiURL, string(payload))
 	if err != nil {
@@ -241,4 +257,62 @@ func (c *githubClient) PostIssueComment(ctx context.Context, repoURL string, iss
 		return fmt.Errorf("GitHub API error: %s", resp.Status)
 	}
 	return nil
+}
+
+// CreateIssue opens a new Issue via POST /repos/{owner}/{repo}/issues.
+// GitHub takes label names verbatim, so `labels` round-trips as given.
+// A blank labels slice is omitted from the payload entirely rather than
+// sent as an empty array — the API rejects the latter on some endpoints.
+func (c *githubClient) CreateIssue(ctx context.Context, repoURL, title, body string, labels []string) (*Issue, error) {
+	owner, repo, err := c.parseRepo(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]any{"title": title, "body": body}
+	if len(labels) > 0 {
+		payload["labels"] = labels
+	}
+	raw, _ := json.Marshal(payload)
+
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues", c.baseURL, owner, repo)
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("GitHub API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var out struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		Author    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out.Labels))
+	for _, l := range out.Labels {
+		names = append(names, l.Name)
+	}
+	return &Issue{
+		Number:  out.Number,
+		Title:   out.Title,
+		Body:    out.Body,
+		Author:  out.Author.Login,
+		Labels:  names,
+		State:   out.State,
+		HTMLURL: out.HTMLURL,
+	}, nil
 }

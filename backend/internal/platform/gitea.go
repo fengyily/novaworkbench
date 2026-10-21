@@ -187,3 +187,66 @@ func (c *giteaClient) PostIssueComment(ctx context.Context, repoURL string, issu
 	log.Printf("[platform/gitea] PostIssueComment not yet implemented (v0.5.x GitHub-only); repo=%s issue=%d", repoURL, issueNumber)
 	return errors.New("gitea PostIssueComment is not implemented in v0.5.x (GitHub-only)")
 }
+
+// CreateIssue opens a new Issue via POST /api/v1/repos/{owner}/{repo}/issues.
+//
+// Gitea's label field takes numeric label IDs, not names like GitHub and
+// GitLab do. Resolving names to ids would mean an extra GET per label and
+// a create-if-missing policy that the automated-testing module has no use
+// for, so v1 intentionally drops `labels` and instead prefixes the body
+// with an `[autotest]` marker — which is what the caller would have used a
+// label for anyway (tagging the issue so humans can find it).
+func (c *giteaClient) CreateIssue(ctx context.Context, repoURL, title, body string, labels []string) (*Issue, error) {
+	owner, repo, err := c.parseRepo(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]any{"title": title, "body": autotestMarker + body}
+	raw, _ := json.Marshal(payload)
+
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issues", c.baseURL, owner, repo)
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("Gitea API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var out struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		State   string `json:"state"`
+		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out.Labels))
+	for _, l := range out.Labels {
+		names = append(names, l.Name)
+	}
+	return &Issue{
+		Number:  out.Number,
+		Title:   out.Title,
+		Body:    out.Body,
+		Author:  out.User.Login,
+		Labels:  names,
+		State:   out.State,
+		HTMLURL: out.HTMLURL,
+	}, nil
+}
+
+// autotestMarker prefixes bodies of issues filed by the automated-testing
+// module on platforms where we cannot set a real label (see CreateIssue).
+const autotestMarker = "[autotest]\n\n"

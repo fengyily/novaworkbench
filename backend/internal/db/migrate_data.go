@@ -48,6 +48,12 @@ var copyOrder = []string{
 	"sessions",
 	"sub_tasks",
 	"scheduled_tasks",
+	// Automated testing — parent before child, matching the FK cascade chain
+	// projects → test_environments → {test_plans, test_runs} → test_run_cases.
+	"test_environments",
+	"test_plans",
+	"test_runs",
+	"test_run_cases",
 }
 
 // Migrate copies all data from src into dst (which must already be migrated —
