@@ -351,7 +351,7 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	// cleanly. The SubTaskPanel card title ("本地 shell 推送") already told
 	// the user this would happen.
 	if createPR {
-		prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, reqRow)
+		prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, commitMessage, reqRow)
 		if prCreated {
 			job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
 		} else if prURL != "" {
@@ -529,28 +529,33 @@ func buildPRShellBody(tmpl service.PRShellTemplates, logOut, diffOut string) str
 // (req_82e061807ef0372f: gh pr create failed on head==base but the shell still
 // reported "✅ 推送并创建 PR 完成 / PR: ...compare/main...main").
 //
-// PR title priority (req_9ead19cd39f632fd):
-//   1. prTitle  — LLM-curated (e.g. via generateCommitMessage → callLLMForCommit
-//                 → GenerateCommitArtifacts.PRTitle in llm_only/llm_first/script_first
-//                 with LLM fallback paths)
-//   2. reqRow.Title — user-supplied requirement title (preserved when no LLM
-//                    ran, e.g. script_only or script_first with no fallback)
-//   3. tmpl.PRTitleFallback — localized fallback formatted with the dev branch
+// PR title priority (req_9ead19cd39f632fd, req_3e7f5c152254672f):
+//  1. prTitle  — LLM-curated (via generateCommitMessage → callLLMForCommit
+//     → GenerateCommitArtifacts.PRTitle)
+//  2. commitMessage — the generated commit subject. It follows the project's
+//     commit_lang (script output or LLM), so it is on-style
+//     even when the requirement title is not. Placeholder
+//     prefixes ("feat:", "fix(scope):") are stripped because
+//     PR titles deliberately don't carry them.
+//  3. reqRow.Title — user-supplied requirement title (preserved when no LLM
+//     ran at all, e.g. script_only with empty stdout)
+//  4. tmpl.PRTitleFallback — localized fallback formatted with the dev branch
+//
+// Before (2) existed, a failed/empty prTitle fell straight through to
+// reqRow.Title: req_3e7f5c152254672f (English commit style, Chinese
+// requirement title) produced a Chinese PR title even though the PR body
+// correctly used the English template.
 //
 // PR body: 2-section subset (改了什么 + 备注) using service.NewPRShellTemplates
 // (locale-aware headings + fixed checklist). No AI attribution trailers, no
 // auto-push description, no placeholder text.
-func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote, commitLang, prTitle string, reqRow *model.Requirement) (string, bool) {
+func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote, commitLang, prTitle, commitMessage string, reqRow *model.Requirement) (string, bool) {
 	tmpl := service.NewPRShellTemplates(commitLang)
-
-	// Title: prTitle (LLM-curated) > reqRow.Title (user input) > PRTitleFallback (locale fallback).
-	title := strings.TrimSpace(prTitle)
-	if title == "" && reqRow != nil {
-		title = strings.TrimSpace(reqRow.Title)
+	reqTitle := ""
+	if reqRow != nil {
+		reqTitle = reqRow.Title
 	}
-	if title == "" {
-		title = fmt.Sprintf(tmpl.PRTitleFallback, dev)
-	}
+	title := resolvePRTitle(prTitle, commitMessage, reqTitle, dev, tmpl)
 
 	// Body: commits on dev not on base + diff stat, plus a fixed checklist.
 	// Deterministic — no LLM involvement. The 关联 Issue / 怎么验证 / 检查清单
@@ -597,6 +602,59 @@ func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (strin
 	default:
 		return compareURL(remote, base, dev), false
 	}
+}
+
+// resolvePRTitle applies the title priority documented on createPRShell.
+// Extracted as a pure helper so the ordering can be unit-tested without
+// mocking exec.Command for gh/glab/tea.
+func resolvePRTitle(prTitle, commitMessage, reqTitle, dev string, tmpl service.PRShellTemplates) string {
+	title := strings.TrimSpace(prTitle)
+	if title == "" {
+		// The commit subject was produced under the project's commit_lang,
+		// so it is a better on-style title than the requirement title.
+		title = stripConventionalCommitPrefix(strings.TrimSpace(commitMessage))
+	}
+	if title == "" {
+		title = strings.TrimSpace(reqTitle)
+	}
+	if title == "" {
+		title = fmt.Sprintf(tmpl.PRTitleFallback, dev)
+	}
+	return title
+}
+
+// stripConventionalCommitPrefix removes a leading Conventional Commits
+// prefix ("feat: ", "fix(scope): ", "chore!: ") so a commit subject can
+// double as a PR title. PR titles deliberately don't carry the prefix
+// (see service.PRLangRules). Returns the input unchanged when there is no
+// recognisable prefix.
+func stripConventionalCommitPrefix(s string) string {
+	i := strings.Index(s, ":")
+	if i <= 0 {
+		return s
+	}
+	head := s[:i]
+	// Drop an optional breaking-change "!" and "(scope)" suffix.
+	head = strings.TrimSuffix(head, "!")
+	if j := strings.Index(head, "("); j >= 0 {
+		if !strings.HasSuffix(head, ")") {
+			return s
+		}
+		head = head[:j]
+	}
+	// Only strip prefixes that are actual Conventional Commits types —
+	// a free-form title like "Phase: two" must survive untouched.
+	switch strings.ToLower(head) {
+	case "feat", "fix", "chore", "docs", "style", "refactor", "perf",
+		"test", "tests", "build", "ci", "revert":
+	default:
+		return s
+	}
+	rest := strings.TrimSpace(s[i+1:])
+	if rest == "" {
+		return s
+	}
+	return rest
 }
 
 // renderShellJobLog renders the JobStore's full log as the sub_task.artifact

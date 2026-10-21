@@ -44,9 +44,9 @@ type Gateway struct {
 	// rawBin is the original CLAUDE_BIN value (or "claude"). Held so
 	// resolveBin() can re-resolve the binary on cache miss instead of
 	// becoming permanently locked to a deleted absolute path.
-	rawBin   string
-	mu       sync.Mutex // guards binPath re-resolution
-	timeout  time.Duration
+	rawBin    string
+	mu        sync.Mutex // guards binPath re-resolution
+	timeout   time.Duration
 	claudeEnv ClaudeEnvProvider
 	llmCfg    LLMConfigProvider
 }
@@ -124,10 +124,9 @@ type GenerateCommitArtifactsOpts struct {
 }
 
 // generateCommitArtifactsResult is the JSON shape the model returns.
-// PRTitle is reserved for a follow-up — the strategy dispatcher
-// currently only consumes CommitMessage; keeping the field on the
-// wire means callers / future code don't have to rewire the prompt
-// when PR-title generation lands.
+// Both fields are part of the prompt contract: the strategy
+// dispatcher consumes CommitMessage, and the local shell push path
+// (createPRShell) consumes PRTitle as the PR title.
 type generateCommitArtifactsResult struct {
 	CommitMessage string `json:"commit_message"`
 	PRTitle       string `json:"pr_title"`
@@ -145,10 +144,11 @@ type generateCommitArtifactsResult struct {
 // timeout / API / parse / empty categories and decide whether to
 // fall back (script_first / llm_first modes).
 //
-// Currently only CommitMessage is consumed by the strategy
-// dispatcher; PRTitle is parsed for forward compatibility (a future
-// iteration will need a paired PR title when CommitArtifacts is
-// plumbed into the auto-push-PR wizard sub-task).
+// Both outputs are consumed in production: the strategy dispatcher
+// uses CommitMessage, and the local shell push path
+// (handler.createPRShell) uses PRTitle so the auto-created PR follows
+// the project's commit_lang instead of falling back to the (possibly
+// differently-languaged) requirement title.
 func (g *Gateway) GenerateCommitArtifacts(opts GenerateCommitArtifactsOpts) (*CommitArtifacts, *Usage, error) {
 	if g.llmCfg == nil {
 		return nil, nil, fmt.Errorf("llm not configured: no llm config provider")
@@ -700,10 +700,10 @@ func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID st
 // for a tool-less first turn). PermissionMode controls the --permission-mode flag
 // ("plan" or "" — empty means --dangerously-skip-permissions).
 type StreamOpts struct {
-	Prompt          string
-	WorkDir         string
-	SystemPrompt    string
-	Model           string
+	Prompt       string
+	WorkDir      string
+	SystemPrompt string
+	Model        string
 	// ClaudeConfigID pins this claude run to a specific claude_configs row —
 	// the gateway looks up that row's auth + base URL and injects them into
 	// the subprocess env instead of the global active config. Empty =
