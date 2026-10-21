@@ -439,6 +439,15 @@ export const requirements = {
     regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). A brand-new session will generate a new plan; the existing design session + refinement turns will not be inherited.',
     regenerateConfirmYes: 'Regenerate',
     regenerateConfirmCancel: 'Cancel',
+    // 「重新生成」 preflight dialog — borrows the DesignCodingImmediateModal
+    // preflight vocabulary so a user who already learned the DESIGN / ENV /
+    // sync fields there doesn't have to parse a different layout here. The
+    // dialog IS the picker: confirming dispatches the run directly with the
+    // values just selected (no knowledge-pre-read hop).
+    regenerateEyebrow: 'Regenerate · DESIGN',
+    regenerateDesignSection: 'Design parameters',
+    regenerateFlightAria: 'Regenerate configuration summary',
+    regenerateReadKnowledgeHint: 'Read project knowledge before the new design run, as extra context.',
     // Version dropdown (req_11e485759f583db8): a per-requirement
     // version switcher that only renders when there are >1 versions.
     // "Current" is the focus-only marker, every other row shows rev_no

@@ -460,6 +460,14 @@ export const requirements = {
     regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
     regenerateConfirmYes: '确认重新生成',
     regenerateConfirmCancel: '取消',
+    // 「重新生成」preflight 弹窗 — 沿用 DesignCodingImmediateModal 的
+    // preflight 视觉语言,用户已经熟悉的 DESIGN / ENV / 同步字段不用重新
+    // 学一次。弹窗本身即 picker:确认后直接带着本次选择派发 run,不再跳转
+    // 知识库预读弹窗。
+    regenerateEyebrow: '重新生成 · DESIGN',
+    regenerateDesignSection: '方案设计参数',
+    regenerateFlightAria: '重新生成配置摘要',
+    regenerateReadKnowledgeHint: '重新生成时读取项目知识库,作为新方案设计前的额外上下文。',
     // 版本下拉 (req_11e485759f583db8): 设计工具条上的版本选择器,只
     // 在设计 >1 版时出现。「当前版」项是焦点选中态(不可点击),其它版列
     // 出 rev_no + 时间,点击 → 切回 → 自动刷新。
