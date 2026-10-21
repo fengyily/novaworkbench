@@ -1,18 +1,20 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // seedSubTaskRowForContinueStop inserts a project + requirement + a single
 // sub_tasks row directly via SQL so the tests don't have to round-trip
 // through NewSubTaskService.Create (which would force a fresh title derived
 // from the prompt and seed the source column — neither of which the
-// ContinueAsNew / MarkStopped assertions care about).
+// ContinueReset / MarkStopped assertions care about).
 func seedSubTaskRowForContinueStop(t *testing.T, d *db.DB, args struct {
 	id, reqID, status, sessionID, sourceSID, artifact string
 	withBatchID bool
@@ -42,9 +44,10 @@ func seedSubTaskRowForContinueStop(t *testing.T, d *db.DB, args struct {
 }
 
 // seedSubTaskChildRow inserts a sub_tasks row that already has
-// parent_subtask_id pointing at another row, so the new
-// RecoverInterrupted / child-row tests can exercise the "tree child"
-// code paths without going through RedoAsNew / ContinueAsNew.
+// parent_subtask_id pointing at another row, so the
+// RecoverInterrupted / child-row tests can exercise the Adjust / legacy tree
+// code paths without going through RedoReset / ContinueReset (which re-arm a
+// row in place and therefore never create a child).
 func seedSubTaskChildRow(t *testing.T, d *db.DB, args struct {
 	id, reqID, parentID, status string
 }) {
@@ -59,15 +62,14 @@ func seedSubTaskChildRow(t *testing.T, d *db.DB, args struct {
 	}
 }
 
-// TestContinueAsNew_NewChildRow locks down the new tree-friendly continue
-// semantics: pressing Continue MUST grow a new sub_tasks row that hangs
-// under the original as a child. The parent row keeps its terminal
-// status ('error' or 'stopped') and its prior artifact intact so the
-// SubTaskPanel can render both cards — the stopped/errored original
-// (still showing the previous report) and the fresh child — at the same
-// time. The new row inherits source_session_id from the parent so the
-// runner can --resume the same JSONL conversation.
-func TestContinueAsNew_NewChildRow(t *testing.T) {
+// TestContinueReset_ReArmsSameRow locks down the in-place continue semantics:
+// pressing 继续 re-arms the SAME row (status flipped back to 'pending', the
+// previous attempt's results cleared) instead of growing a child card. The
+// session columns are deliberately preserved — the resumed run --resume's the
+// very JSONL the previous attempt appended to, so wiping session_id here
+// would strand it. The handler re-stamps the same pair through UpdateSession
+// right after the reset.
+func TestContinueReset_ReArmsSameRow(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForContinueStop(t, d, struct {
 		id, reqID, status, sessionID, sourceSID, artifact string
@@ -75,100 +77,117 @@ func TestContinueAsNew_NewChildRow(t *testing.T) {
 	}{id: "st_cont", reqID: "req_1", status: "stopped", sessionID: "sid_x", sourceSID: "sid_src", artifact: "原报告内容"})
 
 	svc := NewSubTaskService(d, nil)
-	got, err := svc.ContinueAsNew("st_cont", "")
+	got, err := svc.ContinueReset("st_cont", "")
 	if err != nil {
-		t.Fatalf("ContinueAsNew: %v", err)
+		t.Fatalf("ContinueReset: %v", err)
 	}
 
-	// Returned struct is the NEW child row.
-	if got.ID == "st_cont" {
-		t.Errorf("ContinueAsNew returned the parent id %q; expected a freshly minted child id", got.ID)
+	if got.ID != "st_cont" {
+		t.Errorf("returned id = %q, want st_cont (the clicked row, not a new child)", got.ID)
 	}
-	if got.ParentSubtaskID != "st_cont" {
-		t.Errorf("returned ParentSubtaskID = %q, want st_cont", got.ParentSubtaskID)
+	if got.Status != model.SubTaskStatusPending {
+		t.Errorf("status = %q, want pending", got.Status)
 	}
-	if got.Status != "pending" {
-		t.Errorf("new row status = %q, want pending", got.Status)
+	if got.Artifact != "" {
+		t.Errorf("artifact = %q, want empty (the resumed run rewrites it)", got.Artifact)
 	}
 	if got.JobID != "" {
-		t.Errorf("new row job_id = %q, want empty (runner mints a new one)", got.JobID)
+		t.Errorf("job_id = %q, want empty (handler mints a new one)", got.JobID)
 	}
 	if got.InputTokens != 0 || got.OutputTokens != 0 ||
 		got.CacheCreationTokens != 0 || got.CacheReadTokens != 0 {
-		t.Errorf("new row tokens not zeroed: in=%d out=%d cc=%d cr=%d",
+		t.Errorf("tokens not zeroed: in=%d out=%d cc=%d cr=%d",
 			got.InputTokens, got.OutputTokens, got.CacheCreationTokens, got.CacheReadTokens)
 	}
-
-	// Title must be the continue-prefixed shape so the SubTaskPanel can
-	// render a "继续: <原标题>" header.
-	if got.Title != "继续: t" {
-		t.Errorf("new row title = %q, want 继续: t", got.Title)
+	// Title / prompt are the work item, not the attempt — unchanged.
+	if got.Title != "t" || got.Prompt != "p" {
+		t.Errorf("work item clobbered: title=%q prompt=%q", got.Title, got.Prompt)
+	}
+	// The session columns survive so --resume has something to point at.
+	if got.SessionID != "sid_x" {
+		t.Errorf("session_id = %q, want sid_x (Continue resumes this JSONL)", got.SessionID)
+	}
+	if got.SourceSessionID != "sid_src" {
+		t.Errorf("source_session_id = %q, want sid_src", got.SourceSessionID)
 	}
 
-	// The new child carries the parent's session id as source_session_id so
-	// the runner can --resume the same conversation; the new row's own
-	// session_id stays empty (runner mints a fresh one).
-	if got.SourceSessionID != "sid_x" {
-		t.Errorf("new row source_session_id = %q, want sid_x (inherited for --resume)", got.SourceSessionID)
-	}
-
-	// Parent row stays untouched in DB — its previous artifact is still
-	// visible mid-run until the new attempt lands a terminal artifact.
-	parent, err := svc.Get("st_cont")
-	if err != nil {
-		t.Fatalf("Get parent: %v", err)
-	}
-	if parent.Status != "stopped" {
-		t.Errorf("parent status = %q, want stopped (ContinueAsNew must NOT mutate the parent)", parent.Status)
-	}
-	if parent.Artifact != "原报告内容" {
-		t.Errorf("parent artifact clobbered: got %q, want 原报告内容", parent.Artifact)
-	}
-	if parent.JobID != "" {
-		t.Errorf("parent job_id clobbered: got %q, want empty (was empty in fixture)", parent.JobID)
-	}
-	if parent.SessionID != "sid_x" {
-		t.Errorf("parent session_id clobbered: got %q, want sid_x", parent.SessionID)
-	}
-	if parent.SourceSessionID != "sid_src" {
-		t.Errorf("parent source_session_id clobbered: got %q, want sid_src", parent.SourceSessionID)
-	}
-	if parent.ParentSubtaskID != "" {
-		t.Errorf("parent ParentSubtaskID = %q, want empty (parent itself must not be a child)", parent.ParentSubtaskID)
-	}
-
-	// Row count for the requirement grew by exactly one.
 	var n int
 	if err := d.QueryRow("SELECT COUNT(*) FROM sub_tasks WHERE requirement_id='req_1'").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("row count = %d, want 2 (ContinueAsNew must insert a child)", n)
+	if n != 1 {
+		t.Errorf("row count = %d, want 1 (in-place continue must not insert)", n)
 	}
 }
 
-// TestContinueAsNew_RejectsWrongParentStatus guards the new status gate:
-// only errored or stopped parents may be continued. A 'done' or
-// 'pending' parent has no reason to spawn a child — the user shouldn't
-// double up on a finished run or race against a still-running one.
-func TestContinueAsNew_RejectsWrongParentStatus(t *testing.T) {
+// TestContinueReset_AcceptsStoppedAndError pins the wider status guard: 继续
+// is the user's way to pick a sub-task back up from a manual Stop as well as
+// from a failure, so both source states are re-armable.
+func TestContinueReset_AcceptsStoppedAndError(t *testing.T) {
+	for _, status := range []string{"stopped", "error"} {
+		t.Run(status, func(t *testing.T) {
+			d := newTestDB(t)
+			seedSubTaskRowForContinueStop(t, d, struct {
+				id, reqID, status, sessionID, sourceSID, artifact string
+				withBatchID bool
+			}{id: "st_" + status, reqID: "req_1", status: status, sessionID: "sid_x", sourceSID: "sid_src", artifact: "报告"})
+
+			svc := NewSubTaskService(d, nil)
+			if _, err := svc.ContinueReset("st_"+status, ""); err != nil {
+				t.Fatalf("ContinueReset from %q: %v", status, err)
+			}
+		})
+	}
+}
+
+// TestContinueReset_RejectsWrongParentStatus guards the status gate: only
+// errored or stopped rows may be continued. A 'done' row has nothing left to
+// continue, and a 'running' row is already owned by a live dispatch — the
+// clickable action there is Stop, not Continue.
+func TestContinueReset_RejectsWrongParentStatus(t *testing.T) {
+	for _, status := range []string{"done", "running", "pending"} {
+		t.Run(status, func(t *testing.T) {
+			d := newTestDB(t)
+			seedSubTaskRowForContinueStop(t, d, struct {
+				id, reqID, status, sessionID, sourceSID, artifact string
+				withBatchID bool
+			}{id: "st_" + status, reqID: "req_1", status: status, sessionID: "sid_x", sourceSID: "sid_src", artifact: "已完成报告"})
+
+			svc := NewSubTaskService(d, nil)
+			if _, err := svc.ContinueReset("st_"+status, ""); !errors.Is(err, ErrAlreadyContinuing) {
+				t.Fatalf("ContinueReset on %q: err = %v, want ErrAlreadyContinuing", status, err)
+			}
+			got, err := svc.Get("st_" + status)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != status {
+				t.Errorf("status = %q, want %q (a rejected reset must not touch the row)", got.Status, status)
+			}
+			if got.Artifact != "已完成报告" {
+				t.Errorf("artifact clobbered by a rejected reset: %q", got.Artifact)
+			}
+		})
+	}
+}
+
+// TestContinueReset_OnlyOneWinner is the concurrency contract for the resume
+// path: two 继续 clicks on one card must not spawn two claude processes
+// appending to the same JSONL. The guard is inside the UPDATE, so the second
+// call sees ErrAlreadyContinuing (mapped to HTTP 409).
+func TestContinueReset_OnlyOneWinner(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForContinueStop(t, d, struct {
 		id, reqID, status, sessionID, sourceSID, artifact string
 		withBatchID bool
-	}{id: "st_done", reqID: "req_1", status: "done", sessionID: "sid_x", sourceSID: "sid_src", artifact: "已完成报告"})
+	}{id: "st_race2", reqID: "req_1", status: "stopped", sessionID: "sid_x", sourceSID: "sid_src", artifact: "报告"})
 
 	svc := NewSubTaskService(d, nil)
-	if _, err := svc.ContinueAsNew("st_done", ""); err == nil {
-		t.Fatal("ContinueAsNew on a 'done' parent succeeded; want error")
+	if _, err := svc.ContinueReset("st_race2", ""); err != nil {
+		t.Fatalf("first ContinueReset: %v", err)
 	}
-
-	// 'running' must also be rejected (the existing runner owns it).
-	if _, err := d.Exec(`UPDATE sub_tasks SET status='running' WHERE id='st_done'`); err != nil {
-		t.Fatalf("flip status: %v", err)
-	}
-	if _, err := svc.ContinueAsNew("st_done", ""); err == nil {
-		t.Fatal("ContinueAsNew on a 'running' parent succeeded; want error")
+	if _, err := svc.ContinueReset("st_race2", ""); !errors.Is(err, ErrAlreadyContinuing) {
+		t.Fatalf("second ContinueReset: err = %v, want ErrAlreadyContinuing", err)
 	}
 }
 

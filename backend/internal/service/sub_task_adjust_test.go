@@ -65,7 +65,7 @@ func TestCreateAdjustment_InheritsParentSession(t *testing.T) {
 	}
 
 	// 1. New row grew — the adjustment must INSERT a child row, not mutate
-	//    the parent in place (same shape as RedoAsNew so the panel renders
+	//    the parent in place (same shape as RedoReset so the panel renders
 	//    a tree of children, not a single row that flips between states).
 	if res.ID == "st_adj" {
 		t.Errorf("returned the parent id %q; expected a freshly minted child id", res.ID)

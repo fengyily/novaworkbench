@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -346,17 +347,17 @@ func (h *WizardHandler) runSubTask(
 		return
 	}
 	// v0.5.x 兜底：StartSubTask 通过 NewPendingSubTask 写入 source=''，
-	// Adjust/Redo/Continue 走 service.CreateAdjustment / RedoAsNew /
-	// ContinueAsNew 已经硬编码 source='manual'。这里统一把空串视作 manual，
+	// Adjust 走 service.CreateAdjustment、Redo/Continue 走就地重置
+	// (RedoReset / ContinueReset) 时，行上的 source 都是继承来的既有值。
+	// 这里统一把空串视作 manual，
 	// 让三阶段 tracker 在 Run 入口的 phaseEnabledForSource 判断里被打开。
 	// schema DEFAULT 'manual' 是底线（存量空串之外的 INSERT），本兜底不会
 	// 影响那条路径，且不修 DB 数据。
 	if st.Source == "" {
 		st.Source = model.SubTaskSourceManual
 	}
-	// Adjust/Redo/Continue 走的是 service.CreateAdjustment / RedoAsNew /
-	// ContinueAsNew，那几条路径已经写好了 st.ReportMode（继承自父）；空
-	// 串回落 auto 与 sessionMode 同理。
+	// Adjust 走 service.CreateAdjustment（ReportMode 继承自父），Redo/Continue
+	// 就地重置后 ReportMode 原样保留；空串回落 auto 与 sessionMode 同理。
 	if reportMode == "" {
 		reportMode = st.ReportMode
 	}
@@ -663,24 +664,46 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false, parent.SourceSessionID, "")
 }
 
+// releaseDispatchedSubTask keeps an orchestration batch's bookkeeping honest
+// after 重做 / 继续 re-armed a child in place. The reset clears the row's
+// batch_id (see SubTaskService.resetForManualRerun — the manual run must not
+// be claimable by the queue), so the batch would otherwise wait forever for a
+// child it no longer counts.
+//
+// No-op for the common case: a manual sub-task has no batch. Batch failures
+// are logged, never surfaced — refusing the redo because a counter didn't
+// decrement would be a strictly worse outcome than a batch that parks in
+// 'dispatching' and can still be driven by hand via 生成汇总.
+func (h *WizardHandler) releaseDispatchedSubTask(batchID, action string) {
+	if batchID == "" || h.batchSvc == nil {
+		return
+	}
+	if err := h.batchSvc.ReleaseDispatchingChild(batchID); err != nil {
+		log.Printf("[sub-task %s] failed to release child from batch %s: %v", action, batchID, err)
+	}
+}
+
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
 //
 // Body: { "model"?: "..." }
 //
-// Re-runs a FAILED sub-task by INSERTing a NEW child sub_tasks row (via
-// SubTaskService.RedoAsNew) that points back at the failed parent via
-// parent_subtask_id. The failed row is preserved (its status stays
-// 'error') so the SubTaskPanel can render the redo as a nested child
-// rather than overwriting the parent's history. The child gets a brand-new
-// id, a brand-new session id, and a brand-new JobStore job.
+// Re-runs a FAILED sub-task IN PLACE: SubTaskService.RedoReset flips the very
+// row the user clicked back to 'pending' and clears the previous attempt's
+// results, so one sub-task stays one row and one SSE stream instead of growing
+// a new child card per click. The response carries the SAME sub_task_id, which
+// is what the SubTaskCard already keys its optimistic flip and its SSE
+// subscription on (onRestarted(st.id, job_id)) — the front end needed no
+// change for this, it was always mutating the card in place while the work
+// actually happened on a different row underneath.
 //
-// Session-derivation strategy: the child forks the requirement's main-agent
-// session (coding_session_id → design_session_id fallback), NOT the parent's
-// own session — so the new run starts from a clean slate, free of the
-// partial / broken state the failed run left behind on the parent's JSONL.
-// This mirrors the original RedoSubTask semantics ("从 source session 干净
-// fork 再跑") but the redo is now materialized as a child row instead of
-// mutating the parent in place.
+// The attempt still gets a brand-new session id and a brand-new JobStore job;
+// only the row identity is reused.
+//
+// Session-derivation strategy: the attempt forks the requirement's main-agent
+// session (coding_session_id → design_session_id fallback), NOT the row's own
+// session — so the new run starts from a clean slate, free of the partial /
+// broken state the failed run left behind on the JSONL ("从 source session
+// 干净 fork 再跑"). Picking that conversation back up is ContinueSubTask's job.
 //
 // The optional model override lets the user switch models on the retry;
 // empty falls back to the parent row's stored model (then to the developer
@@ -729,37 +752,40 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a NEW child row via RedoAsNew. The failed parent's status stays
-	// 'error' (preserved on the parent row); the child gets its own id, a
-	// fresh session id, and parent_subtask_id pointing back at the failed
-	// row so SubTaskPanel renders it as a nested child.
-	st, err := h.subTaskSvc.RedoAsNew(sid, body.Model)
+	// Re-arm the SAME row. The status guard lives in the UPDATE's WHERE
+	// clause, so a second concurrent click loses the race and gets a 409
+	// instead of a second goroutine on the same work item. No new row is
+	// created and no new card appears in the panel.
+	st, err := h.subTaskSvc.RedoReset(sid, body.Model)
 	if err != nil {
+		if errors.Is(err, service.ErrAlreadyRedoing) {
+			writeError(w, http.StatusConflict, "ALREADY_REDOING", "该子任务已开始重做，请勿重复提交")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
+	// The reset detached the row from its orchestration batch (if it had one);
+	// shrink that batch's expected total so its done+errored >= total_children
+	// gate still drains. Best-effort — see ReleaseDispatchingChild.
+	h.releaseDispatchedSubTask(parent.BatchID, "redo")
 	newSID := util.NewUUID()
-	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
-		log.Printf("[sub-task redo] failed to persist session for %s: %v", st.ID, perr)
+	if perr := h.subTaskSvc.UpdateSession(sid, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist session for %s: %v", sid, perr)
 	}
 	job := h.jobs.Create(id)
-	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
-		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", st.ID, perr)
-	}
-	if body.Model != "" {
-		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
-			log.Printf("[sub-task redo] failed to persist model for %s: %v", st.ID, perr)
-		}
+	if perr := h.subTaskSvc.UpdateJobID(sid, job.ID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", sid, perr)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":         job.ID,
-		"sub_task_id":    st.ID,
+		"sub_task_id":    sid,
 		"reused_session": "true",
 	})
 
 	// Re-use the shared spawn helper with adjust=false, fork=true and the
-	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
-	// from a clean fork off the requirement's main-agent session.
+	// ORIGINAL prompt (st.Prompt) so the same task re-executes from a clean
+	// fork off the requirement's main-agent session.
 	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false, parent.SourceSessionID, "")
 }
 
@@ -774,21 +800,20 @@ const continueSubTaskPrompt = "继续完成之前的子任务。请先检查当�
 //
 // Body: { "model"?: "..." }
 //
-// Resumes an interrupted / failed / stopped sub-task by INSERTing a NEW
-// child sub_tasks row (via SubTaskService.ContinueAsNew) that points back
-// at the original via parent_subtask_id. The parent row is preserved (its
-// status stays 'error' or 'stopped') so the SubTaskPanel can render the
-// resume as a nested child. Compared to RedoSubTask:
+// Resumes an interrupted / failed / stopped sub-task IN PLACE:
+// SubTaskService.ContinueReset re-arms the same row (status flipped back to
+// 'pending', the previous attempt's results cleared), so the card the user
+// clicked is the card that keeps running — no second row, no second SSE
+// stream. Compared to RedoSubTask:
 //
 //   - Redo forks the requirement's main-agent session (clean start, new
 //     session id, --fork-session).
-//   - Continue reuses parent.SessionID on the NEW child row and runs
-//     --resume <parent.SessionID> so the child continues the same JSONL
-//     the previous attempt left off in, inheriting the conversation
-//     history it had built up. The parent's artifact stays visible on the
-//     parent card until the new run's Finish overwrites the child's
-//     artifact, so a user who refreshes mid-run sees the partial report on
-//     the parent card instead of a blank child card.
+//   - Continue reuses the row's own SessionID and runs
+//     --resume <SessionID> so the same row continues the same JSONL the
+//     previous attempt left off in, inheriting the conversation history it
+//     had built up. The reset does NOT clear session_id — the resume needs it,
+//     and ContinueReset is only reachable from this handler, which immediately
+//     re-stamps the same value through UpdateSession below.
 //
 // Trigger conditions: parent.Status must be one of {error, stopped}.
 // running/pending/done are NOT continue-eligible:
@@ -838,42 +863,47 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Create a NEW child row via ContinueAsNew. The parent row is preserved
-	// with its 'error' / 'stopped' status intact; the child inherits the
-	// parent's session_id (via the UpdateSession call below) and
-	// source_session_id (stamped by ContinueAsNew), so --resume picks up
-	// the same JSONL.
-	st, err := h.subTaskSvc.ContinueAsNew(sid, body.Model)
+	// Capture the session to resume BEFORE the reset runs — the row keeps its
+	// session_id across ContinueReset, but reading it up front keeps the
+	// "what does --resume point at" question answered by the same snapshot the
+	// status guard above was checked against.
+	parentSessionID := parent.SessionID
+	sourceSID := parent.SessionID
+
+	// Re-arm the SAME row. ContinueReset's guard is
+	// status IN ('error','stopped'), evaluated inside the UPDATE, so a double
+	// click yields one run and one 409 rather than two goroutines resuming the
+	// same JSONL at once.
+	st, err := h.subTaskSvc.ContinueReset(sid, body.Model)
 	if err != nil {
+		if errors.Is(err, service.ErrAlreadyContinuing) {
+			writeError(w, http.StatusConflict, "ALREADY_CONTINUING", "该子任务已在继续执行，请勿重复提交")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
-	newSID := parent.SessionID
-	sourceSID := parent.SessionID
+	// Row left its orchestration batch (if any) — keep the batch's child count
+	// consistent. Best-effort; see ReleaseDispatchingChild.
+	h.releaseDispatchedSubTask(parent.BatchID, "continue")
 	job := h.jobs.Create(id)
-	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
-		log.Printf("[sub-task continue] failed to persist job_id for %s: %v", st.ID, perr)
+	if perr := h.subTaskSvc.UpdateJobID(sid, job.ID); perr != nil {
+		log.Printf("[sub-task continue] failed to persist job_id for %s: %v", sid, perr)
 	}
-	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
-		log.Printf("[sub-task continue] failed to persist session for %s: %v", st.ID, perr)
-	}
-	if body.Model != "" {
-		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
-			log.Printf("[sub-task continue] failed to persist model for %s: %v", st.ID, perr)
-		}
+	if perr := h.subTaskSvc.UpdateSession(sid, parentSessionID, sourceSID); perr != nil {
+		log.Printf("[sub-task continue] failed to persist session for %s: %v", sid, perr)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":         job.ID,
-		"sub_task_id":    st.ID,
+		"sub_task_id":    sid,
 		"reused_session": "false",
 	})
 
-	// Continue reuses the parent's session id; --resume <parent.SessionID>
-	// runs the child in the same JSONL the previous attempt appended to.
-	// Run() with fork=false picks "## 继续执行" as the prompt header so the
-	// child's contextualization stays consistent with the wizard's coding
-	// ContinueCoding path.
-	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID, "")
+	// Continue reuses the row's own session id; --resume <parentSessionID>
+	// picks up the same JSONL the previous attempt appended to. Run() with
+	// fork=false picks the "## 继续执行" prompt header so the contextualization
+	// stays consistent with the wizard's coding ContinueCoding path.
+	go h.runSubTask(req, st, job, parentSessionID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID, "")
 }
 
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.

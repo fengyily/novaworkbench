@@ -34,6 +34,18 @@ type SubTaskService struct {
 	archiveSvc *ReportArchiveService
 }
 
+// Sentinel errors returned by RedoReset / ContinueReset when the conditional
+// UPDATE matched no row — i.e. the sub-task is no longer in a state this
+// action can recover from. The status guard lives in the WHERE clause (not in
+// a preceding SELECT) so the check and the flip are one atomic statement: two
+// concurrent Redo clicks on the same card produce exactly one winner and one
+// 409, instead of two goroutines racing on the same row. Handlers map these
+// to HTTP 409.
+var (
+	ErrAlreadyRedoing    = errors.New("sub_task is not in 'error' status — 重做 requires a failed sub-task")
+	ErrAlreadyContinuing = errors.New("sub_task is not in 'error' or 'stopped' status — 继续 requires an interrupted sub-task")
+)
+
 func NewSubTaskService(database *db.DB, archiveSvc *ReportArchiveService) *SubTaskService {
 	return &SubTaskService{db: database, archiveSvc: archiveSvc}
 }
@@ -84,8 +96,9 @@ func (s *SubTaskService) notifyChanged(reqID string) {
 // dispatch children in batch_seq order.
 //
 // parentSubtaskID links this row under a parent sub_task when it was created
-// by Adjust / Redo / Continue. Pass "" for roots (manual StartSubTask / auto-
-// orchestrated children). Drives SubTaskPanel's recursive tree rendering.
+// by Adjust (Redo / Continue re-arm their row in place and never create one).
+// Pass "" for roots (manual StartSubTask / auto-orchestrated children). Drives
+// SubTaskPanel's recursive tree rendering.
 //
 // source stamps the row's provenance tag (see model.SubTaskSource*). Empty
 // defaults to SubTaskSourceManual — pre-existing callers that omit the field
@@ -665,7 +678,7 @@ func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int
 // ReArmErroredForRetry flips this batch's failed children back to 'pending' so
 // the next tick re-dispatches them, and returns how many rows were re-armed.
 // This is the automatic half of "失败重做"; the manual half is the card's
-// 重做 / 继续 buttons (RedoAsNew / ContinueAsNew), which stay available
+// 重做 / 继续 buttons (RedoReset / ContinueReset), which stay available
 // regardless of the setting.
 //
 // Guards, in the WHERE clause:
@@ -1096,138 +1109,110 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}, nil
 }
 
-// RedoAsNew creates a fresh sub_task row that hangs under the failed parent
-// as a child — replaces the prior in-place RedoReset so the SubTaskPanel can
-// render Redo / Continue / Adjust as a recursive tree. The original failed
-// row stays untouched (status remains 'error') so its card still tells the
-// user "this attempt failed" while the new child carries the fresh attempt.
+// resetForManualRerun is the shared body of RedoReset / ContinueReset:
+// the sub-task row is re-armed IN PLACE for a fresh attempt, so the card the
+// user clicked is the card that runs again (one sub-task = one row = one SSE
+// stream), instead of growing a new child row per attempt.
 //
-// Inheritance from the parent:
-//   - prompt + requirement_id (same work item)
-//   - source_session_id (runner uses this as the --fork-session source so
-//     the redo inherits the same project context as the failed attempt)
-//   - agent_server_id, session_mode (execution environment stays coherent)
-//   - model (when modelOverride is empty)
+// What is cleared is exactly the "result of the previous attempt":
+// artifact / job_id / started_at / completed_at / token + cost + duration
+// counters / the three phase_* fragments + phase_emitted. What is left
+// untouched is the work item itself — id, requirement_id, parent_subtask_id,
+// title, prompt, source, session_mode, report_mode, retry_count, agent_server_id,
+// claude_config_id and created_at all survive, because the caller (this
+// handler) re-runs the SAME prompt in the SAME environment.
 //
-// The new row's session_id is left empty — the wizard handler / SubTaskRunner
-// will mint a fresh claude session id via UpdateSession before spawning, the
-// same way a brand-new manual sub-task is initialized.
-func (s *SubTaskService) RedoAsNew(parentID, modelOverride string) (*model.SubTask, error) {
-	if parentID == "" {
-		return nil, errors.New("parent sub_task id is required")
+// batch_id / batch_seq / batch_id_seq_run ARE cleared, and that is load-bearing
+// rather than cosmetic: the re-run is dispatched by the handler's own goroutine
+// (SubTaskRunner.Run, under the project queue + process semaphore), while a
+// row that still carries a batch_id is a claim candidate for
+// OrchestrationQueue.ClaimNextPending, which selects on
+// (batch_id, status='pending'). A manual redo of an auto-orchestrated child
+// would therefore sit at 'pending' for as long as it queues behind the
+// project's concurrency cap — minutes at the default cap of 1 — and the 10s
+// batch tick would claim it and spawn a SECOND claude process on the same row
+// and the same worktree. Detaching keeps the queue out of the business, which
+// is also what the pre-0.5.x tree implementation did (the redo child it
+// inserted carried batch_id=''). The batch's total_children is decremented by
+// the caller (OrchestrationBatchService.ReleaseDispatchingChild) so the
+// batch's done+errored >= total_children gate still drains.
+//
+// The status guard (statusClause is a complete predicate over the status
+// column) lives inside the UPDATE's WHERE clause, which is what makes
+// concurrent Redo / Continue clicks safe: exactly one statement flips the row,
+// the loser sees RowsAffected==0 and gets the sentinel error.
+//
+// model is switched only when modelOverride is non-empty (the user picked a
+// different model in the card's picker) — an empty override must not blank the
+// model the previous attempt used. SaveThinking upserts on the next run, so
+// deleting the stale thinking row here is safe even if a crash lands between
+// the UPDATE and the DELETE.
+func (s *SubTaskService) resetForManualRerun(id, modelOverride, statusClause string, statusArgs []any, conflictErr error) (*model.SubTask, error) {
+	if id == "" {
+		return nil, errors.New("sub_task_id is required")
 	}
-	parent, err := s.Get(parentID)
-	if err != nil {
-		return nil, fmt.Errorf("load parent sub_task: %w", err)
-	}
-	modelName := modelOverride
-	if modelName == "" {
-		modelName = parent.Model
-	}
-	title := capTitle("重做: "+parent.Title, 80)
-	redoReportMode := parent.ReportMode
-	if redoReportMode == "" {
-		redoReportMode = model.SubTaskReportModeAuto
-	}
-	id := util.NewID("st")
 	now := time.Now()
-	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, report_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
-		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
-		parent.SessionMode, redoReportMode, now, now)
+	args := []any{model.SubTaskStatusPending, modelOverride, modelOverride, now, id}
+	args = append(args, statusArgs...)
+	res, err := s.db.Exec(`UPDATE sub_tasks SET
+		status=?, artifact='', job_id='',
+		input_tokens=0, output_tokens=0,
+		cache_creation_tokens=0, cache_read_tokens=0,
+		cost_cents=0, duration_seconds=0,
+		started_at=NULL, completed_at=NULL,
+		phase_understanding='', phase_implementation='', phase_summary='', phase_emitted=0,
+		batch_id='', batch_seq=0, batch_id_seq_run=NULL,
+		model=CASE WHEN ? <> '' THEN ? ELSE model END,
+		updated_at=?
+		WHERE id=? AND `+statusClause,
+		args...)
 	if err != nil {
-		return nil, fmt.Errorf("insert redo sub_task: %w", err)
+		return nil, fmt.Errorf("reset sub_task %s: %w", id, err)
 	}
-	return &model.SubTask{
-		ID:               id,
-		RequirementID:    parent.RequirementID,
-		ParentSubtaskID:  parent.ID,
-		Title:            title,
-		Prompt:           parent.Prompt,
-		Status:           model.SubTaskStatusPending,
-		Model:            modelName,
-		SourceSessionID:  parent.SessionID,
-		BatchID:          "",
-		BatchSeq:         0,
-		Source:           model.SubTaskSourceManual,
-		AgentServerID:    parent.AgentServerID,
-		AgentServerIDSet: true,
-		SessionMode:      parent.SessionMode,
-		ReportMode:       redoReportMode,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}, nil
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, conflictErr
+	}
+	// Best-effort: the previous attempt's reasoning text belongs to the run we
+	// just threw away. A failure here only means the card shows the old
+	// thinking until the new run overwrites it via SaveThinking.
+	if _, derr := s.db.Exec(`DELETE FROM sub_task_thinking WHERE sub_task_id=?`, id); derr != nil {
+		log.Printf("[sub-task] %s: cleanup stale thinking: %v", id, derr)
+	}
+	return s.Get(id)
 }
 
-// ContinueAsNew is the Continue-path twin of RedoAsNew — it inserts a fresh
-// child row that hangs under the parent (status must be 'error' or 'stopped')
-// instead of re-arming the parent in place. The handler's runner then spawns
-// the new attempt with `--resume <parent.SessionID>`, so the conversation
-// continues from where the old run stopped (whether that was a manual Stop,
-// a graceful error exit, or a mid-run crash). The parent's session_id and
-// session_mode are inherited verbatim so the resume path lands in the same
-// context the parent left behind.
+// RedoReset re-arms a FAILED sub-task in place for a clean re-run: the same
+// row flips back to 'pending' with every result column cleared, so the
+// SubTaskPanel card the user clicked is the card that runs again.
 //
-// Like RedoAsNew, the original row keeps its terminal status so the SubTaskPanel
-// shows the failure history alongside the new attempt.
-func (s *SubTaskService) ContinueAsNew(parentID, modelOverride string) (*model.SubTask, error) {
-	if parentID == "" {
-		return nil, errors.New("parent sub_task id is required")
-	}
-	parent, err := s.Get(parentID)
-	if err != nil {
-		return nil, fmt.Errorf("load parent sub_task: %w", err)
-	}
-	if parent.Status != model.SubTaskStatusError && parent.Status != model.SubTaskStatusStopped {
-		return nil, fmt.Errorf("continue requires parent in error or stopped, got %q", parent.Status)
-	}
-	modelName := modelOverride
-	if modelName == "" {
-		modelName = parent.Model
-	}
-	continueMode := parent.SessionMode
-	if continueMode == "" {
-		continueMode = model.SubTaskSessionModeFork
-	}
-	continueReportMode := parent.ReportMode
-	if continueReportMode == "" {
-		continueReportMode = model.SubTaskReportModeAuto
-	}
-	title := capTitle("继续: "+parent.Title, 80)
-	id := util.NewID("st")
-	now := time.Now()
-	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, report_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
-		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
-		continueMode, continueReportMode, now, now)
-	if err != nil {
-		return nil, fmt.Errorf("insert continue sub_task: %w", err)
-	}
-	return &model.SubTask{
-		ID:               id,
-		RequirementID:    parent.RequirementID,
-		ParentSubtaskID:  parent.ID,
-		Title:            title,
-		Prompt:           parent.Prompt,
-		Status:           model.SubTaskStatusPending,
-		Model:            modelName,
-		SourceSessionID:  parent.SessionID,
-		BatchID:          "",
-		BatchSeq:         0,
-		Source:           model.SubTaskSourceManual,
-		AgentServerID:    parent.AgentServerID,
-		AgentServerIDSet: true,
-		SessionMode:      continueMode,
-		ReportMode:       continueReportMode,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}, nil
+// The run itself forks the requirement's main-agent session (fork=true, a
+// freshly minted session id) rather than resuming the failed attempt's own
+// JSONL — the point of 重做 is a clean slate, free of whatever partial / broken
+// state killed the previous run. Continuing that same conversation is what
+// ContinueReset is for.
+//
+// Concurrency: the status guard is `status='error'` inside the UPDATE, so two
+// simultaneous clicks on the same card cannot both start a run — the loser gets
+// ErrAlreadyRedoing (HTTP 409 ALREADY_REDOING). This is strictly safer than
+// inserting a second row, which used to leave two goroutines writing the same
+// logical work item.
+func (s *SubTaskService) RedoReset(id, modelOverride string) (*model.SubTask, error) {
+	return s.resetForManualRerun(id, modelOverride, "status=?", []any{model.SubTaskStatusError}, ErrAlreadyRedoing)
+}
+
+// ContinueReset is the Continue-path twin of RedoReset: it also re-arms the row
+// in place, but it accepts a wider set of source states ('error' or 'stopped')
+// because a Continue is the user's way to pick a sub-task back up from wherever
+// it stopped — a manual Stop, a graceful error exit, or a mid-run crash.
+//
+// The caller then spawns the run with fork=false and source=new session, so
+// the CLI --resume's the very JSONL the previous attempt appended to. The
+// session columns are deliberately NOT cleared by the reset: unlike Redo (which
+// mints a brand-new session id), Continue hands the handler the row's own
+// session_id to resume, and clearing it here would strand that.
+func (s *SubTaskService) ContinueReset(id, modelOverride string) (*model.SubTask, error) {
+	return s.resetForManualRerun(id, modelOverride, "status IN (?, ?)",
+		[]any{model.SubTaskStatusError, model.SubTaskStatusStopped}, ErrAlreadyContinuing)
 }
 
 // MarkStopped flips a running sub_task into the "stopped" terminal state
@@ -1446,9 +1431,9 @@ func (s *SubTaskService) UpdatePhaseOutput(id, phase, markdown string) error {
 func (s *SubTaskService) FinishWithPhases(
 	id, status, artifact string,
 	phases struct {
-		Understanding string
+		Understanding  string
 		Implementation string
-		Summary       string
+		Summary        string
 	},
 	modelName string,
 	tokens model.SubTaskTokens,

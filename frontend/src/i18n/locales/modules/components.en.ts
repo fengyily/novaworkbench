@@ -210,7 +210,10 @@ export const components = {
     cancel: 'Cancel',
     adjustBusy: 'Starting…',
     adjustSubmit: '🚀 Send follow-up',
-    redoHint: 'Re-run the task; the new attempt will appear as a child node',
+    // Redo re-arms the SAME row: one sub-task id, one card, one SSE stream.
+    // The attempt forks a brand-new claude session off the requirement's main
+    // session, so it starts from a clean slate.
+    redoHint: 'Re-run the task in place on the same card',
     redoModelLabel: 'Redo model',
     redoSubmit: '🚀 Start redo',
     errAdjust: 'Failed to send follow-up',
@@ -221,7 +224,7 @@ export const components = {
     // and then realised they wanted to keep going picks Continue instead
     // of Redo.
     continueToggle: 'Continue',
-    continueHint: '--resume the original session; the new attempt will appear as a child node',
+    continueHint: '--resume the original session, continuing on the same card',
     continueSubmit: '▶ Continue',
     continueBusy: 'Continuing…',
     errContinue: 'This sub-task cannot be continued',
