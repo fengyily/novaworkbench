@@ -88,3 +88,77 @@ func TestCreatePRShell_BodyShape(t *testing.T) {
 		}
 	}
 }
+
+// TestResolvePRTitle pins the title priority used by createPRShell. The
+// regression it guards: req_3e7f5c152254672f had prTitle == "" and the
+// English-style project got a Chinese PR title because reqRow.Title was
+// used before the (already commit_lang-compliant) commit subject.
+func TestResolvePRTitle(t *testing.T) {
+	en := service.NewPRShellTemplates("en")
+
+	cases := []struct {
+		name          string
+		prTitle       string
+		commitMessage string
+		reqTitle      string
+		want          string
+	}{
+		{
+			name:          "llm PR title wins",
+			prTitle:       "Lead the stats homepage with an all-time attack total",
+			commitMessage: "feat: add attack total",
+			reqTitle:      "首页显示攻击总数",
+			want:          "Lead the stats homepage with an all-time attack total",
+		},
+		{
+			name:          "empty prTitle falls back to commit subject",
+			commitMessage: "xdplog-report: add all-time attack total",
+			reqTitle:      "XDP 数据统计后首页显示的内容",
+			want:          "xdplog-report: add all-time attack total",
+		},
+		{
+			name:          "conventional prefix stripped from commit subject",
+			commitMessage: "feat(stats): add all-time attack total",
+			reqTitle:      "首页显示攻击总数",
+			want:          "add all-time attack total",
+		},
+		{
+			name:     "requirement title used only when nothing else exists",
+			reqTitle: "首页显示攻击总数",
+			want:     "首页显示攻击总数",
+		},
+		{
+			name: "localized template fallback is last",
+			want: "NovaWorkbench auto-push: feat/req_abc",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := resolvePRTitle(c.prTitle, c.commitMessage, c.reqTitle, "feat/req_abc", en)
+			if got != c.want {
+				t.Errorf("resolvePRTitle() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestStripConventionalCommitPrefix(t *testing.T) {
+	cases := map[string]string{
+		"feat: add stats":              "add stats",
+		"fix(scope): repair":           "repair",
+		"chore!: drop node 18":         "drop node 18",
+		"refactor(a/b)!: split parser": "split parser",
+		"feat(stats): add total":       "add total",
+		"stats: add total":             "stats: add total", // not a known type
+		"Phase: two":                   "Phase: two",       // free-form title survives
+		"no colon here":                "no colon here",
+		"feat:":                        "feat:",
+		"feat(scope: malformed":        "feat(scope: malformed",
+	}
+	for in, want := range cases {
+		if got := stripConventionalCommitPrefix(in); got != want {
+			t.Errorf("stripConventionalCommitPrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
