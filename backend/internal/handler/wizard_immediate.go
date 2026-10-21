@@ -178,7 +178,12 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// inside the chained callback) so the two halves always share a base
 	// when the user picks one in DesignCodingImmediateModal.
 	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
-	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, designBase)
+	// regenerate=false: the immediate design-and-coding path is the
+	// first-run dispatch (LaunchSpec + the HTTP "立即生成方案并开发" CTA
+	// both treat it as "start from where the requirement is"), so it must
+	// never widen the session decision. The user-driven "重新生成" CTA
+	// lives in ArchitectDesign's HTTP body alone.
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, designBase, false)
 	if af != nil {
 		return "", af
 	}
@@ -210,6 +215,11 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 	// *store.Job. Reuses the same gating as the HTTP /api/wizard/architect-design
 	// and scheduler paths.
 	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
+	// regenerate=false: launchDesignOnly is the design-only sibling of
+	// launchDesignAndCoding (PromoteFromIdea + its dispatch). Like the
+	// design+coding chain, it treats every dispatch as a first-run /
+	// re-run, never a deliberate re-fork. Pass false explicitly so the
+	// compiler enforces R1 (only ArchitectDesign's HTTP body may opt in).
 	p, job, af := h.prepareArchitectDesign(
 		context.Background(),
 		reqID,
@@ -219,6 +229,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 		body.ReadKnowledge,
 		body.SyncMode,
 		designBase,
+		false,
 	)
 	if af != nil {
 		return "", af

@@ -455,8 +455,32 @@ export const requirements = {
     // Architect-stage CTAs.
     processToggleHide: '▼ 收起思考过程',
     processToggleShow: '▶ 思考过程',
-    regenerateBtn: '重新分析生成',
-    regenerateBtnTitle: '从需求分析重新开始生成方案，不包含微调对话内容',
+    regenerateBtn: '重新生成方案',
+    regenerateBtnTitle: '以全新会话重新生成技术方案，此前的微调对话不会被继承',
+    // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新生成方案" 后
+    // 看到的对话框,清楚说明旧方案会被冻结成历史版本而不是丢掉,避免「以
+    // 为旧方案没了」的误操作。Cancel + Confirm 两个按钮,文案比浏览器原生
+    // confirm() 更可控也更好翻译。文案刻意不提「需求分析」——该阶段已从
+    // 流程中移除,提了反而让人以为按钮属于已被下线的分析功能。
+    regenerateConfirmTitle: '确认重新生成技术方案?',
+    regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
+    regenerateConfirmYes: '确认重新生成',
+    regenerateConfirmCancel: '取消',
+    // 「重新生成」preflight 弹窗 — 沿用 DesignCodingImmediateModal 的
+    // preflight 视觉语言,用户已经熟悉的 DESIGN / ENV / 同步字段不用重新
+    // 学一次。弹窗本身即 picker:确认后直接带着本次选择派发 run,不再跳转
+    // 知识库预读弹窗。
+    regenerateEyebrow: '重新生成 · DESIGN',
+    regenerateDesignSection: '方案设计参数',
+    regenerateFlightAria: '重新生成配置摘要',
+    regenerateReadKnowledgeHint: '重新生成时读取项目知识库,作为新方案设计前的额外上下文。',
+    // 版本下拉 (req_11e485759f583db8): 设计工具条上的版本选择器,只
+    // 在设计 >1 版时出现。「当前版」项是焦点选中态(不可点击),其它版列
+    // 出 rev_no + 时间,点击 → 切回 → 自动刷新。
+    designRevisionsLabel: '版本',
+    designRevisionsCurrent: '当前版 · v',
+    designRevisionsHint: '切回历史版本',
+    designRevisionsEmpty: '暂无历史版本',
     exportPdfTitle: '将技术方案导出为 PDF',
     exportPdfBtn: '导出 PDF',
     exportingPdf: '导出中...',

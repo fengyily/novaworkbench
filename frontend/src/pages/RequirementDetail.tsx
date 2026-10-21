@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName } from '../api/client';
 import { configIdForModel } from '../utils/modelConfig';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -75,7 +75,7 @@ import {
   buildLegacyDesignMarkdown,
   downloadDesignMarkdown,
 } from '../utils/designExport';
-import { fmtDateTime, fmtNumber } from '../utils/intl';
+import { fmtDateTime, fmtNumber, fmtDate } from '../utils/intl';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import { ContextUsageBar } from '../components/ContextUsageBar';
@@ -1259,6 +1259,32 @@ export default function RequirementDetail() {
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
+  // req_11e485759f583db8 — 重新生成 modal: opens when the user clicks
+  // 「重新生成方案」. Body explains "old plan will be frozen as a history
+  // version, not destroyed"; the dialog itself is a preflight-style
+  // picker (mirrors the DESIGN section of DesignCodingImmediateModal) so
+  // the user can confirm the model + claude config + Agent server + sync
+  // mode without a second hop. Local state is pre-filled from the page's
+  // toolbar pickers each time the modal opens, and clicking "确认重新生成"
+  // calls runArchitectDesign with the modal's selections directly — no
+  // knowledge-pre-read modal in between.
+  const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
+  // Preflight-style picker state — initialised on open (see
+  // openRegenerateConfirm) so the user can change values and click
+  // "确认重新生成" to dispatch the run with whatever they just picked.
+  const [regenerateModel, setRegenerateModel] = useState('');
+  const [regenerateConfigId, setRegenerateConfigId] = useState('');
+  const [regenerateAgentServerId, setRegenerateAgentServerId] = useState('');
+  const [regenerateSyncMode, setRegenerateSyncMode] = useState<'' | 'local'>('');
+  const [regenerateReadKnowledge, setRegenerateReadKnowledge] = useState(false);
+  // req_11e485759f583db8 — design version dropdown. listDesignRevisions
+  // fetches once after every load (and refreshes after a successful run
+  // or restore). The dropdown only mounts when revision count > 0 so the
+  // first-time UX stays clean.
+  const [designRevisions, setDesignRevisions] = useState<DesignRevision[]>([]);
+  const [designCurrentRevisionNo, setDesignCurrentRevisionNo] = useState(0);
+  const [showRevisionDropdown, setShowRevisionDropdown] = useState(false);
+  const [restoringRevisionNo, setRestoringRevisionNo] = useState<number | null>(null);
   // Titles read by the backend, surfaced via the SSE "knowledge" event.
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeEntry[]>([]);
   const [knowledgeEmpty, setKnowledgeEmpty] = useState(false);
@@ -1566,6 +1592,18 @@ export default function RequirementDetail() {
     const updated = await requirementsApi.get(id);
     setReq(updated);
     loadUsage();
+    // req_11e485759f583db8: reload the design-revision list so the
+    // version dropdown picks up the newest frozen version (or, after a
+    // restore, the unchanged list but a refreshed current_revision_no).
+    // Failure here is non-fatal — the dropdown stays empty until the
+    // next refresh; a 404 means this backend predates the feature.
+    try {
+      const { revisions, current_revision } = await wizardApi.listDesignRevisions(id);
+      setDesignRevisions(revisions || []);
+      setDesignCurrentRevisionNo(current_revision || 0);
+    } catch {
+      // intentionally ignored
+    }
   }, [id, loadUsage]);
 
   // The summary round writes requirements.coding_plan on the
@@ -2114,8 +2152,35 @@ export default function RequirementDetail() {
     wikiEsRef.current = null;
   }, []);
 
-  const runArchitectDesign = async (useKnowledge: boolean) => {
+  // Single dispatch body for BOTH entry shapes:
+  //
+  //   * First-time generate — called with no overrides, so it reads the
+  //     page's design-toolbar pickers (architectModel / architectConfigId
+  //     / designAgentServerId / designSyncMode).
+  //   * 「重新生成技术方案」 — commitRegenerateConfirm passes the values the
+  //     user just picked inside the preflight modal, because those can
+  //     differ from whatever the toolbar currently holds (e.g. "re-run
+  //     this on a stronger model").
+  //
+  // `override` uses a sentinel (undefined) rather than '' so an explicit
+  // "clear the Agent server" pick is distinguishable from "leave the
+  // toolbar's value alone" — the regenerate modal can legitimately want
+  // to force local execution.
+  const runArchitectDesign = async (
+    useKnowledge: boolean,
+    override: {
+      model?: string;
+      configId?: string;
+      agentServerId?: string;
+      syncMode?: '' | 'local';
+    } = {},
+    regenerate = false,
+  ) => {
     if (!id) return;
+    const model = override.model ?? architectModel;
+    const configId = override.configId ?? architectConfigId;
+    const agentServerId = override.agentServerId ?? designAgentServerId;
+    const syncMode = override.syncMode ?? designSyncMode;
     setDesigning(true);
     setDesignLines([]);
     setDesignError(false);
@@ -2147,7 +2212,7 @@ export default function RequirementDetail() {
           requirement_id: id,
           read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
-          ...(architectModel ? { model: architectModel } : {}),
+          ...(model ? { model } : {}),
           // Per-run design-stage base branch (release/integration/etc.).
           // Backend fallback chain: body > project.default_branch > "main",
           // so an empty / whitespace string here still resolves correctly.
@@ -2156,7 +2221,7 @@ export default function RequirementDetail() {
           // backend resolves it (model→config lookup / role / active). Sent so
           // the picked config is persisted (architect_config_id) and re-hydrates
           // on refresh instead of falling back to the global active config.
-          ...(architectConfigId ? { claude_config_id: architectConfigId } : {}),
+          ...(configId ? { claude_config_id: configId } : {}),
           // Route the architect stage to a remote Agent server. Empty =
           // local execution (legacy default). The wizard remote branch
           // refuses servers that aren't in `ready` status, so an empty /
@@ -2164,12 +2229,20 @@ export default function RequirementDetail() {
           // Uses the DESIGN-stage picker so the user can pick a different
           // Agent server for design vs coding (req_* the user explicitly
           // called out: 设计 on Agent server + 实现 on 本地).
-          ...(designAgentServerId ? { agent_server_id: designAgentServerId } : {}),
+          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
           // Code-transport mode for the Agent-server run. Only sent when
           // the user actually picked a server AND a non-default value
           // (the wizard's "stamp if non-empty" prologue keeps an empty
           // sync_mode from silently overwriting a previous value).
-          ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
+          ...(agentServerId && syncMode ? { sync_mode: syncMode } : {}),
+          // req_11e485759f583db8: when true, the wizard RE-FORKS the
+          // analyst session instead of resuming the existing design
+          // session, and freezes the current design plan into
+          // design_revisions first. Old session + doc-refine turns are
+          // abandoned; the new plan starts from the same place the first
+          // generation did. Omitted when false so the wire shape stays
+          // backward-compatible (older backends ignore the field).
+          ...(regenerate ? { regenerate: true } : {}),
         }),
       });
       const json = await res.json();
@@ -2201,6 +2274,55 @@ export default function RequirementDetail() {
     } else {
       await runArchitectDesign(useKnowledge);
     }
+  };
+
+  // 重新生成（req_11e485759f583db8） — opens the preflight dialog (model +
+  // claude config + Agent server + sync mode + knowledge pre-read) so the
+  // user confirms the regenerated run is dispatched with whatever model
+  // and execution environment they want. Pre-fills from the page's design
+  // toolbar pickers so a user who just got done configuring a fresh
+  // generate sees the same values, but the modal can override them on
+  // this single dispatch (e.g. "re-run on a stronger model after
+  // reviewing the prior plan").
+  //
+  // The pre-fill guards against Agent server ids that have dropped off
+  // the ready list since the page loaded — same fallback DesignCodingImmediateModal
+  // uses.
+  const requestRegenerateDesign = () => {
+    setRegenerateModel(architectModel || '');
+    setRegenerateConfigId(architectConfigId || '');
+    setRegenerateAgentServerId(
+      designAgentServerId && agentServers.some(s => s.id === designAgentServerId)
+        ? designAgentServerId
+        : '',
+    );
+    setRegenerateSyncMode(designSyncMode || '');
+    setRegenerateReadKnowledge(false);
+    setShowRegenerateConfirm(true);
+  };
+  const cancelRegenerateConfirm = () => setShowRegenerateConfirm(false);
+  // Single-hop dispatch: the modal IS the picker, so its confirm callback
+  // pushes straight into runArchitectDesign with the modal's selections
+  // passed as overrides. Propagating them to page state first keeps the
+  // design toolbar + a post-run refresh in sync with what actually ran
+  // (otherwise the toolbar would show stale values while the SSE panel
+  // reports a different model / server).
+  const commitRegenerateConfirm = async () => {
+    setShowRegenerateConfirm(false);
+    setArchitectModel(regenerateModel);
+    setArchitectConfigId(regenerateConfigId);
+    setDesignAgentServerId(regenerateAgentServerId);
+    setDesignSyncMode(regenerateSyncMode);
+    await runArchitectDesign(
+      regenerateReadKnowledge,
+      {
+        model: regenerateModel,
+        configId: regenerateConfigId,
+        agentServerId: regenerateAgentServerId,
+        syncMode: regenerateSyncMode,
+      },
+      /*regenerate*/ true,
+    );
   };
 
   // Guide (but do NOT launch) the architect-design flow when the user just
@@ -3071,6 +3193,173 @@ export default function RequirementDetail() {
           </div>
         </div>
       )}
+
+      {/* req_11e485759f583db8 — 「重新生成技术方案」 preflight modal. Mirrors
+          the DESIGN section of DesignCodingImmediateModal so the user can
+          pick which model + Agent server to re-run with WITHOUT a second
+          modal hop. Layout: preflight header (eyebrow + title + body
+          explaining freeze-not-destroy) → flight strip with the picked
+          ENV + model → DESIGN section with ModelSelect + knowledge
+          toggle + ExecEnvSelect + SyncModeSelect → confirm/cancel.
+          Reads local state so changing the pickers between open and
+          confirm does NOT bleed into the page's design-toolbar state
+          (commitRegenerateConfirm propagates only on the actual
+          confirm click). */}
+      {showRegenerateConfirm && (() => {
+        // Flight-strip derivations for the picked model + Agent server.
+        // Same visual vocabulary as DesignCodingImmediateModal's preflight
+        // strip so the regenerate dialog reads as a "design-stage
+        // preflight with a regenerate-specific title".
+        const regenEnvName = regenerateAgentServerId
+          ? (agentServers.find(s => s.id === regenerateAgentServerId)?.name || 'remote')
+          : t('requirements.detail2.preflightLocalExec');
+        const regenModelName = regenerateModel || 'default';
+        const regenBase = baseBranch || project?.default_branch || 'main';
+        return (
+        <div className="modal-overlay" onClick={cancelRegenerateConfirm}>
+          <div className="modal-box preflight-box" onClick={e => e.stopPropagation()}>
+            <div className="preflight-header">
+              <div className="preflight-eyebrow">{t('requirements.detail2.regenerateEyebrow')}</div>
+              <h3 className="preflight-title">{t('requirements.detail2.regenerateConfirmTitle')}</h3>
+              <p className="preflight-subtitle">{t('requirements.detail2.regenerateConfirmBody')}</p>
+            </div>
+
+            {/* Flight strip — single DESIGN leg + GIT base mirror. Keeps
+                the regenerate dialog visually consistent with the
+                immediate design+coding preflight so users who already
+                learned that vocabulary don't have to parse a different
+                layout here. */}
+            <div
+              className="flight-strip"
+              aria-label={t('requirements.detail2.regenerateFlightAria')}
+            >
+              <span className="flight-leg">
+                <span className="flight-leg-label">DESIGN</span>
+                <span className="flight-leg-value" title={regenEnvName}>{regenEnvName}</span>
+                <span className="flight-arrow">·</span>
+                <span className="flight-leg-value" title={regenModelName}>{regenModelName}</span>
+              </span>
+              <span className="flight-sep">·</span>
+              <span className="flight-leg">
+                <span className="flight-leg-label">BASE</span>
+                <span className="flight-leg-value" title={regenBase}>{regenBase}</span>
+              </span>
+              <span className="flight-ready" aria-live="polite">
+                <span className="flight-ready-dot" />
+                {t('requirements.detail2.regenerateConfirmYes').toUpperCase()}
+              </span>
+            </div>
+
+            <div className="preflight-body">
+              {/* Single DESIGN section — same field vocabulary as the
+                  DESIGN section of DesignCodingImmediateModal. ModelSelect
+                  owns its rail+chip so we let it stand in for the field
+                  card without an extra wrap. */}
+              <div className="preflight-section">
+                <div className="preflight-section-label">{t('requirements.detail2.regenerateDesignSection')}</div>
+
+                <div className="modal-field">
+                  <ModelSelect
+                    value={regenerateModel}
+                    onChange={setRegenerateModel}
+                    stage="architect"
+                    working={designing}
+                    label={t('schedules.modal.designModelLabel')}
+                    configId={regenerateConfigId || undefined}
+                    onConfigChange={setRegenerateConfigId}
+                  />
+                  <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
+                    {t('schedules.modal.modelHint')}
+                  </small>
+                </div>
+
+                {/* Same knowledge-pre-read toggle as DesignCodingImmediateModal
+                    so users opting into project knowledge on the design
+                    stage get consistent UX across first-time / regenerate. */}
+                <label className={`preflight-toggle ${regenerateReadKnowledge ? 'is-checked' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={regenerateReadKnowledge}
+                    onChange={e => setRegenerateReadKnowledge(e.target.checked)}
+                    disabled={designing}
+                  />
+                  <div className="preflight-toggle-body">
+                    <div className="preflight-toggle-title">
+                      <IconBook size={14} className="icon-mr" />
+                      {t('requirements.detail2.preflightReadKnowledge')}
+                    </div>
+                    <div className="preflight-toggle-desc">
+                      {t('requirements.detail2.regenerateReadKnowledgeHint')}
+                    </div>
+                  </div>
+                </label>
+
+                <div className="modal-field">
+                  <label>{t('requirements.detail2.preflightExecEnvLabel')}</label>
+                  <div className="preflight-field-card preflight-field-card--exec">
+                    <span className="preflight-field-chip" aria-hidden="true">ENV</span>
+                    <ExecEnvSelect
+                      className="form-input preflight-field-input"
+                      servers={agentServers}
+                      value={regenerateAgentServerId}
+                      onChange={setRegenerateAgentServerId}
+                      disabled={designing}
+                      title={
+                        agentServers.length === 0
+                          ? t('requirements.detail2.preflightAgentEmptyTitle')
+                          : ''
+                      }
+                      localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                    />
+                  </div>
+                  {agentServers.length === 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                      {t('requirements.detail2.preflightNoAgentHint')}
+                    </div>
+                  )}
+                </div>
+
+                {/* Sync-mode picker mirrors DesignCodingImmediateModal's
+                    DESIGN section — keeps disabled until a server is
+                    picked. Same single-state semantics as that modal. */}
+                <div className="modal-field">
+                  <label>{t('requirements.detail2.syncModeLabel')}</label>
+                  <SyncModeSelect
+                    enabled={!!regenerateAgentServerId}
+                    value={regenerateSyncMode}
+                    onChange={setRegenerateSyncMode}
+                    disabled={designing}
+                  />
+                  <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
+                    {regenerateSyncMode === 'local'
+                      ? t('requirements.detail2.syncModeLocalHint')
+                      : t('requirements.detail2.syncModeRemoteHint')}
+                  </small>
+                </div>
+              </div>
+            </div>
+
+            <div className="preflight-launch">
+              <button
+                className="btn-launch"
+                onClick={commitRegenerateConfirm}
+                disabled={designing}
+              >
+                <IconRefresh size={14} className="btn-icon" />
+                {t('requirements.detail2.regenerateConfirmYes')}
+              </button>
+              <button
+                className="btn-cancel"
+                onClick={cancelRegenerateConfirm}
+                disabled={designing}
+              >
+                {t('requirements.detail2.regenerateConfirmCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {/* Branch modal — pre-flight checklist */}
       {showBranchModal && (() => {
@@ -4794,8 +5083,18 @@ export default function RequirementDetail() {
                   {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
                 </button>
               )}
-              {req.status === 'designing' && hasDesign && (
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+              {/* 「重新生成方案」 — available from the moment a plan exists.
+                  designing = a partial in-flight plan the user wants to throw
+                  away; designed = the finished plan they want a second take
+                  on; developing = the user already moved on to coding and is
+                  asking for a fresh plan (the run lands back on 'designed',
+                  so the new plan is re-approved before dev continues). done /
+                  archived stay excluded — reopening a finished requirement is
+                  a status-machine decision, not a regenerate. The backend
+                  mirrors this whitelist and additionally 409s while a coding
+                  job is live. */}
+              {(req.status === 'designing' || req.status === 'designed' || req.status === 'developing') && hasDesign && (
+                <button className="btn btn-sm" onClick={() => requestRegenerateDesign()} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
               )}
               {hasDesign && (
                 <div className="btn-group-split" role="group">
@@ -5051,6 +5350,63 @@ export default function RequirementDetail() {
                   >
                     📥 {t('requirements.detail2.importDesignBtn')}
                   </button>
+                )}
+                {/* req_11e485759f583db8 — version switcher dropdown. Only
+                    renders when design_revisions has at least one row (i.e.
+                    the user has regenerated at least once). The first item
+                    is the focus marker "Current · v{n}"; the rest are
+                    history versions — click calls
+                    wizardApi.restoreDesignRevision and refetches the
+                    requirement. Restoring does NOT increment the version
+                    list (per service.design_revision.go contract), so the
+                    dropdown is a "switch back" affordance, not "navigate
+                    forwards". */}
+                {designRevisions.length > 0 && (
+                  <div className="design-revision-dropdown">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setShowRevisionDropdown(v => !v)}
+                      aria-expanded={showRevisionDropdown}
+                      title={t('requirements.detail2.designRevisionsHint')}
+                    >
+                      ⤺ {t('requirements.detail2.designRevisionsLabel')} · v{designCurrentRevisionNo || 1}
+                      <IconChevronDown size={13} />
+                    </button>
+                    {showRevisionDropdown && (
+                      <>
+                        <div className="btn-split-backdrop" onClick={() => setShowRevisionDropdown(false)} />
+                        <div className="btn-split-dropdown" role="menu">
+                          <div className="btn-split-item current" aria-disabled="true">
+                            ● {t('requirements.detail2.designRevisionsCurrent')}{designCurrentRevisionNo || 1}
+                          </div>
+                          {designRevisions.map((rev) => (
+                            <button
+                              key={rev.id}
+                              type="button"
+                              role="menuitem"
+                              className="btn-split-item"
+                              disabled={restoringRevisionNo === rev.rev_no || rev.rev_no === designCurrentRevisionNo}
+                              onClick={async () => {
+                                setRestoringRevisionNo(rev.rev_no);
+                                try {
+                                  await wizardApi.restoreDesignRevision(req.id, rev.rev_no);
+                                  // Re-fetch the requirement so design_docs +
+                                  // design_revision_no swap in immediately.
+                                  await refresh();
+                                  setShowRevisionDropdown(false);
+                                } finally {
+                                  setRestoringRevisionNo(null);
+                                }
+                              }}
+                            >
+                              v{rev.rev_no} · {fmtDate(rev.created_at)}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
               <div

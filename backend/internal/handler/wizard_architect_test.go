@@ -402,6 +402,398 @@ func mustGit(t *testing.T, dir string, name string, args ...string) string {
 // call site in wizard_coding.go.
 //
 // If this test fails after a refactor: check that the remoteRunInput literal
+// newRegenerateTestEnv sets up the minimum fixture for a prepareArchitectDesign
+// call: a sqlite DB with the shared schema + seeded project, the requirement
+// service, the design-revision service, a project service (mandatory because
+// prepareArchitectDesign calls h.projectSvc.Get unconditionally), and a
+// JobStore. Returning the env rather than just the handler keeps each test
+// from re-running db.Init / InitDB.
+func newRegenerateTestEnv(t *testing.T) (*db.DB, string, *WizardHandler, *service.RequirementService) {
+	t.Helper()
+	dir, _ := os.MkdirTemp("", "regen-")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reqID := seedRequirementForSchedule(t, d)
+	reqSvc := service.NewRequirementService(d, nil)
+	projSvc := service.NewProjectService(d, nil, nil)
+	jobs := store.NewJobStore(8)
+	designRevSvc := service.NewDesignRevisionService(d)
+	h := &WizardHandler{
+		db:           d,
+		reqSvc:       reqSvc,
+		projectSvc:   projSvc,
+		jobs:         jobs,
+		designRevSvc: designRevSvc,
+	}
+	return d, reqID, h, reqSvc
+}
+
+// TestRegenerateForksFromAnalystSession pins the core regenerate
+// session decision: when regenerate=true and BOTH design_session_id and
+// analysis_session_id are present, the run must re-fork from the analyst
+// session (NOT resume the old design session). This is the
+// req_11e485759f583db8 fix's heart — without this switch the
+// regenerated plan would just edit the prior session, which is what
+// the existing 「重新分析生成」 CTA does today and the reason it was
+// almost-but-not-quite-right.
+//
+// Status-whitelist coverage lives in TestRegenerateRejectsWrongStatus
+// (separate test for a separate concern).
+func TestRegenerateForksFromAnalystSession(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if err := reqSvc.UpdateDesignSession(reqID, "sid-old-design"); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+	if err := reqSvc.UpdateAnalysisSession(reqID, "sid-analyst"); err != nil {
+		t.Fatalf("seed analysis_session_id: %v", err)
+	}
+	if _, err := d.Exec(`UPDATE requirements SET status='designed', design_docs='old plan', design_revision_no=2 WHERE id=?`, reqID); err != nil {
+		t.Fatalf("seed status/design_docs/revision_no: %v", err)
+	}
+
+	// Drive the synchronous portion of prepareArchitectDesign. The call
+	// is expected to surface a downstream NON-nil *apiFailure (no real
+	// git worktree / claude invocation), but the session decision +
+	// Snapshot must land BEFORE that error. The state lives in the DB +
+	// service so the assertions below are still meaningful even when
+	// af != nil.
+	_, _, _ = h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+
+	// design_revisions must contain ONE new row (frozen from the prior
+	// design); rev_no must be max(rev_no)+1 = 1 since the seeded
+	// design_revision_no=2 has no actual v2 row in design_revisions.
+	// design_revision_no on the requirement gets stamped back to that
+	// max+1 value (the next revision number) — kept equal to the
+	// newest revision row's rev_no (the Snapshot stamp semantics is
+	// intentionally identical to ensure the version dropdown can label
+	// the current version exactly).
+	var nRev int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM design_revisions WHERE requirement_id = ?`, reqID,
+	).Scan(&nRev); err != nil {
+		t.Fatalf("count revisions: %v", err)
+	}
+	if nRev != 1 {
+		t.Fatalf("design_revisions count = %d, want 1 (regenerate must Snapshot before run)", nRev)
+	}
+	var trigger string
+	var revNo int
+	if err := d.QueryRow(
+		`SELECT trigger_kind, rev_no FROM design_revisions WHERE requirement_id = ? ORDER BY rev_no DESC LIMIT 1`, reqID,
+	).Scan(&trigger, &revNo); err != nil {
+		t.Fatalf("read revision row: %v", err)
+	}
+	if trigger != model.RevisionTriggerRegenerate {
+		t.Fatalf("trigger_kind = %q, want %q", trigger, model.RevisionTriggerRegenerate)
+	}
+	if revNo != 1 {
+		t.Fatalf("rev_no = %d, want 1 (max+1 of empty revisions table)", revNo)
+	}
+
+	// design_revision_no must be bumped to match the new revision row.
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.DesignRevisionNo != 1 {
+		t.Fatalf("design_revision_no = %d, want 1", got.DesignRevisionNo)
+	}
+
+	// Critical invariant: design_session_id must remain the OLD value
+	// (regenerate pre-mints in memory only — the old session is what
+	// the user's doc-refine chat keeps resuming until finalize stamps
+	// out.sessionID on success).
+	if got.DesignSessionID != "sid-old-design" {
+		t.Fatalf("design_session_id = %q, want %q (regenerate must NOT clobber the old session until success)",
+			got.DesignSessionID, "sid-old-design")
+	}
+}
+
+// TestNonRegenerateStillResumesDesignSession is the regression pin for
+// R1: the regenerate gate must NOT affect the non-regenerate path. A
+// pre-existing design_session_id plus regenerate=false must still
+// resume that session. Without this guard a future refactor of the
+// switch-statement in prepareArchitectDesign could silently flip every
+// first-run / re-run into a hard "re-fork analyst" — breaking the
+// doc-refine chat continuity that has been the design stage's main UX
+// promise since launch.
+func TestNonRegenerateStillResumesDesignSession(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if err := reqSvc.UpdateDesignSession(reqID, "sid-existing"); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+	// Seed the analysis session so the test isn't short-circuited on
+	// the NO_SESSION 400 that fires when both sourceSID and an analyst
+	// session are missing on the non-skip-analysis path.
+	if err := reqSvc.UpdateAnalysisSession(reqID, "sid-analyst"); err != nil {
+		t.Fatalf("seed analysis_session_id: %v", err)
+	}
+	if _, err := d.Exec(`UPDATE requirements SET status='designing', design_docs='existing plan' WHERE id=?`, reqID); err != nil {
+		t.Fatalf("seed status/design_docs: %v", err)
+	}
+
+	// The non-regenerate contract: an existing design_session_id is
+	// resumed, no fork, no pre-mint, no Snapshot. design_docs is left
+	// untouched (the architect hasn't even run yet — the test fails at
+	// the worktree sync step, not at the design persistence step).
+	_, _, _ = h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", false,
+	)
+
+	var nRev int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM design_revisions WHERE requirement_id = ?`, reqID,
+	).Scan(&nRev); err != nil {
+		t.Fatalf("count revisions: %v", err)
+	}
+	if nRev != 0 {
+		t.Fatalf("design_revisions count = %d, want 0 on non-regenerate path", nRev)
+	}
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	// Critical: design_session_id MUST remain "sid-existing" — the
+	// non-regenerate resume path stays on the same session. The
+	// regenerate path is the one that widens the decision. Without this
+	// assertion a future edit could flip the switch-cases around and
+	// silently switch every re-run into a hard "re-fork analyst",
+	// breaking the doc-refine chat continuity that has been the
+	// design stage's main UX promise since launch.
+	if got.DesignSessionID != "sid-existing" {
+		t.Fatalf("design_session_id = %q, want %q (non-regenerate resume path must NOT touch the existing session)",
+			got.DesignSessionID, "sid-existing")
+	}
+}
+
+// TestRegenerateRejectsWrongStatus pins the status whitelist around
+// the regenerate field. A regenerate=true on anything outside
+// {designing, designed, developing} returns 409 INVALID_STATUS. Server-side
+// mirror of the front-end's button guard: if a future UI bug lets a
+// regenerate CTA through on `draft` / `done`, the backend still rejects so
+// the requirement isn't yanked out of a finished state.
+//
+// `developing` moved INTO the allow-list: the user reaching for a second
+// plan after design has already been handed off to development is the
+// primary "方案设计完成后仍需重新设计" case. The run lands back on
+// 'designed' (developing→designed is a legal transition), so the new
+// plan is re-approved before development continues.
+//
+// The allowed statuses are pinned by TestRegenerateAllowsPostDesignStatus
+// (which actually drives the full Snapshot path on a fresh fixture).
+// Splitting avoids cross-subtest pollution from the in-memory JobStore
+// (a successful allowed run mints a live design_job_id that subsequent
+// subtests would trip the 409 DESIGN_JOB_ACTIVE guard on).
+func TestRegenerateRejectsWrongStatus(t *testing.T) {
+	_, reqID, h, _ := newRegenerateTestEnv(t)
+
+	cases := []struct {
+		status string
+		want   bool // true = expect 409 reject
+	}{
+		{"draft", true},
+		{"analyzing", true},
+		{"done", true},
+		{"archived", true},
+	}
+	for _, c := range cases {
+		t.Run(c.status, func(t *testing.T) {
+			if _, err := h.db.Exec(`UPDATE requirements SET status=? WHERE id=?`, c.status, reqID); err != nil {
+				t.Fatalf("seed status: %v", err)
+			}
+			_, _, af := h.prepareArchitectDesign(
+				context.Background(), reqID, "", "", "", false, "", "", true,
+			)
+			got := af != nil
+			if got != c.want {
+				t.Fatalf("regenerate on status=%q: rejected=%v, want %v (err=%v)",
+					c.status, got, c.want, af)
+			}
+			if !got {
+				t.Fatalf("regenerate on status=%q unexpectedly accepted", c.status)
+			}
+		})
+	}
+}
+
+// TestRegenerateAllowsPostDesignStatus pins the allow-list half of the
+// whitelist: status in {designing, designed, developing} lets the call
+// pass the guard. We don't drive the full run (no real worktree / git
+// fixture), just assert that no INVALID_STATUS failure surfaces and the
+// live-job guard short-circuits the rest of the synchronous path with a
+// downstream DESIGN_JOB_ACTIVE / worktree-related error rather than an
+// upstream whitelist one.
+func TestRegenerateAllowsPostDesignStatus(t *testing.T) {
+	for _, status := range []string{"designing", "designed", "developing"} {
+		t.Run(status, func(t *testing.T) {
+			d, reqID, h, _ := newRegenerateTestEnv(t)
+			if _, err := d.Exec(`UPDATE requirements SET status=?, design_docs='' WHERE id=?`, status, reqID); err != nil {
+				t.Fatalf("seed status: %v", err)
+			}
+			_, _, af := h.prepareArchitectDesign(
+				context.Background(), reqID, "", "", "", false, "", "", true,
+			)
+			if af != nil && af.Code == "INVALID_STATUS" {
+				t.Fatalf("regenerate on allowed status=%q must NOT short-circuit on whitelist: %v", status, af)
+			}
+			// design_docs was empty so Snapshot is a no-op — count stays 0.
+			var n int
+			if err := d.QueryRow(`SELECT COUNT(*) FROM design_revisions WHERE requirement_id=?`, reqID).Scan(&n); err != nil {
+				t.Fatalf("count revisions: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("design_revisions count = %d, want 0 (no plan to freeze on empty design_docs)", n)
+			}
+		})
+	}
+}
+
+// TestRegenerateFailurePreservesOldDesignSession pins the
+// 「成功才落库」 contract on the regenerate path by directly exercising
+// finalizeArchitectRun. After a successful run, design_session_id
+// becomes the CLI-reported id; after a CLI-couldn't-emit-system/init
+// run, design_session_id stays at the OLD value. The counterpart to
+// TestArchitectRemoteMissingSessionIDClearsDesignSession — that test
+// pins the NON-regenerate path's "drop the dangling pre-mint"
+// behaviour, this one pins the regenerate path's "leave the user's
+// old session alone".
+func TestRegenerateFailurePreservesOldDesignSession(t *testing.T) {
+	_, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	const oldSID = "sid-user-keep"
+	if err := reqSvc.UpdateDesignSession(reqID, oldSID); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+
+	jobs := store.NewJobStore(8)
+	job := jobs.Create(reqID)
+	_ = h
+	// Re-grab a handler that has its jobs wired (newRegenerateTestEnv's
+	// is sufficient for finalize, but the standalone test rebuilds to
+	// avoid coupling).
+	h2 := &WizardHandler{reqSvc: reqSvc, jobs: jobs, designRevSvc: h.designRevSvc}
+
+	req, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	p := &designRunParams{
+		Req:            req,
+		Regenerate:     true,
+		NewDesignSID:   "sid-new-inmemory",
+		Fork:           true,
+		SkipAnalysis:   false,
+		ClaudeConfigID: "",
+		Model:          "sonnet",
+	}
+
+	// Triple-zero shape: no session_id (CLI crashed before system/init),
+	// no error, no stale flag. Non-regenerate path clears the dangling
+	// pre-mint; regenerate path leaves the user's old id intact.
+	h2.finalizeArchitectRun(
+		claudeStreamOutcome{sessionID: "", staleSession: false, errMsg: ""},
+		p, job, nil,
+		"sid-analyst-source", "sid-new-inmemory", reqID, "sonnet",
+	)
+
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.DesignSessionID != oldSID {
+		t.Fatalf("design_session_id = %q, want %q (regenerate failure must preserve the user's old session)",
+			got.DesignSessionID, oldSID)
+	}
+	if got.DesignJobID != "" {
+		t.Fatalf("design_job_id = %q, want \"\"", got.DesignJobID)
+	}
+}
+
+// TestArchitectDesignRejectsLiveApplyJob pins the second half of the
+// concurrency guard: a regenerate attempt must be rejected with 409
+// when EITHER a live design job OR a live apply-doc job holds the
+// design_docs column. The design-only guard is already covered by
+// existing tests; the apply-doc gap was a known omission in
+// wizard_immediate.go's preGate that this fix closes at the
+// architect-design entry.
+func TestArchitectDesignRejectsLiveApplyJob(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if _, err := d.Exec(`UPDATE requirements SET status='designed', design_docs='existing' WHERE id=?`, reqID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	live := h.jobs.Create(reqID) // a live apply-job pointer
+	if uerr := reqSvc.UpdateApplyJob(reqID, live.ID); uerr != nil {
+		t.Fatalf("seed apply_job_id: %v", uerr)
+	}
+
+	_, _, af := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af == nil {
+		t.Fatalf("prepareArchitectDesign accepted regenerate while apply_job alive — must reject")
+	}
+	if af.Code != "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("error code = %q, want DESIGN_JOB_ACTIVE", af.Code)
+	}
+
+	// Clear the live pointer; downstream failure (no worktree) is fine,
+	// but DESIGN_JOB_ACTIVE must no longer appear.
+	if uerr := reqSvc.UpdateApplyJob(reqID, ""); uerr != nil {
+		t.Fatalf("clear apply_job_id: %v", uerr)
+	}
+	_, _, af2 := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("cleared apply_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
+	}
+}
+
+// TestArchitectDesignRejectsLiveCodingJob pins the third concurrency
+// guard: now that a regenerate is allowed from 'developing', it must not
+// race a coding run that is still streaming. The coding job forked from
+// the CURRENT plan, so rewriting design_docs / design_session_id
+// underneath it leaves both halves describing different requirements.
+func TestArchitectDesignRejectsLiveCodingJob(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if _, err := d.Exec(`UPDATE requirements SET status='developing', design_docs='existing' WHERE id=?`, reqID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	live := h.jobs.Create(reqID) // a live coding-job pointer
+	if uerr := reqSvc.UpdateCodingJob(reqID, live.ID); uerr != nil {
+		t.Fatalf("seed coding_job_id: %v", uerr)
+	}
+
+	_, _, af := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af == nil {
+		t.Fatalf("prepareArchitectDesign accepted regenerate while coding job alive — must reject")
+	}
+	if af.Code != "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("error code = %q, want DESIGN_JOB_ACTIVE", af.Code)
+	}
+
+	// Clear the live pointer; downstream failure (no worktree) is fine,
+	// but DESIGN_JOB_ACTIVE must no longer appear.
+	if uerr := reqSvc.UpdateCodingJob(reqID, ""); uerr != nil {
+		t.Fatalf("clear coding_job_id: %v", uerr)
+	}
+	_, _, af2 := h.prepareArchitectDesign(
+		context.Background(), reqID, "", "", "", false, "", "", true,
+	)
+	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
+		t.Fatalf("cleared coding_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
+	}
+}
+
 // in execArchitectDesign still forwards the *true* source session (the value
 // that is "" on a fresh/skip-analysis run) into the `sourceSID` field, and
 // keeps `sessionArg` as its own separate field.

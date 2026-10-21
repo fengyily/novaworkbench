@@ -407,6 +407,15 @@ func main() {
 	// attachment handler below — wiring order: handler builds first,
 	// wizard then SetAttachmentSvc.
 	wizardH.SetAttachmentSvc(attachmentSvc)
+	// Design revision service: persistence for the 「重新生成技术方案」 flow
+	// (see req_11e485759f583db8). The wizard freezes the current plan into
+	// design_revisions BEFORE a regenerate run starts, and the
+	// /api/requirements/{id}/design-revisions/* REST handlers list /
+	// fetch / restore the older versions. Nil-safe — a deployment that
+	// disables the feature leaves the wizard without version history and
+	// the routes register handlers that return 500 "service unavailable".
+	designRevSvc := service.NewDesignRevisionService(database)
+	wizardH.SetDesignRevisionSvc(designRevSvc)
 	issueMonH := handler.NewIssueMonitorHandler(issueMonSvc, projectSvc)
 	issueMonSemSize := 4
 	if env := os.Getenv("NOVA_ISSUE_MONITOR_CONCURRENCY"); env != "" {
@@ -811,6 +820,16 @@ func main() {
 	// for the frontend to display before the user confirms the import.
 	mux.HandleFunc("PUT /api/wizard/import-design", wizardH.ImportDesign)
 	mux.HandleFunc("POST /api/wizard/import-design-file", wizardH.ImportDesignFile)
+	// Design-revision routes: version history of a requirement's design
+	// plan (see req_11e485759f583db8). requirements.design_docs is the
+	// current version; design_revisions holds every version that USED TO
+	// BE current, frozen by the wizard's "重新生成技术方案" path so the
+	// user can restore a previous plan after a disappointing regenerate.
+	// The pattern mirrors the code-review /reviews/{rid}/revisions/* set
+	// so the front-end can reuse the same component.
+	mux.HandleFunc("GET /api/requirements/{id}/design-revisions", wizardH.ListDesignRevisions)
+	mux.HandleFunc("GET /api/requirements/{id}/design-revisions/{n}", wizardH.GetDesignRevision)
+	mux.HandleFunc("POST /api/requirements/{id}/design-revisions/{n}/restore", wizardH.RestoreDesignRevision)
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
 	mux.HandleFunc("POST /api/wizard/adjust-coding", wizardH.AdjustCoding)
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
