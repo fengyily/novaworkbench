@@ -1505,6 +1505,21 @@ var alterColumns = []string{
 	// error from isIgnorableDDLError swallows preexisting DBs.
 	`ALTER TABLE projects ADD COLUMN commit_mode TEXT NOT NULL DEFAULT 'llm_only'`,
 	`ALTER TABLE projects ADD COLUMN commit_script TEXT NOT NULL DEFAULT ''`,
+	// Project 「提交风格」 — commit/PR convention preset + free-text
+	// supplements, layered ON TOP of commit_lang_override (which stays the
+	// language knob). commit_style_preset selects the convention family
+	// (see model/project_commit_style.go: none / conventional / custom);
+	// commit_style_custom holds the user's own rules, appended after the
+	// preset's rendered sections (and used verbatim when preset = custom).
+	//
+	// DEFAULT '' rather than DEFAULT 'none' is deliberate: every row that
+	// predates this column lands on "never configured", which
+	// service.BuildCommitStyleRules renders as an EMPTY rule set — so the
+	// injected prompt stays byte-identical to the pre-column behaviour
+	// (zero regression). 'none' is the *explicit* opt-out the UI writes when
+	// the user picks "don't enforce anything" in the dropdown.
+	`ALTER TABLE projects ADD COLUMN commit_style_preset TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_style_custom TEXT NOT NULL DEFAULT ''`,
 	// Issue-monitor dedup lookup index (v0.5.x). Composite on (project_id,
 	// source_platform, source_external_id) so the poller's RunOne SELECT
 	// "have I imported this Issue already?" is index-backed instead of

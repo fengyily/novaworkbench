@@ -179,6 +179,15 @@ export interface Project {
   // mergeApi.push / mergeApi.local at submit time.
   commit_mode?: string;
   commit_script?: string;
+  // Commit/PR convention preset + free-text supplements, layered on top of
+  // commit_lang_override above (that one says WHICH language, these say WHICH
+  // format). Mirrors model/project_commit_style.go: none / conventional /
+  // custom; the empty string is the never-configured state and renders to
+  // "inject no convention at all" (legacy behaviour). commit_style_custom is
+  // appended after the preset's sections, or used verbatim when preset=custom.
+  // Read+written by ProjectDetail's 「提交风格」card.
+  commit_style_preset?: string;
+  commit_style_custom?: string;
   // Wizard pre-stage repo sync: stamped by the backend the moment it clones
   // or fetches origin before architect-design runs. sync_status reflects the
   // last attempt (idle = never synced, ok = last sync succeeded, error =
@@ -288,7 +297,40 @@ export const projectsApi = {
   // can update local state.
   setCommitPushConfig: (projectId: string, mode: string, script: string) =>
     api.put<Project>(`/api/projects/${projectId}/commit-push-config`, { mode, script }),
+  // Save the whole 「提交风格」 card in one PUT: the language pin, the
+  // convention preset, and the free-text supplements. They are written
+  // together because the prompt builders read them as a combination —
+  // three separate calls would leave a window where the language is saved
+  // but the convention isn't (or vice versa).
+  //
+  // preset: none | conventional | custom ("" is normalised to "none").
+  // Backend rejects an unknown preset with 400 INVALID_COMMIT_STYLE, a
+  // missing supplement text when preset=custom with 400 INVALID_COMMIT_STYLE,
+  // and anything over 4000 characters likewise. Returns the refreshed
+  // Project row so callers can update local state in one shot.
+  setCommitStyle: (projectId: string, lang: string, preset: string, custom: string) =>
+    api.put<Project>(`/api/projects/${projectId}/commit-style`, {
+      lang, preset, custom,
+    }),
+  // Render (without saving) the convention block the server would inject for
+  // this (preset, custom, lang) triple. Pure function server-side — the
+  // overview card calls it on a debounce so the preview can't drift from
+  // what actually reaches the prompt.
+  previewCommitStyle: (preset: string, custom: string, lang: string) =>
+    api.post<CommitStylePreview>('/api/projects/commit-style/preview', {
+      preset, custom, lang,
+    }),
 };
+
+// CommitStylePreview is one rendered convention block. Each field is the
+// exact text that would be injected for that channel (or "" when the project
+// has no preset). example is display-only — it never reaches a prompt.
+export interface CommitStylePreview {
+  example: string;
+  commit: string;
+  pr_title: string;
+  pr_body: string;
+}
 
 export const dashboardApi = {
   get: () => api.get<DashboardData>('/api/dashboard'),

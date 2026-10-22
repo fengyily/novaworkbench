@@ -621,6 +621,19 @@ func main() {
 	// is the default behaviour with zero effect on legacy callers.
 	mux.HandleFunc("PUT /api/projects/{id}/commit-push-config", projectH.SetCommitPushConfig)
 
+	// Project 「提交风格」 — the language pin + convention preset +
+	// free-text supplements, written together in one PUT (they're one card
+	// in the UI and the prompt builders read them as a combination).
+	// Registered next to commit-lang-override, which it supersedes on the UI
+	// side but stays available for API clients.
+	mux.HandleFunc("PUT /api/projects/{id}/commit-style", projectH.SetCommitStyle)
+	// Preview renders the same commit/PR convention block that would be
+	// injected into the prompt, for a not-yet-saved (preset, custom, lang).
+	// Pure function — no DB access, no permission check beyond the global
+	// auth middleware, so the overview card can call it on every keystroke
+	// (debounced) without a round-trip through the project row.
+	mux.HandleFunc("POST /api/projects/commit-style/preview", projectH.PreviewCommitStyle)
+
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)
 	mux.HandleFunc("GET /api/projects/{id}/reports/rule", reportH.GetRule)

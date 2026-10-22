@@ -43,7 +43,7 @@ func TestCreatePRShell_BodyShape(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		tmpl := service.NewPRShellTemplates(c.lang)
+		tmpl := service.NewPRShellTemplates(c.lang, service.CommitStyleRules{})
 		got := buildPRShellBody(tmpl, fakeLog, fakeDiff)
 
 		// 必要 section + log + diff 都在
@@ -94,7 +94,7 @@ func TestCreatePRShell_BodyShape(t *testing.T) {
 // English-style project got a Chinese PR title because reqRow.Title was
 // used before the (already commit_lang-compliant) commit subject.
 func TestResolvePRTitle(t *testing.T) {
-	en := service.NewPRShellTemplates("en")
+	en := service.NewPRShellTemplates("en", service.CommitStyleRules{})
 
 	cases := []struct {
 		name          string

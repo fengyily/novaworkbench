@@ -94,13 +94,13 @@ func TestBuildGitProjectContext_MinimalAllEmptyPath(t *testing.T) {
 // regression here would render the obsolete wording in the assistant's
 // context.
 func TestStyleHintServiceContract(t *testing.T) {
-	if !strings.Contains(service.StyleHint("en", ""), "English") {
+	if !strings.Contains(service.StyleHint("en", "", service.CommitStyleRules{}), "English") {
 		t.Errorf("StyleHint(en) must mention English")
 	}
-	if !strings.Contains(service.StyleHint("zh", ""), "中文") {
+	if !strings.Contains(service.StyleHint("zh", "", service.CommitStyleRules{}), "中文") {
 		t.Errorf("StyleHint(zh) must mention 中文")
 	}
-	if !strings.Contains(service.StyleHint("mixed", ""), "混用") {
+	if !strings.Contains(service.StyleHint("mixed", "", service.CommitStyleRules{}), "混用") {
 		t.Errorf("StyleHint(mixed) must mention 混用")
 	}
 }

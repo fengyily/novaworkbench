@@ -172,10 +172,10 @@ func (h *ProjectHandler) Purge(w http.ResponseWriter, r *http.Request) {
 func (h *ProjectHandler) UpdateBasicInfo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		Name         *string `json:"name"`
-		RemoteURL    *string `json:"remote_url"`
-		ProjectType  *string `json:"project_type"`
-		LocalPath    *string `json:"local_path"`
+		Name          *string `json:"name"`
+		RemoteURL     *string `json:"remote_url"`
+		ProjectType   *string `json:"project_type"`
+		LocalPath     *string `json:"local_path"`
 		DefaultBranch *string `json:"default_branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -417,6 +417,73 @@ func (h *ProjectHandler) SetCommitLangOverride(w http.ResponseWriter, r *http.Re
 		switch {
 		case strings.HasPrefix(msg, "INVALID_OVERRIDE"):
 			writeError(w, http.StatusBadRequest, "INVALID_OVERRIDE", msg)
+		case strings.HasPrefix(msg, "project not found"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", msg)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// PreviewCommitStyle renders the commit/PR convention block the server
+// WOULD inject for a given (preset, custom, lang), without touching the DB.
+// The overview card calls it on a 400ms debounce so the read-only preview
+// shows the user the exact text that will reach the prompt — 前端不做本地
+// 复刻，预览与注入共用 service.BuildCommitStyleRules 这一个来源，预览说谎
+// 的唯一可能就被消掉了。
+//
+// POST /api/projects/commit-style/preview
+// body: {"preset": "none|conventional|custom", "custom": "...", "lang": "zh|en|mixed"}
+func (h *ProjectHandler) PreviewCommitStyle(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Preset string `json:"preset"`
+		Custom string `json:"custom"`
+		Lang   string `json:"lang"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")
+		return
+	}
+	rules := service.BuildCommitStyleRules(body.Preset, body.Custom, body.Lang)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"example":  rules.Example,
+		"commit":   rules.Commit,
+		"pr_title": rules.PRTitle,
+		"pr_body":  rules.PRBody,
+	})
+}
+
+// SetCommitStyle persists the 「提交风格」 card — language pin + convention
+// preset + free-text supplements — in one PUT. All three fields are written
+// together so the prompt-building paths never read a half-saved combination.
+//
+// PUT /api/projects/{id}/commit-style
+// body: {"lang": "zh|en|mixed|", "preset": "none|conventional|custom", "custom": "..."}
+func (h *ProjectHandler) SetCommitStyle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "缺少项目 ID")
+		return
+	}
+	var body struct {
+		Lang   string `json:"lang"`
+		Preset string `json:"preset"`
+		Custom string `json:"custom"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")
+		return
+	}
+	p, err := h.svc.SetCommitStyle(id, body.Lang, body.Preset, body.Custom)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "INVALID_LANG"),
+			strings.HasPrefix(msg, "INVALID_PRESET"),
+			strings.HasPrefix(msg, "INVALID_CUSTOM"):
+			writeError(w, http.StatusBadRequest, "INVALID_COMMIT_STYLE", msg)
 		case strings.HasPrefix(msg, "project not found"):
 			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
 		default:

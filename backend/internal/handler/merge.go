@@ -1049,12 +1049,16 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// 项目历史语言风格：用于让 Claude 子代理写 commit / PR title / PR body 时
 	// 遵循项目历史语言偏好（zh / en / mixed）。优先使用已加载的 project 行；
 	// 若加载失败则降级到包内私有 helper 直查 DB。
+	//
+	// 提交规范（conventional / custom 预设）本路径不需要单独透传：下面
+	// dispatch 的子任务会自己 buildGitProjectContext → loadProject 读项目行，
+	// 在那里注入 StyleHint / PRLangRules。两条路径读的是同一行，不会分叉。
 	commitLang := ""
 	if project != nil {
 		commitLang = service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
 	}
 	if commitLang == "" {
-		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
+		commitLang, _ = loadProjectGitStyle(h.db, reqRow.ProjectID)
 	}
 
 	// Resolve the effective model + claude config up-front so the SubTaskPanel
@@ -1173,7 +1177,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 	// platform-token env reminders all live here. forPR=true so the block
 	// also carries the PR title/body language rules (formerly emitted as a
 	// separate service.PRLangRules(commitLang) call below the prompt body,
-//	now consolidated into the single block to avoid duplication). Falls
+	//	now consolidated into the single block to avoid duplication). Falls
 	// back to "" when the project row / token row is missing; buildPushSubTaskPrompt
 	// then degrades to "just GitCommitConvention" so callers never see an
 	// empty tail.
@@ -1575,17 +1579,19 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 // from the dev...base diff. Falls back to ("", "", model) on failure so the
 // caller degrades to reqRow.Title / reqRow.Description without blocking.
 // commitLang is the project's resolved commit language ("" / "zh" / "en" /
-// "mixed"); passed to service.PRLangRules so the user prompt carries an
-// explicit language block that overrides the pr_author role's hardcoded
-// Chinese instructions.
-func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement, commitLang string) (title, body, modelOut string) {
+// "mixed") and style is the convention preset rendered by
+// service.BuildCommitStyleRules; both go into service.PRLangRules so the user
+// prompt carries an explicit language + format block that overrides the
+// pr_author role's hardcoded Chinese instructions. An empty style leaves the
+// block exactly as it was before the preset feature existed.
+func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement, commitLang string, style service.CommitStyleRules) (title, body, modelOut string) {
 	systemPrompt, model, claudeConfigID := h.roleConfig("pr_author")
 	modelOut = model
 	job.Append(store.LogLine{Type: "phase", Content: "📝 Claude 正在生成 PR 摘要..."})
 	prompt := fmt.Sprintf("请为本次开发分支的改动撰写 PR 描述。\n\n开发分支：%s\n主分支（base）：%s\n需求标题：%s\n需求描述：\n%s\n\n"+
 		"操作步骤：\n1. 运行 git diff origin/%s...%s 查看本次相对主分支的全部改动\n2. 必要时运行 git log 查看提交历史\n"+
 		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文\n\n%s",
-		dev, base, reqRow.Title, reqRow.Description, base, dev, service.PRLangRules(commitLang))
+		dev, base, reqRow.Title, reqRow.Description, base, dev, service.PRLangRules(commitLang, style))
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        devDir,
@@ -1710,24 +1716,28 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 	return h.projectSvc.Get(reqRow.ProjectID)
 }
 
-// loadProjectCommitLang 读取指定项目 commit_lang 与 commit_lang_override，
-// 调用 service.ResolveCommitLang 按「override 优先 → stored 次之 → 空」优先级
-// 解析后返回最终语言（zh / en / mixed / ""），供推送子任务 prompt 注入风格
-// 提示使用。读不到 / 项目不存在时返回空字符串，调用方据此省略风格行。
+// loadProjectGitStyle 读取指定项目的提交风格，返回「最终语言」与「已渲染的
+// 规范块」。调用 service.ResolveCommitLang 按「override 优先 → stored 次之 →
+// 空」优先级解析语言，再交给 service.BuildCommitStyleRules 渲染 preset +
+// custom。读不到 / 项目不存在时返回空值对，调用方据此省略风格行。
+//
+// 一次 SELECT 取全四列：语言与规范在 UI 上是同一张卡片、在 prompt 里是同一
+// 个块，分两次查只会多一次往返，没有任何一致性收益（同一行同一瞬间）。
 // 包内私有，handler 包外部无需依赖此函数。
-func loadProjectCommitLang(db *db.DB, projectID string) string {
+func loadProjectGitStyle(db *db.DB, projectID string) (string, service.CommitStyleRules) {
 	if db == nil || projectID == "" {
-		return ""
+		return "", service.CommitStyleRules{}
 	}
-	var lang, override string
+	var lang, override, preset, custom string
 	err := db.QueryRow(
-		"SELECT commit_lang, commit_lang_override FROM projects WHERE id = ?",
+		"SELECT commit_lang, commit_lang_override, commit_style_preset, commit_style_custom FROM projects WHERE id = ?",
 		projectID,
-	).Scan(&lang, &override)
+	).Scan(&lang, &override, &preset, &custom)
 	if err != nil {
-		return ""
+		return "", service.CommitStyleRules{}
 	}
-	return service.ResolveCommitLang(lang, override)
+	resolved := service.ResolveCommitLang(lang, override)
+	return resolved, service.BuildCommitStyleRules(preset, custom, resolved)
 }
 
 // gitIdentityForReq returns the (name, email) the merge commit should use,

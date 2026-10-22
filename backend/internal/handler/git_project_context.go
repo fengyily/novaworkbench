@@ -203,8 +203,13 @@ func buildGitProjectContext(proj *model.Project, platformSvc *service.PlatformTo
 		CommitScript: proj.CommitScript,
 	}
 	commitLang := service.ResolveCommitLang(proj.CommitLang, proj.CommitLangOverride)
-	ctx.StyleHint = service.StyleHint(commitLang, "")
-	ctx.PRLangRules = service.PRLangRules(commitLang)
+	// Render the convention preset (Conventional Commits / custom rules)
+	// once and hand the same product to both injection points — the coding /
+	// push sub-agents read it via StyleHint, the PR-writing agent via
+	// PRLangRules. Empty preset → empty rules → the prompt is unchanged.
+	style := service.BuildCommitStyleRules(proj.CommitStylePreset, proj.CommitStyleCustom, commitLang)
+	ctx.StyleHint = service.StyleHint(commitLang, "", style)
+	ctx.PRLangRules = service.PRLangRules(commitLang, style)
 
 	if proj.PlatformTokenID != "" && platformSvc != nil {
 		tok, terr := platformSvc.Get(proj.PlatformTokenID)

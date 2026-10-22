@@ -3,24 +3,24 @@ package model
 import "time"
 
 type Project struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	LocalPath       string     `json:"local_path"`
-	RemoteURL       string     `json:"remote_url"`
-	Status          string     `json:"status"`
-	DefaultBranch   string     `json:"default_branch"`
-	ProjectType     string     `json:"project_type"`
-	ClaudeFiles     string     `json:"claude_files"`
-	PlatformType    string     `json:"platform_type"`
-	PlatformTokenID string     `json:"platform_token_id"`
-	AddedAt         time.Time  `json:"added_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	LastScannedAt   *time.Time `json:"last_scanned_at,omitempty"`
-	DeletedAt       *string    `json:"deleted_at,omitempty"`
-	DeletedDir      int        `json:"deleted_dir"`
-	Description      string     `json:"description"`
-	DescriptionManual bool      `json:"description_manual"`
-	DescriptionHash  string     `json:"-"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	LocalPath         string     `json:"local_path"`
+	RemoteURL         string     `json:"remote_url"`
+	Status            string     `json:"status"`
+	DefaultBranch     string     `json:"default_branch"`
+	ProjectType       string     `json:"project_type"`
+	ClaudeFiles       string     `json:"claude_files"`
+	PlatformType      string     `json:"platform_type"`
+	PlatformTokenID   string     `json:"platform_token_id"`
+	AddedAt           time.Time  `json:"added_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	LastScannedAt     *time.Time `json:"last_scanned_at,omitempty"`
+	DeletedAt         *string    `json:"deleted_at,omitempty"`
+	DeletedDir        int        `json:"deleted_dir"`
+	Description       string     `json:"description"`
+	DescriptionManual bool       `json:"description_manual"`
+	DescriptionHash   string     `json:"-"`
 	// ClaudeProjectSlug is the directory name Claude CLI assigned to this
 	// project under ~/.claude/projects/<slug>/. Cached on first local
 	// start-coding (DiscoverAndCacheClaudeProjectSlug); read by the Agent
@@ -36,9 +36,9 @@ type Project struct {
 	// "manual" via override API, "" never written). CommitLangUpdatedAt is
 	// the last successful write timestamp. Consumed by the wizard push
 	// sub-task prompt, the pr_author role, and the frontend style chip.
-	CommitLang         string     `json:"commit_lang,omitempty"`
-	CommitLangOverride string     `json:"commit_lang_override,omitempty"`
-	CommitLangSource   string     `json:"commit_lang_source,omitempty"`
+	CommitLang          string     `json:"commit_lang,omitempty"`
+	CommitLangOverride  string     `json:"commit_lang_override,omitempty"`
+	CommitLangSource    string     `json:"commit_lang_source,omitempty"`
 	CommitLangUpdatedAt *time.Time `json:"commit_lang_updated_at,omitempty"`
 	// Commit-message source strategy for the "完成开发 → 提交推送" pipeline.
 	// CommitMode is one of the values in project_commit_mode.go (script_only /
@@ -50,6 +50,24 @@ type Project struct {
 	// projects row by service.ProjectService.SetCommitPushConfig.
 	CommitMode   string `json:"commit_mode,omitempty"`
 	CommitScript string `json:"commit_script,omitempty"`
+	// Commit/PR convention preset + free-text supplements, layered on top
+	// of CommitLangOverride above (that one says WHICH language, these say
+	// WHICH format). Written by service.ProjectService.SetCommitStyle from
+	// the 「提交风格」card on the project overview, read by every prompt
+	// generation path via service.BuildCommitStyleRules.
+	//
+	// CommitStylePreset is one of the values in project_commit_style.go
+	// (none / conventional / custom); the empty string is the
+	// never-configured state that renders to "inject nothing". Preset
+	// intentionally does NOT decide the language — the same
+	// `type(scope): subject` shape is rendered with a zh or an en example
+	// depending on the resolved commit language.
+	CommitStylePreset string `json:"commit_style_preset,omitempty"`
+	// CommitStyleCustom is the user's own rules text (capped at
+	// model.CommitStyleCustomMaxLen). Appended after the preset's rendered
+	// sections when preset = conventional; used verbatim when preset =
+	// custom; ignored when preset is "" / none. Blank for most projects.
+	CommitStyleCustom string `json:"commit_style_custom,omitempty"`
 	// Repo-sync trail for the "方案设计前同步仓库到工作目录" wizard prologue.
 	// LastSyncedAt is the timestamp of the most recent clone/fetch attempt
 	// (best-effort — failure still stamps the column). LastSyncedCommit is the
@@ -89,9 +107,9 @@ type Project struct {
 // subsequent git operations inside the worktree rely on the credentials
 // git caches in the local repo config.
 type AddProjectRequest struct {
-	LocalPath       string `json:"local_path"`
-	RemoteURL       string `json:"remote_url"`
-	InitGit         bool   `json:"init_git"`
+	LocalPath string `json:"local_path"`
+	RemoteURL string `json:"remote_url"`
+	InitGit   bool   `json:"init_git"`
 	// Optional clone --branch (ignored in local mode).
 	Branch string `json:"branch,omitempty"`
 	// "github" | "gitlab" | "gitea" — required when PlatformTokenID is set.
@@ -102,12 +120,12 @@ type AddProjectRequest struct {
 }
 
 type DashboardData struct {
-	TotalProjects   int            `json:"total_projects"`
-	ActiveReqs      int            `json:"active_requirements"`
-	PendingReviews  int            `json:"pending_reviews"`
-	WeeklyCommits   int            `json:"weekly_commits"`
-	Projects        []Project      `json:"projects"`
-	RecentActivity  []ActivityItem `json:"recent_activity"`
+	TotalProjects  int            `json:"total_projects"`
+	ActiveReqs     int            `json:"active_requirements"`
+	PendingReviews int            `json:"pending_reviews"`
+	WeeklyCommits  int            `json:"weekly_commits"`
+	Projects       []Project      `json:"projects"`
+	RecentActivity []ActivityItem `json:"recent_activity"`
 }
 
 type ActivityItem struct {

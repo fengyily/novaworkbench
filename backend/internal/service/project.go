@@ -23,8 +23,8 @@ import (
 )
 
 type ProjectService struct {
-	db         *db.DB
-	platforms  *PlatformTokenService
+	db        *db.DB
+	platforms *PlatformTokenService
 	// gitCredSvc resolves the project's platform token into a GIT_ASKPASS
 	// env for any git fetch / pull triggered on the project checkout. nil is
 	// tolerated (the methods below short-circuit on empty projectID or
@@ -83,6 +83,7 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 		p.project_type, p.claude_files, p.platform_type, p.platform_token_id, p.added_at, p.updated_at, p.last_scanned_at,
 		p.deleted_at, p.deleted_dir, p.description, p.description_manual, p.description_hash, p.claude_project_slug,
 		p.commit_lang, p.commit_lang_override, p.commit_lang_source, p.commit_lang_updated_at,
+		p.commit_mode, p.commit_script, p.commit_style_preset, p.commit_style_custom,
 		p.last_synced_at, p.last_synced_commit, p.sync_status,
 		p.requirement_count, p.issue_count, p.idea_count,
 		CASE WHEN ps.user_id IS NULL THEN 0 ELSE 1 END AS starred
@@ -113,8 +114,9 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
 			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+			&p.CommitMode, &p.CommitScript, &p.CommitStylePreset, &p.CommitStyleCustom,
 			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
-		&p.RequirementCount, &p.IssueCount, &p.IdeaCount, &p.Starred)
+			&p.RequirementCount, &p.IssueCount, &p.IdeaCount, &p.Starred)
 		if err != nil {
 			return nil, err
 		}
@@ -206,6 +208,7 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
 		requirement_count, issue_count, idea_count
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
@@ -214,6 +217,7 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
 		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+		&p.CommitMode, &p.CommitScript, &p.CommitStylePreset, &p.CommitStyleCustom,
 		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
 		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 	if err == sql.ErrNoRows {
@@ -232,6 +236,7 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
 		requirement_count, issue_count, idea_count
 		FROM projects WHERE id = ?`, id).Scan(
@@ -240,6 +245,7 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
 		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+		&p.CommitMode, &p.CommitScript, &p.CommitStylePreset, &p.CommitStyleCustom,
 		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
 		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 	if err == sql.ErrNoRows {
@@ -257,6 +263,7 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
 		requirement_count, issue_count, idea_count
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
@@ -273,8 +280,9 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
 			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+			&p.CommitMode, &p.CommitScript, &p.CommitStylePreset, &p.CommitStyleCustom,
 			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
-		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
+			&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 		if err != nil {
 			return nil, err
 		}
@@ -393,9 +401,10 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 // add. Returns the raw token secret + its platform kind so cloneRepo can
 // build an authenticated URL / ssh command. Errors are surfaced with stable
 // prefixes the handler maps to HTTP status codes:
-//   TOKEN_NOT_FOUND  — token ID missing or unknown
-//   PLATFORM_MISMATCH — token platform doesn't match the user-supplied platform_type
-//                       (and can't be inferred from the remote URL host)
+//
+//	TOKEN_NOT_FOUND  — token ID missing or unknown
+//	PLATFORM_MISMATCH — token platform doesn't match the user-supplied platform_type
+//	                    (and can't be inferred from the remote URL host)
 //
 // Both platformType and tokenID must be set together — passing one without
 // the other is treated as TOKEN_NOT_FOUND to keep the contract explicit.
@@ -1780,12 +1789,12 @@ func (s *ProjectService) DashboardForUser(userID string, isAdmin bool) (*model.D
 	weeklyCommits := 0
 
 	return &model.DashboardData{
-		TotalProjects:   len(projects),
-		ActiveReqs:      activeReqs,
-		PendingReviews:  pendingReviews,
-		WeeklyCommits:   weeklyCommits,
-		Projects:        projects,
-		RecentActivity:  []model.ActivityItem{},
+		TotalProjects:  len(projects),
+		ActiveReqs:     activeReqs,
+		PendingReviews: pendingReviews,
+		WeeklyCommits:  weeklyCommits,
+		Projects:       projects,
+		RecentActivity: []model.ActivityItem{},
 	}, nil
 }
 
@@ -2185,6 +2194,71 @@ func (s *ProjectService) SetCommitPushConfig(id, mode, script string) (*model.Pr
 	return s.Get(id)
 }
 
+// SetCommitStyle persists the whole 「提交风格」 card in one shot: the
+// language pin, the convention preset, and the free-text supplements.
+//
+// 三字段一次全量 PUT（而不是三个端点）：这三者在 UI 上是同一张卡片里的
+// 一次「保存」，拆成三次往返会出现「语言已存、规范还没存」的中间态，
+// 而生成 prompt 的两条路径读的就是这三者的组合。
+//
+// Validation mirrors SetCommitPushConfig — errors carry an INVALID_*
+// prefix so the handler can map them to 400 without scraping prose:
+//   - lang      "" / "zh" / "en" / "mixed"
+//   - preset    one of model.IsValidCommitStylePreset; the UI's "" (which
+//     means "never configured") is normalised to "none" here so
+//     the column only ever holds an explicit choice going forward
+//   - custom    required when preset = custom (otherwise the column would
+//     hold a preset pointing at nothing), capped at
+//     model.CommitStyleCustomMaxLen because the text is injected
+//     verbatim into every commit/PR prompt
+//
+// preset = none / conventional keeps whatever supplements the user typed —
+// the textarea is rendered unconditionally in the UI, so switching back and
+// forth between presets must not destroy them.
+//
+// Returns the refreshed project row so the handler can echo it back and the
+// client can update local state in one shot.
+func (s *ProjectService) SetCommitStyle(id, lang, preset, custom string) (*model.Project, error) {
+	lang = strings.TrimSpace(lang)
+	preset = strings.TrimSpace(preset)
+	custom = strings.TrimSpace(custom)
+	if preset == "" {
+		preset = model.CommitStylePresetNone
+	}
+	if lang != "" && lang != "zh" && lang != "en" && lang != "mixed" {
+		return nil, fmt.Errorf("INVALID_LANG: lang must be empty, zh, en, or mixed")
+	}
+	if !model.IsValidCommitStylePreset(preset) {
+		return nil, fmt.Errorf("INVALID_PRESET: preset must be one of none/conventional/custom")
+	}
+	if preset == model.CommitStylePresetCustom && custom == "" {
+		return nil, fmt.Errorf("INVALID_CUSTOM: custom rules text is required when preset=custom")
+	}
+	if len([]rune(custom)) > model.CommitStyleCustomMaxLen {
+		return nil, fmt.Errorf("INVALID_CUSTOM: custom rules text too long (max %d chars)", model.CommitStyleCustomMaxLen)
+	}
+	// Effective source tracks where the *currently effective* language value
+	// comes from, same convention as SetCommitLangOverride. Clearing the pin
+	// falls back to whatever the scanner last wrote.
+	source := "auto"
+	if lang != "" {
+		source = "user"
+	}
+	res, err := s.db.Exec(
+		`UPDATE projects SET commit_lang_override = ?, commit_lang_source = ?, commit_lang_updated_at = ?,
+			commit_style_preset = ?, commit_style_custom = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL`,
+		lang, source, time.Now(), preset, custom, time.Now(), id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, fmt.Errorf("project not found: %s", id)
+	}
+	return s.Get(id)
+}
+
 // ----- token probe infrastructure ------------------------------------------------
 
 // truncateForLog sanitizes an HTTP response body for log output. Newlines and
@@ -2313,13 +2387,13 @@ func platformTokenInvalidError(platform string, status int, body []byte, cleaned
 //
 // Heuristics (intentionally conservative; false negatives are fine):
 //   - github:    recognise ghp_/gho_/ghu_/ghs_/ghr_ (classic) and
-//                github_pat_ (fine-grained). PATs are ≥40 chars.
+//     github_pat_ (fine-grained). PATs are ≥40 chars.
 //   - gitlab:    recognise glpat- (modern) and the legacy "long hex"
-//                prefix family. PATs are ≥20 chars after glpat-.
+//     prefix family. PATs are ≥20 chars after glpat-.
 //   - gitea:     Gitea issues opaque tokens (no fixed prefix). The
-//                baseline check is length (≥40 chars is the common case).
+//     baseline check is length (≥40 chars is the common case).
 //   - bitbucket: ATATT (Cloud PAT) or "user:app_password" (App Password
-//                form) — both are recognised.
+//     form) — both are recognised.
 //
 // The length floor is intentionally well below a real PAT's length so we
 // only fire on truly suspicious input (e.g. a 26-byte string from a

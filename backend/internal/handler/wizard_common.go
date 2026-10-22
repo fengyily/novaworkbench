@@ -811,14 +811,19 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	prModel = cliModelArg(prModel)
 	pushModel, pushCfgID := pushPRRuntimeModel(reqRow, "", prModel, roleConfigID)
 
-	// 项目历史语言风格：让推送子任务 prompt 注入 commit/PR 风格提示。优先
-	// 使用已加载的 project 行；若 proj 为 nil 则由私有 helper 直查 DB。
+	// 项目历史语言风格 + 提交规范：让推送子任务 prompt 与 shell 路径注入
+	// commit/PR 风格。优先使用已加载的 project 行；若 proj 为 nil 则由私有
+	// helper 直查 DB（一次 SELECT 取全四列）。
 	commitLang := ""
+	commitStyle := service.CommitStyleRules{}
 	if proj != nil {
 		commitLang = service.ResolveCommitLang(proj.CommitLang, proj.CommitLangOverride)
+		commitStyle = service.BuildCommitStyleRules(
+			proj.CommitStylePreset, proj.CommitStyleCustom, commitLang,
+		)
 	}
 	if commitLang == "" {
-		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
+		commitLang, commitStyle = loadProjectGitStyle(h.db, reqRow.ProjectID)
 	}
 
 	// Route by where the code physically lives:
@@ -877,11 +882,11 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		// Local shell path: pick the variant by stage flag combination.
 		switch {
 		case reqRow.AutoCommit && reqRow.AutoPushRemote && reqRow.AutoCreatePR:
-			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle, true)
+			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, commitStyle, autoPRTitle, true)
 		case reqRow.AutoCommit && reqRow.AutoPushRemote && !reqRow.AutoCreatePR:
 			// Push to remote but skip PR creation — what most users want for
 			// "internal branches / draft work I haven't finished yet".
-			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle, false)
+			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, commitStyle, autoPRTitle, false)
 		case reqRow.AutoCommit && !reqRow.AutoPushRemote:
 			// Commit-only: just record the work, leave it on the local worktree.
 			// Reuses the shell job plumbing so the SubTaskPanel card stays

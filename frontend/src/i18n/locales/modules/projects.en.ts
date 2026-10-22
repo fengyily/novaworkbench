@@ -188,6 +188,7 @@ export const projects = {
       auto: 'Auto-detected (auto)',
       zh: '中文 (Chinese)',
       en: 'English (en)',
+      mixed: 'Mixed zh/en (mixed)',
       hint: 'When unset, the language is auto-detected from the project git history. Setting this pins the language for commit messages and PR titles/bodies.',
       saved: 'Saved',
       saveFailed: 'Save failed: {{msg}}',
@@ -196,6 +197,30 @@ export const projects = {
       sourceOverride: 'Manual',
       detectedLabel: 'Detected: ',
       noDetect: 'Not yet detected',
+    },
+    // Overview — commit convention. The language dropdown above answers
+    // "which language"; these answer "which shape" (Conventional Commits or
+    // the project's own rules). Both live in one card and one PUT, because
+    // the prompt builders read them as a combination.
+    commitStyle: {
+      save: 'Save',
+      saved: 'Saved',
+      saveFailed: 'Save failed: {{msg}}',
+      presetLabel: 'Convention',
+      presetConventional: 'Conventional Commits (recommended)',
+      presetNone: "Don't enforce (follow repo history)",
+      presetCustom: 'Custom',
+      customLabel: 'Extra rules',
+      customPlaceholder: "Optional extra rules on top of \"don't enforce\" / Conventional Commits. Required — and used verbatim as the convention — when \"Custom\" is selected.",
+      customRequired: 'Extra rules are required when the convention is "Custom"',
+      previewLabel: 'Convention preview',
+      previewHint: 'This is the exact text injected into the AI prompt; it follows the language and convention you pick.',
+      previewEmpty: 'No convention configured — commits and PRs follow the repo history, no extra rules are injected.',
+      previewLoading: 'Rendering…',
+      langBadgeAuto: 'Language: auto',
+      langBadgeManual: 'Language: manually overridden',
+      scriptOnlyWarn: 'The commit / push strategy is "Script only", so the commit message is taken verbatim from the script — conventions configured here have no effect.',
+      customTooLong: 'Extra rules exceed {{max}} characters; shorten them before saving',
     },
     // Overview — commit / push strategy (which path the merge pipeline
     // takes when the user leaves the merge-modal commit_message field
