@@ -12,16 +12,12 @@ import (
 	"github.com/novaworkbench/backend/internal/util"
 )
 
-// newCodeReviewTestDB opens whatever driver the environment points at
-// (matching the convention in attachment_sync_test.go) and seeds the parent
-// project row the FK needs. Skips — never fails — when no DB is reachable.
+// newCodeReviewTestDB opens a disposable DB and seeds the parent project row
+// the FK needs. See newServiceTestDB for why this no longer follows
+// db.LoadConfig().
 func newCodeReviewTestDB(t *testing.T) (*db.DB, string) {
 	t.Helper()
-	d, err := db.Init(db.LoadConfig())
-	if err != nil {
-		t.Skipf("db init (%s) — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH", err)
-	}
-	t.Cleanup(func() { d.Close() })
+	d := newServiceTestDB(t)
 	projectID := "proj_crvtest"
 	if _, err := d.Exec(
 		`INSERT INTO projects (id, name, local_path) VALUES (?, ?, ?)

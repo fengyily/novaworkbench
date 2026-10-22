@@ -59,12 +59,7 @@ func (r *fakeRemote) Remove(p string) error {
 // contract. Seeds two local attachments, runs sync #1 (uploads both),
 // then mutates one and runs sync #2 (only re-uploads the changed one).
 func TestAttachmentSync_DiffRoundTrip(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skipf("db init (%s) — start postgres or set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH", err)
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	// Use a fresh requirement id so re-runs of this test don't pile up
 	// rows. The fakes track only putCalls + put map, so cross-test
@@ -144,12 +139,7 @@ func TestAttachmentSync_DiffRoundTrip(t *testing.T) {
 // TestAttachmentSync_NoWorkIsCheap asserts an idempotent re-sync
 // (no file changes) uploads nothing.
 func TestAttachmentSync_NoWorkIsCheap(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skip("db init — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH for SQLite test")
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	reqID := "req_" + util.NewID("nosync")[:12]
 	createReqForTest(t, d, reqID)
@@ -182,12 +172,7 @@ func TestAttachmentSync_NoWorkIsCheap(t *testing.T) {
 // SyncToAgentServer calls running from the same starting state don't
 // re-upload anything on the second call (state survives).
 func TestAttachmentSync_PersistsStateAcrossRuns(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skip("db init — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH for SQLite test")
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	reqID := "req_" + util.NewID("persist")[:12]
 	createReqForTest(t, d, reqID)
@@ -222,12 +207,7 @@ func TestAttachmentSync_PersistsStateAcrossRuns(t *testing.T) {
 // syncs, deletes one locally, then re-syncs. The next sync must SFTP
 // remove the deleted file's remote twin and prune the state entry.
 func TestAttachmentSync_OrphanPrunedOnLocalDelete(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skip("db init — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH for SQLite test")
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	reqID := "req_" + util.NewID("orphan")[:12]
 	createReqForTest(t, d, reqID)
@@ -299,12 +279,7 @@ func TestAttachmentSync_OrphanPrunedOnLocalDelete(t *testing.T) {
 // we don't know the filename — it stays untouched until a re-upload
 // repopulates the entry with a name.
 func TestAttachmentSync_LegacyEntryPreserved(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skip("db init — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH for SQLite test")
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	reqID := "req_" + util.NewID("legacy")[:12]
 	createReqForTest(t, d, reqID)
@@ -354,12 +329,7 @@ func TestAttachmentSync_LegacyEntryPreserved(t *testing.T) {
 // one attachment and uploading a different one with the same filename
 // — but a different att_id — leaves exactly one entry on remote.
 func TestAttachmentSync_DeleteThenNewName(t *testing.T) {
-	cfg := db.LoadConfig()
-	d, err := db.Init(cfg)
-	if err != nil {
-		t.Skip("db init — set NOVA_DB_DRIVER=sqlite + NOVA_DB_PATH for SQLite test")
-	}
-	defer d.Close()
+	d := newServiceTestDB(t)
 
 	reqID := "req_" + util.NewID("rename")[:12]
 	createReqForTest(t, d, reqID)
