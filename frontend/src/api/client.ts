@@ -1359,6 +1359,16 @@ export const requirementsApi = {
   // the `delete` keyword (which clashes visually with "delete an attachment
   // from a list").
   remove: (id: string) => api.delete<{ status: string }>(`/api/requirements/${id}`),
+  // Batch delete — removes several requirements in one request. Unlike the
+  // single-id delete, a partial failure is NOT an HTTP error: the backend
+  // reports per-row outcomes, so the caller always gets {deleted, failed[]}
+  // and decides how to surface a mixed result. `failed` is `[]` or null
+  // depending on whether any row failed, hence the null in the union.
+  batchDelete: (ids: string[]) =>
+    api.post<{ deleted: number; failed: { id: string; message: string }[] | null }>(
+      '/api/requirements/batch-delete',
+      { ids },
+    ),
   // Drop the stored claude analyst session so the next chat turn starts fresh
   // instead of resuming a broken / over-long conversation.
   clearAnalysisSession: (id: string) =>

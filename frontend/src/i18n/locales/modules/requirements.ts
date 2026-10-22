@@ -49,6 +49,26 @@ export const requirements = {
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: '定时执行 · {{time}} · {{rel}}',
     scheduledAria: '有定时执行计划',
+    // 批量选择与删除（跨项目需求列表）。
+    selectAllAria: '全选当前筛选出的需求',
+    selectRowAria: '选择需求「{{title}}」',
+    batchBarLabel: '已选 {{n}} / {{total}} 项',
+    batchSelectAll: '全选',
+    batchClear: '取消选择',
+    batchDeleteBtn: '删除',
+    deleteModal: {
+      title: '删除 {{n}} 项需求？',
+      body: '以下需求及其需求分析、方案、开发会话都会被一并删除，且不可恢复。',
+      moreTitles: '还有 {{n}} 条…',
+      cancel: '取消',
+      deleting: '删除中…',
+      confirm: '删除 {{n}} 项',
+      childRiskTitle: '其中 {{n}} 个子需求不会被删除',
+      childRiskDesc: '它们会被移出主需求、继续保留在列表中。',
+      childRiskAck: '我已了解，确认继续',
+    },
+    deleteDone: '已删除 {{n}} 项',
+    deletePartial: '已删除 {{n}} 项，{{m}} 项失败',
   },
   detail: {
     titleFallback: '（未命名需求）',

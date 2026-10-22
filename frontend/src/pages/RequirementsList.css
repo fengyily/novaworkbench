@@ -677,3 +677,185 @@
   }
   .req-row.drop-target { transition: background 120ms ease; }
 }
+
+/* ── Batch select: gutter geometry ──────────────────────────────────
+   The selection box lives in the existing tree gutter rather than in a
+   new column: this file pins per-column widths with an nth-child ladder
+   (see the note further up), and inserting a 9th column would shift
+   every one of those rules.
+
+   Every rule here is scoped to .req-table-wrap on purpose — the
+   .req-tree-col geometry itself lives in the shared
+   RequirementTreeToggle.css and is also used by ProjectDetail's
+   requirement tab, which must not change.
+
+   Geometry: 16px checkbox + 8px gap + 20px tree toggle = 44px of
+   content plus 6px of padding on each side, so the column becomes 56px.
+   The checkbox therefore starts at x=6 on EVERY row (masters and children
+   alike), and the tree toggle lands at x=30..50 — centre x=40, which is
+   the axis the directory-tree connector is drawn on. The connector
+   pseudo-elements below are re-anchored from left:50% to left:40px to
+   stay on that axis. */
+.req-table-wrap td.req-tree-col,
+.req-table-wrap th.req-tree-col {
+  width: 56px;
+  min-width: 56px;
+  max-width: 56px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+/* The shared rule centres the toggle with `margin: 0 auto`; under flex
+   that would re-centre it in the leftover space and break the axis. */
+.req-table-wrap td.req-tree-col .req-tree-toggle,
+.req-table-wrap td.req-tree-col .req-tree-spacer {
+  margin: 0;
+}
+.req-table-wrap tr.req-tree-row-open > td.req-tree-col::after { left: 40px; }
+.req-table-wrap tr.req-tree-row-child > td.req-tree-col::before { left: 40px; }
+.req-table-wrap tr.req-tree-row-child > td.req-tree-col::after { left: 40px; }
+/* The attach picker is position:absolute inside the gutter cell at
+   left:-6px — 12px left of the toggle. The toggle moved from x=6 to
+   x=30, so keep that same 12px gap. */
+.req-table-wrap .req-tree-popover { left: 18px; }
+
+/* ── Batch select: the one deliberately loud element ────────────────
+   A selected row gets the primary rail on its left edge plus a soft
+   indigo wash, so the delete scope is readable BEFORE the user opens the
+   confirm dialog. Everything around it stays quiet. */
+.req-select-box {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.req-select-box:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.req-table-wrap tr.req-row-selected > td {
+  background: var(--color-active);
+}
+.req-table-wrap tr.req-row-selected:hover > td {
+  background: var(--color-active);
+}
+/* The tree block tints its own rows (tr.req-tree-row-child > td sets a
+   group background at the same specificity, and the hover variant is
+   higher still) — the selected state has to win, hence the extra class. */
+.req-table-wrap tr.req-tree-row-child.req-row-selected > td,
+.req-table-wrap tr.req-tree-row-open.req-row-selected > td,
+.req-table-wrap tr.req-tree-row-open.req-row-selected:hover > td {
+  background: var(--color-active);
+}
+/* The rail lives on the gutter cell only — one 3px stripe at the row's
+   left edge, not a stripe on every cell. */
+.req-table-wrap tr.req-row-selected > td.req-tree-col {
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+/* ── Batch select: mobile card ─────────────────────────────────────
+   The mobile card is a <button>, so its checkbox is a SIBLING inside
+   .req-card-mobile-wrap rather than a descendant of the button. */
+@media (max-width: 768px) {
+  .req-card-mobile-wrap > .req-select-box {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    /* The card's first line (the kind-badge row) starts 12px down
+       (padding: 12px 14px), so the box sits on the same line. */
+    margin-top: 12px;
+  }
+  /* Selected card: tint + ring. The card already owns its left edge for
+     the kind colour rail (border-left: 3px solid), so the selected state
+     must NOT reuse border-left — it would fight the kind colour. */
+  .req-card-mobile-wrap.req-card-mobile-selected .req-card-mobile {
+    background: var(--color-active);
+    box-shadow: inset 0 0 0 2px var(--color-primary);
+  }
+  .req-card-mobile-wrap.req-card-mobile-selected .req-card-mobile:hover {
+    background: var(--color-active);
+  }
+}
+
+/* ── Batch bar, confirm-modal preview, result banner ────────────────
+   Class selectors only — no element selectors mixed in at the same
+   nesting level, so specificity never has to arbitrate. */
+.req-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--color-active);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: var(--radius-md, 8px);
+}
+.req-batch-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #0F172A);
+}
+.req-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+@media (max-width: 768px) {
+  .req-batch-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .req-batch-actions {
+    margin-left: 0;
+  }
+  .req-batch-actions > .btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* Title preview inside the confirm modal. */
+.req-batch-title-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+  background: var(--color-hover, #F1F5F9);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 12px;
+  color: var(--color-text-secondary, #475569);
+}
+.req-batch-title-list li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.req-batch-title-more {
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* Result banner — page-local, deliberately not a global toast. */
+.req-batch-banner {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md, 8px);
+  font-size: 13px;
+}
+.req-batch-banner.is-ok {
+  background: #ECFDF5;
+  border-color: #A7F3D0;
+  color: #047857;
+}
+.req-batch-banner.is-partial {
+  background: #FFFBEB;
+  border-color: #FDE68A;
+  color: #B45309;
+}

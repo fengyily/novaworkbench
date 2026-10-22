@@ -759,6 +759,11 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/calendar", reqH.Calendar)
 	// Stateless file-parsing endpoint — no DB write.
 	mux.HandleFunc("POST /api/requirements/parse-file", reqH.ParseFile)
+	// Batch delete — deletes several requirements in one request. MUST be
+	// registered before the {id} routes below so "batch-delete" is never
+	// captured as an id (same convention as /calendar and /parse-file
+	// above).
+	mux.HandleFunc("POST /api/requirements/batch-delete", reqH.BatchDelete)
 	mux.HandleFunc("GET /api/requirements/{id}", reqH.Get)
 	mux.HandleFunc("PUT /api/requirements/{id}", reqH.Update)
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)

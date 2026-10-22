@@ -49,6 +49,26 @@ export const requirements = {
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: 'Scheduled · {{time}} · {{rel}}',
     scheduledAria: 'Has a scheduled task',
+    // Batch select + delete on the cross-project list.
+    selectAllAria: 'Select all filtered requirements',
+    selectRowAria: 'Select requirement "{{title}}"',
+    batchBarLabel: '{{n}} of {{total}} selected',
+    batchSelectAll: 'Select all',
+    batchClear: 'Clear selection',
+    batchDeleteBtn: 'Delete',
+    deleteModal: {
+      title: 'Delete {{n}} requirements?',
+      body: 'These requirements and their analysis, design, and coding sessions will be deleted permanently.',
+      moreTitles: 'and {{n}} more…',
+      cancel: 'Cancel',
+      deleting: 'Deleting…',
+      confirm: 'Delete {{n}}',
+      childRiskTitle: '{{n}} sub-requirements will not be deleted',
+      childRiskDesc: 'They will be detached from their parent and stay in the list.',
+      childRiskAck: 'I understand, continue',
+    },
+    deleteDone: 'Deleted {{n}} requirements',
+    deletePartial: 'Deleted {{n}}, {{m}} failed',
   },
   detail: {
     titleFallback: '(untitled requirement)',

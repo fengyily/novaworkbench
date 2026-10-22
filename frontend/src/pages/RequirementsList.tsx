@@ -109,6 +109,16 @@ export default function RequirementsList() {
   // visual affordance, so on its own it is effectively invisible.
   const [addChildFor, setAddChildFor] = useState<string | null>(null);
 
+  // ---- Batch select + delete ----
+  // An immutable Set, matching the activeKinds / expanded idiom on this page.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [riskAck, setRiskAck] = useState(false);
+  // Visible result banner. Kept separate from liveMsg because liveMsg only
+  // feeds the .sr-only aria-live region — announced, never seen.
+  const [batchResult, setBatchResult] = useState<{ deleted: number; failed: number } | null>(null);
+
   useEffect(() => {
     projectsApi.list().then(setProjects).catch(() => {});
   }, []);
@@ -225,6 +235,49 @@ export default function RequirementsList() {
     const keep = new Set(masters.map(r => r.id));
     return [...masters, ...requirements.filter(r => r.parent_id && keep.has(r.parent_id))];
   }, [requirements, statusFilter, search]);
+
+  const toggleOne = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  // Select-all covers the whole filtered result set — NOT just the rows
+  // currently on screen. A collapsed sub-requirement is still part of the
+  // filter result, and skipping it would leave survivors behind after a
+  // "delete everything", which is the one complaint this feature must not earn.
+  const toggleAll = () => {
+    setSelected(prev => {
+      const allIds = filteredReqs.map(r => r.id);
+      const allOn = allIds.length > 0 && allIds.every(id => prev.has(id));
+      return allOn ? new Set<string>() : new Set(allIds);
+    });
+  };
+
+  const clearSelection = () => setSelected(new Set());
+
+  const allSelected = filteredReqs.length > 0 && filteredReqs.every(r => selected.has(r.id));
+  const someSelected = !allSelected && filteredReqs.some(r => selected.has(r.id));
+
+  // Drop ids that fell out of the filter result (or were deleted by someone
+  // else) so the batch request can never carry a row the user cannot see.
+  useEffect(() => {
+    const visible = new Set(filteredReqs.map(r => r.id));
+    setSelected(prev => {
+      const next = new Set<string>();
+      prev.forEach(id => { if (visible.has(id)) next.add(id); });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filteredReqs]);
+
+  // `indeterminate` is not an HTML attribute — it can only be set as a DOM
+  // property, hence the ref rather than a JSX prop.
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected;
+  }, [someSelected]);
 
   // Assembles over filteredReqs, never the raw requirements: a child is
   // already anchored to its visible parent by the memo above, so a parent
@@ -350,6 +403,28 @@ export default function RequirementsList() {
     </div>
   );
 
+  // One checkbox renderer shared by the desktop row and the mobile card.
+  //
+  // Both hosts navigate on click, so the box has to defeat three separate
+  // behaviours: stopPropagation on change/click keeps the surrounding row (or
+  // card button) from navigating, stopPropagation on mousedown keeps the
+  // desktop row's drag machinery from starting, and draggable={false} stops
+  // the input itself from being picked up as a drag source.
+  const selectionCheckbox = (r: Requirement) => (
+    <input
+      type="checkbox"
+      className="req-select-box"
+      checked={selected.has(r.id)}
+      onChange={(e) => { e.stopPropagation(); toggleOne(r.id); }}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      draggable={false}
+      aria-label={t('requirements.list.selectRowAria', {
+        title: r.title || t('requirements.list.noTitle'),
+      })}
+    />
+  );
+
   const childChip = (r: Requirement, depth: number) => {
     const n = childrenByParent.get(r.id)?.length ?? 0;
     if (depth === 0 && n > 0) {
@@ -468,7 +543,7 @@ export default function RequirementsList() {
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
           onClick={() => navigate(`/requirements/${r.id}`)}
-          className={`req-row req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${depth === 0 && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
+          className={`req-row req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${depth === 0 && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}${selected.has(r.id) ? ' req-row-selected' : ''}`}
           draggable
           onDragStart={e => onDragStart(e, r)}
           onDragEnd={endDrag}
@@ -477,8 +552,10 @@ export default function RequirementsList() {
           onDrop={e => onRowDrop(e, r)}
         >
           <td className="req-tree-col">
-            {/* Child rows leave the gutter empty on purpose — the
-                directory-tree connector is drawn on this cell by CSS. */}
+            {/* Selection box first, then the tree toggle. Child rows leave
+                the toggle slot empty on purpose — the directory-tree
+                connector is drawn on this cell by CSS. */}
+            {selectionCheckbox(r)}
             {depth === 0 && treeToggle(r, depth)}
           </td>
           <td data-label={t('requirements.list.colType')}>
@@ -651,12 +728,132 @@ export default function RequirementsList() {
         <div
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
-          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}`}
+          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}${selected.has(r.id) ? ' req-card-mobile-selected' : ''}`}
         >
+          {/* Sibling of the card, never a child: the card is a <button>
+              and an <input> nested in one is invalid HTML whose click the
+              button would swallow. First child so the box sits at the same
+              x on masters (which also render the tree cell) and children
+              (which don't). */}
+          {selectionCheckbox(r)}
           {depth === 0 && treeToggleInCell(r, depth)}
           {card}
         </div>
       );
+  };
+
+  // ---- Batch delete ----
+  const selectedReqs = useMemo(
+    () => filteredReqs.filter(r => selected.has(r.id)),
+    [filteredReqs, selected],
+  );
+  // Deleting a parent does NOT cascade: its sub-requirements are detached
+  // and promoted to top level. That is the most surprising thing about this
+  // screen, so the confirm modal says it out loud before anything is deleted.
+  // child_count is filled in by the List endpoint's child subquery, so this
+  // costs no extra request.
+  const childRiskCount = useMemo(
+    () => selectedReqs.reduce((n, r) => n + (r.child_count ?? 0), 0),
+    [selectedReqs],
+  );
+
+  const openConfirm = () => {
+    setRiskAck(false);
+    setBatchResult(null);
+    setConfirmOpen(true);
+  };
+
+  const handleBatchDelete = async () => {
+    if (deleting || selected.size === 0) return;
+    setDeleting(true);
+    try {
+      const res = await requirementsApi.batchDelete(Array.from(selected));
+      const failed = res.failed?.length ?? 0;
+      setConfirmOpen(false);
+      setSelected(new Set());
+      setRiskAck(false);
+      await loadRequirements();
+      // One source of truth, two channels: the visible banner and the
+      // aria-live region (liveMsg) carry the same numbers.
+      setBatchResult({ deleted: res.deleted, failed });
+      setLiveMsg(
+        failed > 0
+          ? t('requirements.list.deletePartial', { n: res.deleted, m: failed })
+          : t('requirements.list.deleteDone', { n: res.deleted }),
+      );
+    } catch (e) {
+      setLiveMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // Structure copied from ProjectsList.renderDeleteModal — the modal /
+  // risk-panel / btn-row-2col vocabulary is shared app-wide, so batch
+  // delete reads as the same action the user has already seen on /projects.
+  const renderBatchDeleteModal = () => {
+    if (!confirmOpen) return null;
+    const n = selected.size;
+    const preview = selectedReqs.slice(0, 5);
+    const rest = n - preview.length;
+    const canConfirm = childRiskCount === 0 || riskAck;
+    return (
+      <div className="modal-overlay" onClick={() => { if (!deleting) setConfirmOpen(false); }}>
+        <div className="modal-box" onClick={e => e.stopPropagation()}>
+          <h3 className="modal-title-danger">
+            {t('requirements.list.deleteModal.title', { n })}
+          </h3>
+          <div className="modal-confirm-text">
+            {t('requirements.list.deleteModal.body')}
+          </div>
+
+          <ul className="req-batch-title-list">
+            {preview.map(r => (
+              <li key={r.id}>{r.title || t('requirements.list.noTitle')}</li>
+            ))}
+            {rest > 0 && (
+              <li className="req-batch-title-more">
+                {t('requirements.list.deleteModal.moreTitles', { n: rest })}
+              </li>
+            )}
+          </ul>
+
+          {childRiskCount > 0 && (
+            <div className="modal-risk-panel">
+              <div className="modal-risk-title">
+                {t('requirements.list.deleteModal.childRiskTitle', { n: childRiskCount })}
+              </div>
+              <div className="modal-risk-desc">
+                {t('requirements.list.deleteModal.childRiskDesc')}
+              </div>
+              <label className="modal-risk-check">
+                <input
+                  type="checkbox"
+                  checked={riskAck}
+                  onChange={e => setRiskAck(e.target.checked)}
+                />
+                <span>{t('requirements.list.deleteModal.childRiskAck')}</span>
+              </label>
+            </div>
+          )}
+
+          <div className="modal-actions btn-row-2col">
+            <button className="btn" onClick={() => setConfirmOpen(false)} disabled={deleting}>
+              {t('requirements.list.deleteModal.cancel')}
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={handleBatchDelete}
+              disabled={!canConfirm || deleting}
+            >
+              {deleting
+                ? t('requirements.list.deleteModal.deleting')
+                : t('requirements.list.deleteModal.confirm', { n })}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -773,6 +970,43 @@ export default function RequirementsList() {
         </span>
       </div>
 
+      {/* Batch bar — rendered only while something is selected, so it never
+          occupies space or leaves a ghost when the selection is empty. The
+          "N of M" count spells out the scope, so the user can verify that
+          select-all really means "everything the filter matched" including
+          the sub-requirements currently collapsed out of sight. */}
+      {selected.size > 0 && (
+        <div className="req-batch-bar">
+          <span className="req-batch-count">
+            {t('requirements.list.batchBarLabel', { n: selected.size, total: filteredReqs.length })}
+          </span>
+          <div className="req-batch-actions">
+            <button type="button" className="btn btn-sm" onClick={toggleAll}>
+              {t('requirements.list.batchSelectAll')}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={clearSelection}>
+              {t('requirements.list.batchClear')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              onClick={openConfirm}
+              disabled={deleting}
+            >
+              {t('requirements.list.batchDeleteBtn')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {batchResult && (
+        <div className={`req-batch-banner${batchResult.failed > 0 ? ' is-partial' : ' is-ok'}`}>
+          {batchResult.failed > 0
+            ? t('requirements.list.deletePartial', { n: batchResult.deleted, m: batchResult.failed })
+            : t('requirements.list.deleteDone', { n: batchResult.deleted })}
+        </div>
+      )}
+
       <div className="sr-only" aria-live="polite" role="status">{liveMsg}</div>
 
       {/* Table (desktop view). `table-cards` is a no-op class on desktop
@@ -810,7 +1044,20 @@ export default function RequirementsList() {
           <table className="req-table table-cards">
             <thead>
               <tr>
-                <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
+                <th className="req-tree-col">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    className="req-select-box"
+                    checked={allSelected}
+                    onChange={(e) => { e.stopPropagation(); toggleAll(); }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    draggable={false}
+                    aria-label={t('requirements.list.selectAllAria')}
+                    title={t('requirements.list.selectAllAria')}
+                  />
+                </th>
                 {/* 96→112 once the dot+badge pair lives inside a nowrap
                     flex row (.req-type-cell); the extra slack keeps the
                     wiki pill from clipping on narrow viewports. */}
@@ -854,6 +1101,8 @@ export default function RequirementsList() {
           rows.map(({ r, depth }) => renderMobileCard(r, depth))
         )}
       </div>
+
+      {renderBatchDeleteModal()}
 
       {/* Mobile FAB — mirrors the desktop new-requirement button. The label
           tells users at a glance what the floating button does. On
