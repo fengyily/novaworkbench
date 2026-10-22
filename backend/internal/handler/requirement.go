@@ -465,6 +465,34 @@ func (h *RequirementHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
+// BatchDelete removes several requirements in one request.
+//
+// Body: {"ids": ["req_a", "req_b"]}. Each id is deleted independently — one
+// failing id does not undo the others — so the response always reports both
+// counters and a partial failure is NOT an HTTP error:
+//   { "deleted": 2, "failed": [{ "id": "req_c", "message": "..." }] }
+//
+// The id cap keeps a single request from monopolising the single-writer
+// SQLite pool for an unbounded amount of time.
+func (h *RequirementHandler) BatchDelete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeError(w, 400, "EMPTY_IDS", "No requirement ids supplied")
+		return
+	}
+	if len(body.IDs) > 500 {
+		writeError(w, 400, "TOO_MANY_IDS", "At most 500 requirements can be deleted per request")
+		return
+	}
+	writeJSON(w, 200, h.svc.BatchDelete(body.IDs))
+}
+
 // Archive turns a finished ("done") requirement into a project knowledge-base
 // entry (final requirement + design docs). Returns the created/updated
 // knowledge row. The requirement status moves to "archived".

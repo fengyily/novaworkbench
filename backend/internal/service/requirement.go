@@ -1678,6 +1678,11 @@ func (s *RequirementService) UpdateKind(id, newKind string) (*model.Requirement,
 //   - subtask_report rows whose source_ref is one of this requirement's
 //     sub_tasks (children may have been archived before deletion)
 //
+// Inside the transaction it also drops the requirement's own child rows
+// (sub_tasks, orchestration_batches, scheduled_tasks, refinement_chats,
+// coding_chats, requirement_attachments, design_revisions) explicitly,
+// because the schema's ON DELETE CASCADE never fires on SQLite.
+//
 // archiveSvc is optional (nil) for unit tests; the same nil-guard pattern
 // lives on SubTaskService.DeleteByIDs.
 func (s *RequirementService) Delete(id string) error {
@@ -1726,10 +1731,84 @@ func (s *RequirementService) Delete(id string) error {
 	if _, err := tx.Exec("DELETE FROM design_revisions WHERE requirement_id=?", id); err != nil {
 		return err
 	}
+	// Same reasoning for every other requirement_id child table: the schema
+	// declares ON DELETE CASCADE on them, but SQLite never enables
+	// PRAGMA foreign_keys, so the cascade silently no-ops and each deleted
+	// requirement would leave orphans behind. Harmless at the single-delete
+	// scale, but batch delete multiplies the leak by the number of selected
+	// rows, and orphaned sub_tasks get re-scanned every 10s by
+	// scheduler/orchestration_queue.go's tick. Table list mirrors
+	// ProjectService.Purge's reqScoped (service/project.go:1709) plus
+	// requirement_attachments, which Purge itself misses. These are package
+	// constants, never user input, so the concatenation is safe.
+	//
+	// Attachment files on disk are NOT removed — that needs
+	// AttachmentService wired into this one, and the resulting leak is disk
+	// space with no functional consequence.
+	for _, tbl := range []string{
+		"sub_tasks", "orchestration_batches", "scheduled_tasks",
+		"refinement_chats", "coding_chats", "requirement_attachments",
+	} {
+		if _, err := tx.Exec("DELETE FROM "+tbl+" WHERE requirement_id=?", id); err != nil {
+			return fmt.Errorf("cleanup %s: %w", tbl, err)
+		}
+	}
 	if _, err := tx.Exec("DELETE FROM requirements WHERE id = ?", id); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// BatchDeleteResult reports a batch delete row by row. A row that fails
+// does not roll back the rows that already succeeded.
+type BatchDeleteResult struct {
+	Deleted int       `json:"deleted"`
+	Failed  []FailedID `json:"failed"`
+}
+
+// FailedID names one requirement that could not be deleted.
+type FailedID struct {
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
+// BatchDelete removes many requirements, one transaction per requirement.
+//
+// It deliberately loops over Delete rather than writing a batch SQL
+// statement: the batch path thereby inherits every rule Delete already
+// enforces (archived-knowledge cleanup, child detach instead of cascade,
+// orphan cleanup), and the single-row and batch paths cannot drift apart.
+// Per-row transactions also mean one bad id does not discard the rows
+// that already succeeded — the caller gets a per-id report instead of an
+// all-or-nothing transaction.
+//
+// Note: the handle is a single-writer SQLite pool (MaxOpenConns=1), so
+// wrapping this in one outer transaction would contend with Delete's own
+// Begin.
+func (s *RequirementService) BatchDelete(ids []string) BatchDeleteResult {
+	res := BatchDeleteResult{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		// Delete is a silent no-op on a row that isn't there — the DELETE
+		// affects 0 rows and commits cleanly — so without this probe a
+		// missing id would land in the success count and the UI would claim
+		// to have deleted more than it did. A one-column lookup is enough;
+		// Get's 80-column join would be wasteful to run per selected row.
+		var probe int
+		if err := s.db.QueryRow("SELECT 1 FROM requirements WHERE id=?", id).Scan(&probe); err != nil {
+			res.Failed = append(res.Failed, FailedID{ID: id, Message: ErrRequirementNotFound.Error()})
+			continue
+		}
+		if err := s.Delete(id); err != nil {
+			res.Failed = append(res.Failed, FailedID{ID: id, Message: err.Error()})
+			continue
+		}
+		res.Deleted++
+	}
+	return res
 }
 
 // SetParent attaches requirement id under parentID (one level only), or
