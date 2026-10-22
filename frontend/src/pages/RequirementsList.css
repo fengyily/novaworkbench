@@ -94,9 +94,9 @@
 
 .req-row-title {
   font-weight: 500;
-  /* Trimmed from 360→320 to free room for the second-precision
-     Updated column. The cell's own ellipsis kicks in past this. */
-  max-width: 320px;
+  /* Width is owned by .req-c-title (the flexible column). The old
+     max-width:320 here fought it: the table handed 320px to the title
+     while the right-hand columns overflowed the frame. */
 }
 
 .req-row-title-text {
@@ -190,110 +190,99 @@
 
 .req-row-dim { color: var(--color-text-muted, #94A3B8); }
 
-/* Pin per-column widths so the table never crowds the kind badge onto
-   two lines. The badge itself (Issue / 需求 / 想法) sits inside the type
-   column; its content is already short, but the column auto-distributes
-   width across 8 headers and the type column gets squeezed. Holding
-   width + white-space keeps the cell single-line.
-   Column order: 1 类型 / 2 标题 / 3 状态 / 4 模型名称 / 5 项目 / 6 优先级 / 7 Agent 服务器 / 8 更新时间.
-   Widths were re-tuned when the Updated column grew from "MM/DD HH:mm"
-   (16 chars) to second-precision "MM/DD HH:mm:ss" (19 chars): the
-   Status column min-width was trimmed from 240→200 (StatusChips wrap to
-   two lines on tight rows), the Agent-server column from 220→180
-   (the chip itself ellipsizes), and the Updated column is pinned at
-   152px with nowrap so the datetime never breaks. Total still leaves
-   the title its readable ~260px on a 1280px viewport. */
-.req-table thead th:nth-child(1),
-.req-table tbody td:nth-child(1) {
-  width: 88px;
+/* ── Column widths ────────────────────────────────────────────────
+   Named per column, NOT nth-child.
+
+   The old ladder (th:nth-child(1..8)) was written against a DOM that
+   has since grown a tree gutter, so every index was off by one: the
+   "title" width landed on the Type cell, the 200px status width landed
+   on Title. The result was a table whose right-hand columns pushed the
+   last one off-screen (the wrapper clipped it with overflow:hidden) and
+   whose title truncated at ~170px. Positional selectors make that class
+   of bug invisible; class names make the table honest, and adding the
+   select column no longer shifts anything.
+
+   Measured budget at a 1440px viewport (1156px of table — the frame is
+   clipped by the 220px sidebar plus page padding):
+     select 44 + tree 32 + type 104 + status 152 + model 126
+             + project 109 + agent 119 + updated 157 = 843
+   …leaving ~310px for Title, the only column that should ever flex.
+   Narrower than ~1300px viewport and the frame scrolls (overflow-x:auto
+   on .req-table-wrap) rather than silently clipping the last column. */
+.req-table .req-c-type {
+  width: 104px;
+  min-width: 104px;
   white-space: nowrap;
 }
-
-/* Status column (#3) hosts up to 3 ordered chips (源/方案 → 进度 → 待确认)
-   rendered by StatusChips. Each chip is ~64px; with the 4px group gap and
-   side padding a 3-chip row needs ~210px before the group is allowed
-   to wrap onto a second line. We hold min-width instead of width so the
-   column can still breathe on a 1280px viewport (auto-distributes the
-   leftover to the title column). No white-space: nowrap on the cell —
-   the StatusChips container already handles single-chip atomicity, and
-   forcing the cell to nowrap would clip chips instead of wrapping the
-   group gracefully. The min-width was trimmed from 240→200 to make
-   room for the second-precision datetime column; chips on tight rows
-   wrap to 2 lines (StatusChips already lays out as a flex row). */
-.req-table thead th:nth-child(3),
-.req-table tbody td:nth-child(3) {
-  min-width: 200px;
+.req-table .req-c-status {
+  /* Holds up to 3 StatusChips (源/方案 → 进度 → 待确认). min-width, not
+     width, so the chips still wrap to a second line instead of clipping
+     on a narrow viewport. 152 is what two chips need plus the group gap;
+     a third chip wraps rather than stealing width from the title. */
+  min-width: 152px;
 }
-
-.req-table thead th:nth-child(4),
-.req-table tbody td:nth-child(4) {
-  /* Model names like "claude-sonnet-4-5" can run ~16 chars; 130px is enough
-     to render them inline at 12px, and long ones ellipsize via the chip's
-     own max-width. Trimmed from 150 to make room for the Updated column. */
-  width: 130px;
+.req-table .req-c-model {
+  width: 128px;
   white-space: nowrap;
 }
-
-.req-table thead th:nth-child(5),
-.req-table tbody td:nth-child(5) {
-  width: 88px;
+.req-table .req-c-project {
+  width: 104px;
   white-space: nowrap;
 }
-
-.req-table thead th:nth-child(6),
-.req-table tbody td:nth-child(6) {
-  width: 96px;
+.req-table .req-c-agent {
+  /* DevSourceBadge ellipsizes the server name internally (120px cap), so
+     the column only has to reserve room for the pill itself. */
+  width: 136px;
   white-space: nowrap;
 }
-
-.req-table thead th:nth-child(7),
-.req-table tbody td:nth-child(7) {
-  /* Agent 服务器 hosts the full DevSourceBadge ("🛰️ Agent server_name"
-     or "💻 本地开发"); trimmed 220→180 to make room for the Updated
-     column. The chip itself still ellipsizes via its own max-width. */
-  width: 180px;
-  white-space: nowrap;
-}
-
-/* Updated column (#8). Pinning the width is the contract that lets the
-   second-precision datetime stay on a single line — without an explicit
-   width the cell auto-shrinks and "2026/09/17 14:30:45" wraps at the
-   space. Mono + tabular-nums is the matching visual: the digits sit in
-   fixed-width slots so a column of timestamps reads as one precision
-   instrument, not a string of slightly-jittery numbers. Slightly muted
-   color + 12px so it reads as metadata (not as content). Vertical-align
-   middle so the timestamp stays anchored to the row center when adjacent
-   rows are taller (e.g. a title with two mark chips). The tooltip
-   provides the relative-time context users actually scan for ("3 hours
-   ago"); the cell itself stays on the precise absolute time, which is
-   what makes second granularity useful. */
-.req-table thead th:nth-child(8),
-.req-table tbody td:nth-child(8) {
-  width: 152px;
+.req-table .req-c-updated {
+  /* Pinned so the second-precision datetime never wraps; mono +
+     tabular-nums so a column of timestamps reads as one precision
+     instrument rather than a string of slightly-jittery digits.
+     The tooltip carries the relative time users actually scan for. */
+  width: 128px;
   white-space: nowrap;
   vertical-align: middle;
+}
+.req-table .req-c-title {
+  /* The only flexible column — but capped. `table-layout: auto` sizes a
+     column by its min-content, and this cell's min-content is large (the
+     marks strip and the tag row both refuse to shrink), so without a cap
+     the title demands 500px and pushes the right-hand columns off the
+     frame. min-width keeps it readable when the viewport is tight; the cap
+     is what stops it from starving its neighbours. */
+  min-width: 240px;
+  max-width: 310px;
 }
 
 .req-table tbody td.req-row-updated {
   font-family: var(--font-mono, ui-monospace, 'SF Mono', Consolas, Menlo, monospace);
   font-size: 12px;
   color: var(--color-text-muted, #94A3B8);
-  /* Tabular numerals keep the columns of digits lined up — the whole
-     point of seconds-precision is that you can sort by visual width,
-     so digits of unequal width would defeat that. */
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
   letter-spacing: 0;
 }
 
-/* The title column is the only flexible one — let it absorb the
-   remaining width up to its 320px ellipsis cap (trimmed from 360 to
-   make room for the Updated column). */
-.req-table thead th:nth-child(2),
-.req-table tbody td:nth-child(2) {
-  min-width: 240px;
-  max-width: 320px;
+/* Metadata cells wrap their text in .req-cell-clip so the column can be
+   pinned to a declared width. Without it the cell's min-content width is
+   the longest unbreakable string, and in `table-layout: auto` that wins
+   over `width` — which is how the project name and the timestamp pushed
+   the right-hand columns off the edge in the first place. */
+.req-cell-clip {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+/* Row density: the base 10px/12px cell padding plus a 4px gap before the
+   tag strip made every tagged row ~56px tall. 8px vertical + 10px
+   horizontal keeps the same separation between the title and its tags
+   while returning both height and ~36px of width to the table. */
+.req-table thead th { padding: 9px 10px; }
+.req-table tbody td { padding: 8px 10px; }
+.req-row-title-tags { margin-top: 3px; }
 
 /* Priority tag (desktop table column). Same color logic as the
    kind-badge system but with the High/Medium/Low palette — borrowed
@@ -328,7 +317,10 @@
   color: #0E7490;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
-  max-width: 140px;
+  /* Sized to the column (128px minus the chip padding and cell padding).
+     A long custom model id ellipsizes instead of widening the column; the
+     full id is the tooltip. */
+  max-width: 104px;
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
@@ -678,184 +670,27 @@
   .req-row.drop-target { transition: background 120ms ease; }
 }
 
-/* ── Batch select: gutter geometry ──────────────────────────────────
-   The selection box lives in the existing tree gutter rather than in a
-   new column: this file pins per-column widths with an nth-child ladder
-   (see the note further up), and inserting a 9th column would shift
-   every one of those rules.
 
-   Every rule here is scoped to .req-table-wrap on purpose — the
-   .req-tree-col geometry itself lives in the shared
-   RequirementTreeToggle.css and is also used by ProjectDetail's
-   requirement tab, which must not change.
-
-   Geometry: 16px checkbox + 8px gap + 20px tree toggle = 44px of
-   content plus 6px of padding on each side, so the column becomes 56px.
-   The checkbox therefore starts at x=6 on EVERY row (masters and children
-   alike), and the tree toggle lands at x=30..50 — centre x=40, which is
-   the axis the directory-tree connector is drawn on. The connector
-   pseudo-elements below are re-anchored from left:50% to left:40px to
-   stay on that axis. */
-.req-table-wrap td.req-tree-col,
-.req-table-wrap th.req-tree-col {
-  width: 56px;
-  min-width: 56px;
-  max-width: 56px;
-  padding: 0 6px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-}
-/* The shared rule centres the toggle with `margin: 0 auto`; under flex
-   that would re-centre it in the leftover space and break the axis. */
-.req-table-wrap td.req-tree-col .req-tree-toggle,
-.req-table-wrap td.req-tree-col .req-tree-spacer {
-  margin: 0;
-}
-.req-table-wrap tr.req-tree-row-open > td.req-tree-col::after { left: 40px; }
-.req-table-wrap tr.req-tree-row-child > td.req-tree-col::before { left: 40px; }
-.req-table-wrap tr.req-tree-row-child > td.req-tree-col::after { left: 40px; }
-/* The attach picker is position:absolute inside the gutter cell at
-   left:-6px — 12px left of the toggle. The toggle moved from x=6 to
-   x=30, so keep that same 12px gap. */
-.req-table-wrap .req-tree-popover { left: 18px; }
-
-/* ── Batch select: the one deliberately loud element ────────────────
-   A selected row gets the primary rail on its left edge plus a soft
-   indigo wash, so the delete scope is readable BEFORE the user opens the
-   confirm dialog. Everything around it stays quiet. */
-.req-select-box {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--color-primary);
-  cursor: pointer;
-  flex: 0 0 auto;
-}
-.req-select-box:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
-}
-
-.req-table-wrap tr.req-row-selected > td {
-  background: var(--color-active);
-}
-.req-table-wrap tr.req-row-selected:hover > td {
-  background: var(--color-active);
-}
-/* The tree block tints its own rows (tr.req-tree-row-child > td sets a
-   group background at the same specificity, and the hover variant is
-   higher still) — the selected state has to win, hence the extra class. */
-.req-table-wrap tr.req-tree-row-child.req-row-selected > td,
-.req-table-wrap tr.req-tree-row-open.req-row-selected > td,
-.req-table-wrap tr.req-tree-row-open.req-row-selected:hover > td {
-  background: var(--color-active);
-}
-/* The rail lives on the gutter cell only — one 3px stripe at the row's
-   left edge, not a stripe on every cell. */
-.req-table-wrap tr.req-row-selected > td.req-tree-col {
-  box-shadow: inset 3px 0 0 var(--color-primary);
-}
-
-/* ── Batch select: mobile card ─────────────────────────────────────
+/* ── Mobile card: selection box placement ─────────────────────────
    The mobile card is a <button>, so its checkbox is a SIBLING inside
-   .req-card-mobile-wrap rather than a descendant of the button. */
+   .req-card-mobile-wrap rather than a descendant of the button (an
+   <input> inside a <button> is invalid HTML, and the button swallows
+   the click). It sits first so masters (which also render the tree
+   cell) and children (which don't) keep the box on one vertical line. */
 @media (max-width: 768px) {
-  .req-card-mobile-wrap > .req-select-box {
-    flex: 0 0 auto;
-    width: 18px;
-    height: 18px;
-    /* The card's first line (the kind-badge row) starts 12px down
-       (padding: 12px 14px), so the box sits on the same line. */
+  .req-card-mobile-wrap > .rb-check {
+    /* The card's first line starts 12px down (padding: 12px 14px), so
+       the box lands on the same line as the kind badge. */
     margin-top: 12px;
   }
-  /* Selected card: tint + ring. The card already owns its left edge for
-     the kind colour rail (border-left: 3px solid), so the selected state
-     must NOT reuse border-left — it would fight the kind colour. */
-  .req-card-mobile-wrap.req-card-mobile-selected .req-card-mobile {
-    background: var(--color-active);
-    box-shadow: inset 0 0 0 2px var(--color-primary);
+  /* Selected card: tint + a primary ring. The card already owns its
+     left edge for the kind colour rail, so the selected state uses a
+     ring rather than a second border that would fight that colour. */
+  .req-card-mobile-wrap.rb-selected .req-card-mobile {
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    box-shadow: inset 0 0 0 1px var(--color-primary);
   }
-  .req-card-mobile-wrap.req-card-mobile-selected .req-card-mobile:hover {
-    background: var(--color-active);
+  .req-card-mobile-wrap.rb-selected .req-card-mobile:hover {
+    background: color-mix(in srgb, var(--color-primary) 13%, transparent);
   }
-}
-
-/* ── Batch bar, confirm-modal preview, result banner ────────────────
-   Class selectors only — no element selectors mixed in at the same
-   nesting level, so specificity never has to arbitrate. */
-.req-batch-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: var(--color-active);
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: var(--radius-md, 8px);
-}
-.req-batch-count {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text, #0F172A);
-}
-.req-batch-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-@media (max-width: 768px) {
-  .req-batch-bar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .req-batch-actions {
-    margin-left: 0;
-  }
-  .req-batch-actions > .btn {
-    flex: 1 1 auto;
-  }
-}
-
-/* Title preview inside the confirm modal. */
-.req-batch-title-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  max-height: 120px;
-  overflow-y: auto;
-  background: var(--color-hover, #F1F5F9);
-  border-radius: var(--radius-sm, 6px);
-  font-size: 12px;
-  color: var(--color-text-secondary, #475569);
-}
-.req-batch-title-list li {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.req-batch-title-more {
-  color: var(--color-text-muted, #94A3B8);
-}
-
-/* Result banner — page-local, deliberately not a global toast. */
-.req-batch-banner {
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md, 8px);
-  font-size: 13px;
-}
-.req-batch-banner.is-ok {
-  background: #ECFDF5;
-  border-color: #A7F3D0;
-  color: #047857;
-}
-.req-batch-banner.is-partial {
-  background: #FFFBEB;
-  border-color: #FDE68A;
-  color: #B45309;
 }

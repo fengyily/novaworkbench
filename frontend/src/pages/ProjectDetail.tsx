@@ -15,6 +15,10 @@ import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import {
+  RowSelectBox, SelectAllBox, BatchBar, BatchDeleteDialog,
+} from '../components/RequirementBatch/RequirementBatch';
+import { useRowSelection } from '../components/RequirementBatch/useRowSelection';
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
@@ -93,6 +97,7 @@ function SortHeader({
   col,
   label,
   width,
+  cls,
   sortColumn,
   sortDir,
   onSort,
@@ -100,6 +105,10 @@ function SortHeader({
   col: ReqSortColumn;
   label: string;
   width?: number;
+  /** Extra class for the column-width rules (see ProjectDetail.css). The
+   *  width ladder there is keyed by class, not by position — a positional
+   *  ladder silently retargets every column the day one is inserted. */
+  cls?: string;
   sortColumn: ReqSortColumn | null;
   sortDir: ReqSortDir;
   onSort: (col: ReqSortColumn) => void;
@@ -115,7 +124,7 @@ function SortHeader({
   return (
     <th
       style={width ? { width } : undefined}
-      className={`pr-th-sortable${active ? ' is-active' : ''}`}
+      className={`pr-th-sortable${cls ? ' ' + cls : ''}${active ? ' is-active' : ''}`}
       aria-sort={ariaSort as 'ascending' | 'descending' | 'none'}
       onClick={() => onSort(col)}
       role="button"
@@ -584,6 +593,18 @@ export default function ProjectDetail() {
   const [reqSortColumn, setReqSortColumn] = useState<ReqSortColumn | null>(null);
   const [reqSortDir, setReqSortDir] = useState<ReqSortDir>('desc');
 
+  // ---- Batch select + delete (requirements tab) --------------------
+  // Same surface as the cross-project list, deliberately: one selection
+  // vocabulary, one confirm dialog, one set of words for the destructive
+  // action. Scoped to `sortedReqs` — the whole FILTER result across every
+  // page — so "select all" cannot silently skip page 2 or a collapsed
+  // sub-requirement.
+  const [reqBatchOpen, setReqBatchOpen] = useState(false);
+  const [reqBatchBusy, setReqBatchBusy] = useState(false);
+  const [reqBatchAck, setReqBatchAck] = useState(false);
+  const [reqBatchResult, setReqBatchResult] = useState<{ deleted: number; failed: number } | null>(null);
+  const [reqLiveMsg, setReqLiveMsg] = useState('');
+
   // Requirement ids currently running a wizard job (across the whole
   // backend process). Populated by polling GET /api/wizard/active-jobs
   // every 5s. The renderRequirementRows helper checks this set per row
@@ -1016,7 +1037,7 @@ export default function ProjectDetail() {
   // the overview table is unchanged by the hierarchy work.
   const renderRequirementRows = (
     items: (Requirement | { req: Requirement; depth: number; last?: boolean; open?: boolean })[],
-    opts?: { hierarchy?: boolean },
+    opts?: { hierarchy?: boolean; selectable?: boolean },
   ) => items.map(item => {
     const isRow = 'req' in item;
     const req = isRow ? item.req : (item as Requirement);
@@ -1024,10 +1045,11 @@ export default function ProjectDetail() {
     const last = isRow ? !!item.last : false;
     const open = isRow ? !!item.open : false;
     const showTree = !!opts?.hierarchy;
+    const selectable = !!opts?.selectable;
     return (
     <tr
       key={req.id}
-      className={`req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${showTree && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${reqDragId === req.id ? ' dragging' : ''}${reqDropId === req.id ? ' drop-target' : ''}`}
+      className={`req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${showTree && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${reqDragId === req.id ? ' dragging' : ''}${reqDropId === req.id ? ' drop-target' : ''}${selectable && reqSelection.isSelected(req.id) ? ' rb-selected' : ''}`}
       style={{ cursor: 'pointer' }}
       draggable
       onDragStart={e => onReqDragStart(e, req)}
@@ -1037,11 +1059,24 @@ export default function ProjectDetail() {
       onDrop={e => onReqDrop(e, req)}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
+      {/* Selection is only offered on the requirements tab — the overview's
+          "recent requirements" table stays a passive read-only summary.
+          Opted in per render call rather than by role, so the two hosts
+          can never disagree about whether a row is selectable. */}
+      {selectable && (
+        <td className="rb-col-select">
+          <RowSelectBox
+            checked={reqSelection.isSelected(req.id)}
+            label={t('requirements.batch.selectRowAria', { title: req.title || t('requirements.list.noTitle') })}
+            onToggle={() => reqSelection.toggle(req.id)}
+          />
+        </td>
+      )}
       {/* Child rows leave the gutter empty on purpose — the directory-tree
           connector is drawn on this cell by CSS. */}
       <td className="req-tree-col">{depth === 0 && showTree && renderReqTreeToggle(req, depth)}</td>
-      <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-      <td data-label={t('projects.detail.colType')}>
+      <td data-label={t('projects.detail.colId')} className="pr-c-id">{req.id}</td>
+      <td data-label={t('projects.detail.colType')} className="pr-c-type">
         {/* Priority dot folded INTO the Type cell, ahead of the kind-badge.
             Why: the dedicated priority column was eating ~90px even when
             there was nothing to say (an em-dash, or a single 6px circle),
@@ -1067,7 +1102,7 @@ export default function ProjectDetail() {
           <span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span>
         </span>
       </td>
-      <td data-label={t('projects.detail.colTitle')} className={`pr-title${depth > 0 ? ' req-tree-child-title' : ''}`}>
+      <td data-label={t('projects.detail.colTitle')} className={`pr-c-title pr-title${depth > 0 ? ' req-tree-child-title' : ''}`}>
         {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) render INLINE with
             the title (chip strip BEFORE the schedule clock + title text)
             so marked requirements stay on a single line — same order as
@@ -1123,14 +1158,11 @@ export default function ProjectDetail() {
             </span>
           )}
           <span className="pr-title-text-label">{req.title}</span>
-          {req.parent_id && (
-            <span className="req-tag-chip pr-title-tag" style={{ background: 'var(--color-hover)', color: 'var(--color-text-secondary)' }}>{t('requirements.tree.childBadge')}</span>
-          )}
-          {/* Child count on a master — without it a collapsed master is
-              visually identical to a plain row apart from the expander. */}
-          {showTree && depth === 0 && reqHasChildren(req) && (
-            <span className="req-tag-chip pr-title-tag">{t('requirements.tree.childCount', { n: reqChildrenByParent.get(req.id)!.length })}</span>
-          )}
+          {/* No "Sub-requirement" / "Sub-requirements N" chips on the title
+              line. The gutter already encodes both facts — a child is
+              indented under an elbow, a master with children carries a
+              chevron — and the chips were the widest fixed element in the
+              one column worth protecting, truncating titles to ~110px. */}
         </div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
             visible, then +N overflow). Empty / undefined = no chips row,
@@ -1170,7 +1202,7 @@ export default function ProjectDetail() {
           );
         })()}
       </td>
-      <td data-label={t('projects.detail.colStatus')}>
+      <td data-label={t('projects.detail.colStatus')} className="pr-c-status">
         <StatusChips req={req} />
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
@@ -1191,23 +1223,23 @@ export default function ProjectDetail() {
           backend's LEFT JOIN; a deleted server falls back to local so stale
           ids never render as raw hex. Identical to the column on the
           cross-project RequirementsList. */}
-      <td data-label={t('projects.detail.colAgentServer')}>
+      <td data-label={t('projects.detail.colAgentServer')} className="pr-c-agent">
         {req.agent_server_name ? (
           <span className="agent-server-tag" title={req.agent_server_name}>
             🖥️ {req.agent_server_name}
           </span>
         ) : (
-          <span style={{ color: 'var(--color-text-muted)' }}>{t('projects.detail.agentServerLocal')}</span>
+          <span className="pr-c-dim">{t('projects.detail.agentServerLocal')}</span>
         )}
       </td>
-      <td data-label={t('projects.detail.colTokens')} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label={t('projects.detail.colTokens')} className="pr-c-num">
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
           return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
         })()}
       </td>
-      <td data-label={t('projects.detail.colCost')} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label={t('projects.detail.colCost')} className="pr-c-num pr-c-cost">
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
@@ -1216,29 +1248,17 @@ export default function ProjectDetail() {
       </td>
       <td
         data-label={t('projects.detail.colCreatedAt')}
-        style={{
-          color: 'var(--color-text-muted)',
-          fontSize: 12,
-          fontFamily: 'var(--font-mono)',
-          fontVariantNumeric: 'tabular-nums',
-          whiteSpace: 'nowrap',
-        }}
-        title={req.created_at ? fmtRelative(req.created_at) : undefined}
+        className="pr-c-time pr-c-created"
+        title={req.created_at ? `${fmtDateTime(req.created_at)} · ${fmtRelative(req.created_at)}` : undefined}
       >
-        {req.created_at ? fmtDateTime(req.created_at) : '—'}
+        <span className="pr-cell-clip">{req.created_at ? fmtDateTime(req.created_at) : '—'}</span>
       </td>
       <td
         data-label={t('projects.detail.colUpdatedAt')}
-        style={{
-          color: 'var(--color-text-muted)',
-          fontSize: 12,
-          fontFamily: 'var(--font-mono)',
-          fontVariantNumeric: 'tabular-nums',
-          whiteSpace: 'nowrap',
-        }}
-        title={req.updated_at ? fmtRelative(req.updated_at) : undefined}
+        className="pr-c-time"
+        title={req.updated_at ? `${fmtDateTime(req.updated_at)} · ${fmtRelative(req.updated_at)}` : undefined}
       >
-        {req.updated_at ? fmtDateTime(req.updated_at) : '—'}
+        <span className="pr-cell-clip">{req.updated_at ? fmtDateTime(req.updated_at) : '—'}</span>
       </td>
     </tr>
     );
@@ -1370,6 +1390,74 @@ export default function ProjectDetail() {
     } else {
       setReqSortColumn(col);
       setReqSortDir(REQ_SORT_DEFAULT_DIR[col]);
+    }
+  };
+
+  // ── Batch select + delete ────────────────────────────────────────
+  // Scope is sortedReqs (every row the filter produced, on any page), not
+  // the current page slice — see useRowSelection.
+  const reqSelection = useRowSelection(sortedReqs.map(r => r.id));
+  const reqSelectedReqs = useMemo(
+    () => sortedReqs.filter(r => reqSelection.selected.has(r.id)),
+    [sortedReqs, reqSelection.selected],
+  );
+  // Deleting a parent does NOT cascade — its children detach and get
+  // promoted to top level. child_count comes from the List endpoint, so
+  // this costs no extra request.
+  const reqChildRiskCount = useMemo(
+    () => reqSelectedReqs.reduce((n, r) => n + (r.child_count ?? 0), 0),
+    [reqSelectedReqs],
+  );
+
+  // Announce the armed count for screen readers; the tray itself is visual.
+  useEffect(() => {
+    setReqLiveMsg(
+      reqSelection.count > 0
+        ? t('requirements.batch.selectedAria', { n: reqSelection.count, total: sortedReqs.length })
+        : '',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reqSelection.count, sortedReqs.length]);
+
+  // Re-read the project after a batch delete. Also refreshes the token
+  // totals so the Tokens column doesn't keep showing the deleted rows'
+  // usage until the next navigation.
+  const reloadReqs = useCallback(async () => {
+    if (!id) return;
+    const data = await requirementsApi.list({ project_id: id });
+    setReqs(data);
+    refreshReqUsage(id);
+  }, [id, refreshReqUsage]);
+
+  const openReqBatchConfirm = () => {
+    setReqBatchAck(false);
+    setReqBatchResult(null);
+    setReqBatchOpen(true);
+  };
+
+  const handleReqBatchDelete = async () => {
+    if (reqBatchBusy || reqSelection.count === 0) return;
+    setReqBatchBusy(true);
+    try {
+      const res = await requirementsApi.batchDelete(Array.from(reqSelection.selected));
+      const failed = res.failed?.length ?? 0;
+      setReqBatchOpen(false);
+      reqSelection.clear();
+      setReqBatchAck(false);
+      await reloadReqs();
+      // Page 1: the deleted rows shift every later page, and the reset
+      // effect on `reqs` would only fire if the id set actually changed.
+      setReqPage(1);
+      setReqBatchResult({ deleted: res.deleted, failed });
+      setReqLiveMsg(
+        failed > 0
+          ? t('requirements.batch.partial', { n: res.deleted, m: failed })
+          : t('requirements.batch.done', { n: res.deleted }),
+      );
+    } catch (e) {
+      setReqLiveMsg(errMsg(e));
+    } finally {
+      setReqBatchBusy(false);
     }
   };
 
@@ -2202,21 +2290,21 @@ export default function ProjectDetail() {
                   <thead>
                     <tr>
                       <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
-                      <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
+                      <th className="pr-c-id">{t('projects.detail.colId')}</th>
                       {/* Type cell now hosts the priority dot ahead of the
                           kind-badge — the dot doesn't need its own column.
                           Widened 70→96 so the dot + badge stays on one line,
                           then 96→112 once we wrap the pair in a nowrap flex
                           row (.req-type-cell) so the wiki pill (12 chars) fits
                           without falling back to overflow ellipsis. */}
-                      <th style={{ width: 112 }}>{t('projects.detail.colType')}</th>
-                      <th>{t('projects.detail.colTitle')}</th>
-                      <th style={{ width: 150 }}>{t('projects.detail.colStatus')}</th>
-                      <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
-                      <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
-                      <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
-                      <th style={{ width: 144 }}>{t('projects.detail.colCreatedAt')}</th>
-                      <th style={{ width: 144 }}>{t('projects.detail.colUpdatedAt')}</th>
+                      <th className="pr-c-type">{t('projects.detail.colType')}</th>
+                      <th className="pr-c-title">{t('projects.detail.colTitle')}</th>
+                      <th className="pr-c-status">{t('projects.detail.colStatus')}</th>
+                      <th className="pr-c-agent">{t('projects.detail.colAgentServer')}</th>
+                      <th className="pr-c-num">{t('projects.detail.colTokens')}</th>
+                      <th className="pr-c-num pr-c-cost">{t('projects.detail.colCost')}</th>
+                      <th className="pr-c-time pr-c-created">{t('projects.detail.colCreatedAt')}</th>
+                      <th className="pr-c-time">{t('projects.detail.colUpdatedAt')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2575,7 +2663,28 @@ export default function ProjectDetail() {
           )}
 
           {!reqsLoading && !reqsError && sortedReqs.length > 0 && (
-            <div className="pr-list">
+            <>
+              {/* Staging tray + result banner. They live OUTSIDE .pr-list so
+                  the table keeps its own scroll container and the tray stays
+                  pinned at full width while the table scrolls under it. */}
+              <BatchBar
+                selectedCount={reqSelection.count}
+                total={sortedReqs.length}
+                busy={reqBatchBusy}
+                allSelected={reqSelection.allSelected}
+                onSelectAll={reqSelection.toggleAll}
+                onClear={reqSelection.clear}
+                onDelete={openReqBatchConfirm}
+              />
+              {reqBatchResult && (
+                <div className={`rb-banner${reqBatchResult.failed > 0 ? ' is-partial' : ' is-ok'}`}>
+                  {reqBatchResult.failed > 0
+                    ? t('requirements.batch.partial', { n: reqBatchResult.deleted, m: reqBatchResult.failed })
+                    : t('requirements.batch.done', { n: reqBatchResult.deleted })}
+                </div>
+              )}
+              <div className="sr-only" aria-live="polite" role="status">{reqLiveMsg}</div>
+              <div className="pr-list">
               <table className="pr-table table-cards">
                 <thead>
                   <tr>
@@ -2584,10 +2693,19 @@ export default function ProjectDetail() {
                         arrow on the active column, sets aria-sort for screen
                         readers. Non-sortable columns (Type / Agent server /
                         Tokens / Cost) stay plain <th>. */}
+                    <th className="rb-col-select">
+                      <SelectAllBox
+                        checked={reqSelection.allSelected}
+                        indeterminate={reqSelection.someSelected}
+                        label={t('requirements.batch.selectAllAria', { n: sortedReqs.length })}
+                        onToggle={reqSelection.toggleAll}
+                      />
+                    </th>
                     <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
                     <SortHeader
                       col="id"
-                      width={110}
+                      width={96}
+                      cls="pr-c-id"
                       label={t('projects.detail.colId')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -2599,9 +2717,10 @@ export default function ProjectDetail() {
                         wrapped the pair in a nowrap flex row (.req-type-cell)
                         so the wiki pill (12 chars) fits without falling back
                         to overflow ellipsis. */}
-                    <th style={{ width: 112 }}>{t('projects.detail.colType')}</th>
+                    <th className="pr-c-type">{t('projects.detail.colType')}</th>
                     <SortHeader
                       col="title"
+                      cls="pr-c-title"
                       label={t('projects.detail.colTitle')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -2613,18 +2732,20 @@ export default function ProjectDetail() {
                         跳过方案") doesn't get forced onto a second row. */}
                     <SortHeader
                       col="status"
-                      width={150}
+                      width={152}
+                      cls="pr-c-status"
                       label={t('projects.detail.colStatus')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
                       onSort={toggleSort}
                     />
-                    <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
-                    <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
-                    <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
+                    <th className="pr-c-agent">{t('projects.detail.colAgentServer')}</th>
+                    <th className="pr-c-num">{t('projects.detail.colTokens')}</th>
+                    <th className="pr-c-num pr-c-cost">{t('projects.detail.colCost')}</th>
                     <SortHeader
                       col="created_at"
-                      width={144}
+                      width={128}
+                      cls="pr-c-time pr-c-created"
                       label={t('projects.detail.colCreatedAt')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -2632,7 +2753,8 @@ export default function ProjectDetail() {
                     />
                     <SortHeader
                       col="updated_at"
-                      width={144}
+                      width={128}
+                      cls="pr-c-time"
                       label={t('projects.detail.colUpdatedAt')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -2641,10 +2763,11 @@ export default function ProjectDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderRequirementRows(pagedReqRows, { hierarchy: true })}
+                  {renderRequirementRows(pagedReqRows, { hierarchy: true, selectable: true })}
                 </tbody>
               </table>
             </div>
+            </>
           )}
 
           {/* Pagination — 15 rows per page; the summary shows the true total
@@ -2676,6 +2799,20 @@ export default function ProjectDetail() {
             </div>
           )}
 
+          {/* Same confirm dialog as the cross-project list — the two are the
+              same action, so they get the same words and the same gate on
+              the sub-requirement risk panel. */}
+          <BatchDeleteDialog
+            open={reqBatchOpen}
+            busy={reqBatchBusy}
+            count={reqSelection.count}
+            titles={reqSelectedReqs.map(r => r.title || t('requirements.list.noTitle'))}
+            childRiskCount={reqChildRiskCount}
+            ack={reqBatchAck}
+            onAckChange={setReqBatchAck}
+            onConfirm={handleReqBatchDelete}
+            onCancel={() => { if (!reqBatchBusy) setReqBatchOpen(false); }}
+          />
         </div>
       )}
 

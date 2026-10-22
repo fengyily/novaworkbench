@@ -1,0 +1,221 @@
+/* RequirementBatch — selection affordances for the two requirement lists.
+   ------------------------------------------------------------------
+   One stylesheet for two hosts (the cross-project .req-table and the
+   project-detail .pr-table), so "selected" cannot mean two different
+   things depending on which page the user is standing on.
+
+   The design rule this file follows: the list is a quiet instrument —
+   1px rules, muted chips, a 4% indigo tree tint — and the tray is the
+   one loud object. Boldness is spent once, on the bar that tells you
+   how many rows are about to be destroyed. */
+
+/* ── Checkbox ────────────────────────────────────────────────────
+   Native input (keyboard + screen-reader behaviour for free), sized
+   and accented to match the 1px-rule precision of the tables. */
+.rb-check {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+}
+.rb-check:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* The select column. Fixed 44px so the checkboxes form one clean
+   vertical line down the left edge — the visual anchor that makes
+   "which rows are armed" scannable without reading any labels.
+   Left-aligned (not centred) on purpose: the table bases disagree —
+   index.css centres nothing while .pr-table th forces `text-align:left`
+   — and centring one and not the other is how a column of checkboxes
+   ends up with a 4px staircase in it. `!important` keeps the cell
+   padding identical on both hosts' th and td. */
+th.rb-col-select,
+td.rb-col-select {
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  padding: 0 8px 0 14px !important;
+  text-align: left !important;
+}
+/* The selected-row rail: one 3px indigo stripe on the row's leading
+   edge, drawn on the select cell only. Scoped through `table tbody`
+   so it outranks the tree-group tint (tr.req-tree-row-open > td)
+   regardless of stylesheet import order. */
+table tbody tr.rb-selected > td {
+  background: color-mix(in srgb, var(--color-primary) 11%, transparent);
+}
+table tbody tr.rb-selected:hover > td {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+table tbody tr.rb-selected > td.rb-col-select {
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+/* ── The tray ────────────────────────────────────────────────────
+   Ink, not indigo. Indigo is already the page's accent, so tinting
+   the bar with it would read as "another thing you can click"; a
+   near-black bar reads as a distinct, physical object — a staging
+   tray sitting on the bench — and the one red control inside it is
+   then the loudest pixel on the screen, which is exactly right
+   immediately before a destructive action. */
+.rb-tray {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 7px 8px 7px 14px;
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+
+.rb-tray-count {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  color: #94A3B8;
+  font-size: 12px;
+}
+/* The selected count is the headline of this bar: tabular numerals so
+   the digit doesn't shift width as it counts 9 → 10 → 100. */
+.rb-tray-n {
+  font-family: var(--font-mono, ui-monospace, 'SF Mono', Consolas, Menlo, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: #F8FAFC;
+}
+.rb-tray-word { color: #CBD5E1; }
+.rb-tray-sep {
+  width: 1px;
+  height: 11px;
+  align-self: center;
+  background: #334155;
+}
+.rb-tray-total {
+  color: #94A3B8;
+  white-space: nowrap;
+}
+
+.rb-tray-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rb-tray-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: #E2E8F0;
+  background: transparent;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.rb-tray-btn:hover:not(:disabled) {
+  background: #1E293B;
+  border-color: #475569;
+}
+.rb-tray-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.rb-tray-btn:focus-visible {
+  outline: 2px solid #818CF8;
+  outline-offset: 2px;
+}
+.rb-tray-btn-danger {
+  color: #FFFFFF;
+  background: #DC2626;
+  border-color: #DC2626;
+  font-weight: 600;
+}
+.rb-tray-btn-danger:hover:not(:disabled) {
+  background: #B91C1C;
+  border-color: #B91C1C;
+}
+
+@media (max-width: 768px) {
+  .rb-tray {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .rb-tray-actions { justify-content: stretch; }
+  .rb-tray-btn { flex: 1 1 auto; justify-content: center; min-height: 34px; }
+}
+
+/* ── Confirm dialog ─────────────────────────────────────────────
+   The frame is the app-wide modal; only the title preview list is
+   new. It answers "which rows?" with the actual titles rather than
+   another number, because a number is exactly what the user is
+   trying to verify. */
+.rb-dialog { min-width: 420px; }
+.rb-dialog-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  max-height: 132px;
+  overflow-y: auto;
+  background: var(--color-bg, #F8FAFC);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+}
+.rb-dialog-list-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.7;
+}
+.rb-dialog-list-more {
+  color: var(--color-text-muted, #94A3B8);
+  line-height: 1.7;
+}
+@media (max-width: 768px) {
+  .rb-dialog { min-width: 0; width: 100%; padding: 20px; }
+}
+
+/* ── Result banner ──────────────────────────────────────────────
+   Page-local by design: a batch delete is a one-shot action whose
+   result the user is still looking at. A global toast would float
+   away from the list it just changed. */
+.rb-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.rb-banner.is-ok {
+  background: #ECFDF5;
+  border: 1px solid #A7F3D0;
+  color: #047857;
+}
+.rb-banner.is-partial {
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+  color: #B45309;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rb-tray-btn { transition: none; }
+}
