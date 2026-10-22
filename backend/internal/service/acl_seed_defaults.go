@@ -27,6 +27,12 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_set_preflight", Key: "setting.preflight", Name: "环境依赖", Module: "setting", SortOrder: 27},
 
 		{ID: "perm_action_fs_browse", Key: "fs.browse", Name: "文件系统浏览（项目目录与 ~/workspace）", Module: "action", SortOrder: 30},
+
+		// 自动化测试 — split read/write so a viewer can read a project's
+		// test results without being able to create environments or launch
+		// runs (both of which spawn processes on the host).
+		{ID: "perm_action_testing_view", Key: "testing.view", Name: "查看自动化测试结果", Module: "action", SortOrder: 31},
+		{ID: "perm_action_testing_manage", Key: "testing.manage", Name: "管理自动化测试环境与执行", Module: "action", SortOrder: 32},
 	}
 }
 
@@ -58,9 +64,11 @@ func DefaultRolePermissions() map[string][]string {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.chat", "menu.reports",
 			"menu.settings", "setting.roles_ai", "setting.preflight",
 			"fs.browse",
+			"testing.view", "testing.manage",
 		},
 		"viewer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge",
+			"testing.view",
 		},
 	}
 }

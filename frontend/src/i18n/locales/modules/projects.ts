@@ -122,6 +122,7 @@ export const projects = {
       review: '代码 Review',
       usage: 'Token 用量',
       weekly: '周报',
+      testing: '自动化测试',
     },
     activeSuffix: ' ●',
     // Overview — basic info edit form.

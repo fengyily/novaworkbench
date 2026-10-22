@@ -496,6 +496,37 @@ func safeRelativePath(absPath, runDir string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
+// SafeRelativePath is the exported guard used by the artifacts route, where
+// the candidate path comes straight from the URL and is joined onto the run
+// directory. Same traversal check as safeRelativePath; exported so the HTTP
+// layer can validate before serving.
+func SafeRelativePath(candidate, runDir string) (string, bool) {
+	if candidate == "" {
+		return "", false
+	}
+	// Reject backslashes outright rather than normalizing them. Playwright
+	// writes artifact paths with forward slashes on every platform, so a
+	// backslash can only be an attempt to smuggle a separator past a
+	// platform-dependent check: on Windows "..\..\etc" is a real traversal,
+	// and on Unix it is a filename we have no reason to serve.
+	if strings.ContainsRune(candidate, '\\') {
+		return "", false
+	}
+	// A URL path arrives slash-separated on every platform.
+	candidate = filepath.FromSlash(candidate)
+	if filepath.IsAbs(candidate) {
+		return safeRelativePath(candidate, runDir)
+	}
+	rel, err := filepath.Rel(filepath.Clean(runDir), filepath.Join(filepath.Clean(runDir), candidate))
+	if err != nil {
+		return "", false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
 func truncateErr(s string) string {
 	if len(s) <= errLen {
 		return s
@@ -624,6 +655,27 @@ func (s *TestRunService) FinishRun(runID, status, errMsg string) error {
 // MarkHealerUsed records that the healer agent ran for a run's failures.
 func (s *TestRunService) MarkHealerUsed(runID string) error {
 	_, err := s.db.Exec(`UPDATE test_runs SET healer_used = 1 WHERE id = ?`, runID)
+	return err
+}
+
+// SetJobID binds a run to the JobStore job streaming its output, so the
+// cancel route and the list view can find it.
+func (s *TestRunService) SetJobID(runID, jobID string) error {
+	_, err := s.db.Exec(`UPDATE test_runs SET job_id = ? WHERE id = ?`, jobID, runID)
+	return err
+}
+
+// SetReportPath records where the JSON report landed, for debugging a run
+// whose ingest produced surprising numbers.
+func (s *TestRunService) SetReportPath(runID, path string) error {
+	_, err := s.db.Exec(`UPDATE test_runs SET report_path = ? WHERE id = ?`, path, runID)
+	return err
+}
+
+// SetHealedFrom links a verification run back to the run that failed before
+// the healer agent intervened.
+func (s *TestRunService) SetHealedFrom(runID, originalRunID string) error {
+	_, err := s.db.Exec(`UPDATE test_runs SET healed_from = ? WHERE id = ?`, originalRunID, runID)
 	return err
 }
 

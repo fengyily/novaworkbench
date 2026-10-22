@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -94,6 +96,7 @@ func New(claudeBin string) *Registry {
 		r.depNpm(),
 		r.depGit(),
 		r.depDocker(),
+		r.depPlaywright(),
 	}
 	// attachInstalls sets Dep.Install per runtime.GOOS (kept in install.go
 	// so the platform matrix stays in one place).
@@ -259,6 +262,40 @@ func (r *Registry) depDocker() *Dep {
 			return p, "", nil
 		},
 		Manual: "Docker 用于项目管理页的「启动会话」功能；非必需。安装：https://docs.docker.com/engine/install/",
+	}
+}
+
+// depPlaywright reports whether the Playwright browser cache is populated.
+//
+// It deliberately does NOT shell out to `npx playwright --version`: that would
+// resolve the package over the network on a host where it is not installed
+// yet, triggering exactly the download this probe is meant to avoid.
+// Reading the shared cache directory is both offline and sufficient — the
+// browsers live there regardless of which workspace installed them, so
+// multiple test environments never re-download.
+//
+// Required is false: only the 自动化测试 module needs Playwright, and its
+// per-environment init is the real installer (it needs a workspace to write
+// package.json into, which this registry has no notion of).
+func (r *Registry) depPlaywright() *Dep {
+	return &Dep{
+		Key: "playwright", Label: "Playwright 浏览器", Required: false,
+		DependsOn: []string{"node", "npm"},
+		Check: func(ctx context.Context) (string, string, error) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", "", fmt.Errorf("无法定位 home 目录: %w", err)
+			}
+			cache := filepath.Join(home, ".cache", "ms-playwright")
+			entries, err := os.ReadDir(cache)
+			if err != nil || len(entries) == 0 {
+				return "", "", fmt.Errorf("未检测到已下载的浏览器（%s）", cache)
+			}
+			return cache, fmt.Sprintf("%d 个浏览器已缓存", len(entries)), nil
+		},
+		Manual: "通过「项目 → 自动化测试」新建环境并执行「初始化」会自动安装；" +
+			"也可手动执行 npm i -D @playwright/test && npx playwright install chromium。" +
+			"Linux 若提示缺少系统依赖库，需运行 sudo npx playwright install-deps。",
 	}
 }
 

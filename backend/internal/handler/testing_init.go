@@ -361,11 +361,6 @@ func capturePlaywrightVersion(ctx context.Context, workspace string) (string, er
 
 // runStreamed runs one subprocess, merging stdout+stderr into the job log
 // line by line, and returns a non-zero exit as an error.
-//
-// The merge matters: npm and playwright interleave progress on both streams,
-// and splitting them would reorder the "added 1 package" / "downloading"
-// lines into an unreadable mess. The 4 MB scanner ceiling matches the
-// docker-compose runner — a single `npm install` line can exceed 256 KB.
 func runStreamed(job *store.Job, ctx context.Context, dir, bin string, args []string, timeout time.Duration) error {
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -374,9 +369,33 @@ func runStreamed(job *store.Job, ctx context.Context, dir, bin string, args []st
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 
+	_, err := streamProcess(job, stepCtx, cmd, dir)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("命令超时（超过 %s）: %s %s", timeout, bin, strings.Join(args, " "))
+	}
+	// exec.ErrNotFound is by far the most likely init failure (npm not on
+	// PATH) and deserves a clearer message than "executable file not found".
+	if errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("找不到 %s，请确认已安装 Node.js 与 npm（设置 → 环境依赖）", bin)
+	}
+	return err
+}
+
+// streamProcess starts cmd (already configured with Dir/Env by the caller),
+// merges stdout+stderr into the job log line by line, and returns the exit
+// code alongside the wait error.
+//
+// The merge matters: npm and playwright interleave progress on both streams,
+// and splitting them would reorder "added 1 package" / "downloading" into an
+// unreadable mess. The 4 MB scanner ceiling matches the docker-compose
+// runner — a single `npm install` line can exceed 256 KB.
+func streamProcess(job *store.Job, ctx context.Context, cmd *exec.Cmd, _ string) (int, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("pipe: %w", err)
+		return 0, fmt.Errorf("pipe: %w", err)
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -384,17 +403,12 @@ func runStreamed(job *store.Job, ctx context.Context, dir, bin string, args []st
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		// exec.ErrNotFound is by far the most likely failure here (npm not on
-		// PATH) and deserves a clearer message than "executable file not found".
-		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("找不到 %s，请确认已安装 Node.js 与 npm（设置 → 环境依赖）", bin)
-		}
-		return err
+		return 0, err
 	}
 	// Close our copy of the write end so the scanner sees EOF when the child exits.
 	pw.Close()
 
-	job.SetCmd(cmd, cancel)
+	job.SetCmd(cmd, func() { cmd.Process.Kill() })
 
 	scanner := bufio.NewScanner(pr)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
@@ -414,16 +428,11 @@ func runStreamed(job *store.Job, ctx context.Context, dir, bin string, args []st
 
 	waitErr := cmd.Wait()
 	if waitErr == nil {
-		return nil
-	}
-	// A timeout is worth distinguishing — "playwright install took longer than
-	// 20 minutes" is a different problem from "the install crashed".
-	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("命令超时（超过 %s）: %s %s", timeout, bin, strings.Join(args, " "))
+		return 0, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(waitErr, &exitErr) {
-		return fmt.Errorf("命令退出码 %d: %s %s", exitErr.ExitCode(), bin, strings.Join(args, " "))
+		return exitErr.ExitCode(), waitErr
 	}
-	return waitErr
+	return 1, waitErr
 }

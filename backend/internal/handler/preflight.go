@@ -59,7 +59,7 @@ func (h *PreflightHandler) Install(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.registry.Lookup(body.Key) == nil {
 		writeErrorSuggestion(w, 404, "UNKNOWN_DEP", "未知的依赖项: "+body.Key,
-			"可用的 key: claude / node / npm / git / docker")
+			"可用的 key: claude / node / npm / git / docker / playwright")
 		return
 	}
 

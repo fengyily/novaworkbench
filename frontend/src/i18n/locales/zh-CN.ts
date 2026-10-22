@@ -13,6 +13,7 @@ import requirements from './modules/requirements';
 import wizard from './modules/wizard';
 import knowledge from './modules/knowledge';
 import { codeReviews } from './modules/codeReviews';
+import { testing } from './modules/testing';
 import chat from './modules/chat';
 import reports from './modules/reports';
 import schedules from './modules/schedules';
@@ -33,6 +34,7 @@ const zhCN = {
   wizard,
   knowledge,
   codeReviews,
+  testing,
   chat,
   reports,
   schedules,

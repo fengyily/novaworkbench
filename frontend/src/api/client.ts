@@ -3115,3 +3115,202 @@ export const issueMonitorApi = {
   listActive: () =>
     api.get<{ items: IssueMonitor[] }>(`/api/issue-monitors/active`),
 };
+
+// ── 自动化测试（Playwright Test Agents）─────────────────────────────────
+
+export type TestEnvStatus = 'pending' | 'initializing' | 'ready' | 'failed';
+export type TestPlanStatus =
+  | 'draft' | 'planning' | 'planned' | 'generating' | 'generated' | 'failed';
+export type TestRunStatus = 'running' | 'passed' | 'failed' | 'canceled' | 'error';
+export type TestCaseStatus =
+  | 'passed' | 'failed' | 'flaky' | 'skipped' | 'timedOut' | 'interrupted';
+
+export interface TestEnvironment {
+  id: string;
+  project_id: string;
+  name: string;
+  base_url: string;
+  workspace_override: string;
+  /** True when env vars are stored; the values themselves are never returned. */
+  env_vars_set: boolean;
+  seed_test: string;
+  browsers: string;
+  init_status: TestEnvStatus;
+  init_error: string;
+  playwright_version: string;
+  default_model: string;
+  retention_runs: number;
+  created_at: string;
+  updated_at: string;
+  disk_usage_bytes?: number;
+}
+
+export interface TestEnvStatusResp {
+  env: TestEnvironment;
+  disk_usage_bytes: number;
+  workspace: string;
+}
+
+export interface CreateTestEnvReq {
+  name: string;
+  base_url: string;
+  workspace_override?: string;
+  seed_test?: string;
+  browsers?: string;
+  default_model?: string;
+  retention_runs?: number;
+  env_vars?: Record<string, string>;
+}
+
+export interface TestPlan {
+  id: string;
+  project_id: string;
+  env_id: string;
+  requirement_id: string;
+  title: string;
+  scenario: string;
+  plan_path: string;
+  plan_md: string;
+  spec_files: string[];
+  status: TestPlanStatus;
+  claude_session_id: string;
+  last_job_id: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TestAttachment {
+  name: string;
+  /** Relative to runs/<run_id>/; the artifact route is the only way to read it. */
+  path: string;
+  content_type: string;
+}
+
+export interface TestRun {
+  id: string;
+  project_id: string;
+  env_id: string;
+  scope: Record<string, unknown>;
+  status: TestRunStatus;
+  total: number;
+  passed: number;
+  failed: number;
+  flaky: number;
+  skipped: number;
+  healer_used: boolean;
+  healed_from: string;
+  report_path: string;
+  job_id: string;
+  started_at: string;
+  finished_at?: string;
+  duration_ms: number;
+  error: string;
+}
+
+export interface TestRunCase {
+  id: string;
+  run_id: string;
+  file: string;
+  title: string;
+  status: TestCaseStatus;
+  error: string;
+  duration_ms: number;
+  attachments: TestAttachment[];
+  /** Non-empty once the failure has been escalated — makes the action idempotent. */
+  issue_url: string;
+  issue_number: number;
+  requirement_id: string;
+}
+
+export interface RunScope {
+  all?: boolean;
+  plan_ids?: string[];
+  spec_files?: string[];
+}
+
+export interface StartRunReq {
+  scope: RunScope;
+  healer?: boolean;
+  model?: string;
+  claude_config_id?: string;
+}
+
+export const testingApi = {
+  // ── environments ──
+  listEnvs: (projectId: string) =>
+    api.get<TestEnvironment[]>(`/api/projects/${projectId}/testing/envs`),
+  createEnv: (projectId: string, body: CreateTestEnvReq) =>
+    api.post<TestEnvironment>(`/api/projects/${projectId}/testing/envs`, body),
+  getEnv: (envId: string) => api.get<TestEnvironment>(`/api/testing/envs/${envId}`),
+  updateEnv: (envId: string, body: Partial<CreateTestEnvReq>) =>
+    api.put<TestEnvironment>(`/api/testing/envs/${envId}`, body),
+  deleteEnv: (envId: string, purge = false) =>
+    api.delete<{ status: string }>(`/api/testing/envs/${envId}${purge ? '?purge=1' : ''}`),
+  getEnvStatus: (envId: string) =>
+    api.get<TestEnvStatusResp>(`/api/testing/envs/${envId}/status`),
+  startEnvInit: (envId: string) =>
+    api.post<{ env_id: string; job_id: string }>(`/api/testing/envs/${envId}/init`, {}),
+  cancelEnvInit: (envId: string) =>
+    api.post<{ status: string }>(`/api/testing/envs/${envId}/init/cancel`, {}),
+
+  // ── plans ──
+  listPlans: (projectId: string, envId?: string) =>
+    api.get<TestPlan[]>(
+      `/api/projects/${projectId}/testing/plans${envId ? `?env_id=${encodeURIComponent(envId)}` : ''}`,
+    ),
+  createPlan: (
+    projectId: string,
+    body: { title?: string; scenario: string; env_id: string; requirement_id?: string; model?: string; claude_config_id?: string },
+  ) => api.post<{ plan_id: string; job_id: string; status: TestPlanStatus }>(
+    `/api/projects/${projectId}/testing/plans`, body),
+  getPlan: (planId: string) => api.get<TestPlan>(`/api/testing/plans/${planId}`),
+  updatePlan: (planId: string, body: { plan_md: string; title?: string }) =>
+    api.put<TestPlan>(`/api/testing/plans/${planId}`, body),
+  startGenerate: (planId: string) =>
+    api.post<{ plan_id: string; job_id: string; status: TestPlanStatus }>(
+      `/api/testing/plans/${planId}/generate`, {}),
+  deletePlan: (planId: string) =>
+    api.delete<{ status: string }>(`/api/testing/plans/${planId}`),
+
+  // ── runs ──
+  startRun: (envId: string, body: StartRunReq) =>
+    api.post<{ run_id: string; job_id: string; status: TestRunStatus }>(
+      `/api/testing/envs/${envId}/runs`, body),
+  listRuns: (projectId: string, envId?: string) =>
+    api.get<TestRun[]>(
+      `/api/projects/${projectId}/testing/runs${envId ? `?env_id=${encodeURIComponent(envId)}` : ''}`,
+    ),
+  getRun: (runId: string) =>
+    api.get<{ run: TestRun; cases: TestRunCase[] }>(`/api/testing/runs/${runId}`),
+  cancelRun: (runId: string) =>
+    api.post<{ status: string }>(`/api/testing/runs/${runId}/cancel`, {}),
+  deleteRun: (runId: string) =>
+    api.delete<{ status: string }>(`/api/testing/runs/${runId}`),
+
+  // ── failure close-loop ──
+  createCaseIssue: (caseId: string, labels?: string[]) =>
+    api.post<{ issue_url: string; issue_number: number; existing?: boolean }>(
+      `/api/testing/cases/${caseId}/issue`, { labels: labels ?? [] }),
+  createCaseRequirement: (caseId: string) =>
+    api.post<{ requirement_id: string; existing?: boolean }>(
+      `/api/testing/cases/${caseId}/requirement`, {}),
+
+  // ── URLs ──
+  streamJobUrl: (projectId: string, jobId: string) =>
+    `${API_BASE}/api/projects/${projectId}/testing/stream/${jobId}`,
+  /**
+   * Artifact URLs require an Authorization header, so they cannot be used in
+   * a plain <img src> — the UI must authedFetch them and blob them. See
+   * TestRunDetail's useProtectedImage.
+   *
+   * The stored path (e.g. "artifacts/shot.png") maps 1:1 onto the URL after
+   * the /files/ prefix; the backend rejects anything that escapes the run
+   * directory.
+   */
+  artifactUrl: (runId: string, relPath: string) =>
+    `${API_BASE}/api/testing/runs/${runId}/files/${relPath
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`,
+};

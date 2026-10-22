@@ -12,6 +12,7 @@ import requirements from './modules/requirements.en';
 import wizard from './modules/wizard.en';
 import knowledge from './modules/knowledge.en';
 import { codeReviews } from './modules/codeReviews.en';
+import { testing } from './modules/testing.en';
 import chat from './modules/chat.en';
 import reports from './modules/reports.en';
 import schedules from './modules/schedules.en';
@@ -31,6 +32,7 @@ const enUS = {
   wizard,
   knowledge,
   codeReviews,
+  testing,
   chat,
   reports,
   schedules,
