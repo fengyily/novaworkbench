@@ -32,9 +32,19 @@ package llm
 // language rule uses {{LANG}} as a token so the per-request user
 // template can swap it without us hand-editing the system prompt
 // per call.
+//
+// {{STYLE_RULE}} carries the project's convention preset (Conventional
+// Commits / custom rules), rendered upstream by
+// service.BuildCommitStyleRules — the llm package can't import service,
+// so the caller passes ready text and an empty value falls back to
+// commitMessageStyleRuleFallback. The prefix requirement used to be a
+// hardcoded "不要 Conventional Commits 前缀" line, which contradicted a
+// project that had actually opted into the conventional preset.
 const commitMessageSystemPrompt = `你是一名 git commit 信息与 PR 标题生成助手。请基于下方给出的需求标题、描述与改动 diff，生成一条简洁、规范的 commit 信息（仅首行 — subject line，不要 body），以及一个与之对应的 PR 标题。
 
 {{LANG_RULE}}
+
+{{STYLE_RULE}}
 
 输出格式严格为 JSON 对象：{"commit_message":"...","pr_title":"..."}，不要用 markdown 代码围栏包裹整体输出，不要任何前后缀解释。
 commit_message 字面要求：
@@ -48,11 +58,18 @@ commit_message 字面要求：
 pr_title 字面要求：
 - 一行文本，不带 \n、不以 \n 结尾
 - 不超过 80 个可见字符
-- 不要 Conventional Commits 前缀（不写 "feat:" / "fix:" / "chore:" 等）
+- 前缀 / 格式要求见下方「提交规范」段（项目未配置规范时：不加任何前缀）
 - 与 commit_message 使用同一目标语言
 - 概括本次改动的整体意图，不要直接照抄需求标题
 - 同样严禁 AI 署名 / 自动创建说明 / 占位文本
 仅输出该 JSON 对象，不要任何前后缀说明。`
+
+// commitMessageStyleRuleFallback 是 {{STYLE_RULE}} 在「项目未配置提交规范」
+// 时的兜底文案。必须与本文件删除前那句「不要 Conventional Commits 前缀」
+// 等价：prompt 里刻意保留了「不加前缀」这个否定式约束（模型需要显式
+// 被告知不能加，否则会按训练分布自发加上 feat:/fix:），但把它挪到了
+// 规范段，让配置了 conventional 的项目能用同一句话承载相反的要求。
+const commitMessageStyleRuleFallback = "- 提交格式：commit_message 与 pr_title 都不加任何前缀，使用动词开头的祈使句。"
 
 // commitMessageLangRule is the {{LANG_RULE}} body that gets swapped in
 // per request. mode == "zh" → 中文 commit + PR title；mode == "en" /

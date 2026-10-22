@@ -133,7 +133,7 @@ func TestStyleHint(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := StyleHint(c.lang, c.override)
+			got := StyleHint(c.lang, c.override, CommitStyleRules{})
 			if c.wantEmpty {
 				if got != "" {
 					t.Fatalf("want empty, got %q", got)
@@ -179,7 +179,7 @@ func TestResolveCommitLang(t *testing.T) {
 // 模板策略：自由 section（5-section 是建议不是强制；LLM 按实际增删）。
 // 显式禁止：AI 署名 trailer / auto-push 描述 / 占位文本。
 func TestPRLangRules(t *testing.T) {
-	en := PRLangRules("en")
+	en := PRLangRules("en", CommitStyleRules{})
 	// 自由 section 指引
 	mustContain(t, en, "PR Summary Template")
 	mustContain(t, en, "Use your judgment to include or omit sections")
@@ -200,7 +200,7 @@ func TestPRLangRules(t *testing.T) {
 	mustContain(t, en, "由 NovaWorkbench auto-push 自动创建")
 	mustContain(t, en, "N/A")
 
-	mixed := PRLangRules("mixed")
+	mixed := PRLangRules("mixed", CommitStyleRules{})
 	mustContain(t, mixed, "按实际判断增删")
 	mustContain(t, mixed, "改了什么")
 	mustContain(t, mixed, "Closes #")
@@ -216,7 +216,7 @@ func TestPRLangRules(t *testing.T) {
 	mustContain(t, mixed, "Auto-created by NovaWorkbench auto-push")
 	mustContain(t, mixed, "无关联")
 
-	zh := PRLangRules("zh")
+	zh := PRLangRules("zh", CommitStyleRules{})
 	mustContain(t, zh, "按实际判断增删")
 	mustContain(t, zh, "改了什么")
 	mustContain(t, zh, "Closes #")
@@ -232,7 +232,7 @@ func TestPRLangRules(t *testing.T) {
 	mustContain(t, zh, "Auto-created by NovaWorkbench auto-push")
 	mustContain(t, zh, "无关联")
 
-	empty := PRLangRules("")
+	empty := PRLangRules("", CommitStyleRules{})
 	if empty != zh {
 		t.Fatalf("empty block must equal zh block (zero regression), got: %q vs %q", empty, zh)
 	}
@@ -367,7 +367,7 @@ func TestPRShellTemplates(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		got := NewPRShellTemplates(c.lang)
+		got := NewPRShellTemplates(c.lang, CommitStyleRules{})
 		if got != c.want {
 			t.Errorf("NewPRShellTemplates(%q):\n  got  %+v\n  want %+v", c.lang, got, c.want)
 		}

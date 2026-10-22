@@ -121,6 +121,14 @@ type GenerateCommitArtifactsOpts struct {
 	// MaxOutputTokens overrides the chatCompletion max_tokens budget; 0
 	// uses the package default (512 — a commit subject is well under that).
 	MaxOutputTokens int
+	// CommitStyle is the project 已配置的提交规范，pre-rendered upstream by
+	// service.BuildCommitStyleRules (the llm package doesn't import service,
+	// same reason GitProjectContext.StyleHint is a pre-rendered string). It
+	// replaces {{STYLE_RULE}} in the system prompt. Empty = project has no
+	// preset configured → commitMessageStyleRuleFallback, whose wording is
+	// equivalent to the hardcoded line it replaced, so unconfigured projects
+	// keep byte-identical behaviour.
+	CommitStyle string
 }
 
 // generateCommitArtifactsResult is the JSON shape the model returns.
@@ -172,7 +180,20 @@ func (g *Gateway) GenerateCommitArtifacts(opts GenerateCommitArtifactsOpts) (*Co
 	if opts.CommitLang == "zh" {
 		langRule = commitMessageLangRuleZh
 	}
-	systemPrompt := strings.Replace(commitMessageSystemPrompt, "{{LANG_RULE}}", langRule, 1)
+	// Convention rules: empty when the project never configured a preset.
+	// Fall back to the explicit "no prefix" instruction rather than dropping
+	// the section — models add feat:/fix: unprompted, so the rule has to be
+	// stated even when the project has no preset of its own.
+	styleRule := strings.TrimSpace(opts.CommitStyle)
+	if styleRule == "" {
+		styleRule = commitMessageStyleRuleFallback
+	}
+	// One pass for both tokens: the two rules are independent sections and
+	// neither's text can contain the other's placeholder.
+	systemPrompt := strings.NewReplacer(
+		"{{LANG_RULE}}", langRule,
+		"{{STYLE_RULE}}", styleRule,
+	).Replace(commitMessageSystemPrompt)
 
 	description := strings.TrimSpace(opts.ReqDescription)
 	if description == "" {

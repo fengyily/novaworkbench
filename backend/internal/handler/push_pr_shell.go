@@ -61,7 +61,7 @@ const pushShellStepTimeout = 10 * time.Minute
 //
 // Returns (jobID, subTaskID, error) like dispatchPushPRSubTask so autoPushPR
 // can log symmetrically.
-func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, createPR bool) (jobID, subTaskID string, err error) {
+func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang string, style service.CommitStyleRules, prTitle string, createPR bool) (jobID, subTaskID string, err error) {
 	if h.subTaskRunner == nil || h.subTaskSvc == nil {
 		log.Printf("[push-pr-shell] %s: sub-task runner not wired, skip", reqRow.ID)
 		return "", "", nil
@@ -114,7 +114,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 	}
 	log.Printf("[push-pr-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s dev=%s base=%s createPR=%v", reqRow.ID, st.ID, job.ID, dir, dev, base, createPR)
 
-	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle, createPR)
+	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, style, prTitle, createPR)
 	return job.ID, st.ID, nil
 }
 
@@ -176,7 +176,7 @@ func (h *WizardHandler) runCommitOnlyShellJob(reqRow *model.Requirement, dev, ba
 // Run → MarkRunning → finishSubTask → subTaskSvc.Finish). The artifact body
 // is the full JobStore log rendered as Markdown so the user can reopen it
 // from the SubTaskPanel card even after the in-memory ring buffer evicts.
-func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, createPR bool) {
+func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang string, style service.CommitStyleRules, prTitle string, createPR bool) {
 	var runStartTime time.Time
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -351,7 +351,7 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	// cleanly. The SubTaskPanel card title ("本地 shell 推送") already told
 	// the user this would happen.
 	if createPR {
-		prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, commitMessage, reqRow)
+		prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, style, prTitle, commitMessage, reqRow)
 		if prCreated {
 			job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
 		} else if prURL != "" {
@@ -549,8 +549,8 @@ func buildPRShellBody(tmpl service.PRShellTemplates, logOut, diffOut string) str
 // PR body: 2-section subset (改了什么 + 备注) using service.NewPRShellTemplates
 // (locale-aware headings + fixed checklist). No AI attribution trailers, no
 // auto-push description, no placeholder text.
-func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote, commitLang, prTitle, commitMessage string, reqRow *model.Requirement) (string, bool) {
-	tmpl := service.NewPRShellTemplates(commitLang)
+func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote, commitLang string, style service.CommitStyleRules, prTitle, commitMessage string, reqRow *model.Requirement) (string, bool) {
+	tmpl := service.NewPRShellTemplates(commitLang, style)
 	reqTitle := ""
 	if reqRow != nil {
 		reqTitle = reqRow.Title

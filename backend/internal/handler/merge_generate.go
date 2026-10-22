@@ -227,12 +227,20 @@ func generateCommitMessage(
 	mode := model.CommitModeLLMOnly
 	commitLang := ""
 	script := ""
+	// Commit convention block, rendered once from the project row and only
+	// handed to the LLM branches. Empty when the project never configured a
+	// preset — GenerateCommitArtifacts then substitutes its "no prefix"
+	// fallback, so unconfigured projects behave exactly as before.
+	commitStyle := ""
 	if project != nil {
 		if m := strings.TrimSpace(project.CommitMode); m != "" && model.IsValidCommitMode(m) {
 			mode = m
 		}
 		commitLang = service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
 		script = project.CommitScript
+		commitStyle = service.BuildCommitStyleRules(
+			project.CommitStylePreset, project.CommitStyleCustom, commitLang,
+		).SingleShotRule()
 	}
 
 	// No script configured + a script_* mode → fail loud. The
@@ -270,7 +278,7 @@ func generateCommitMessage(
 		return out, "", model.CommitModeScriptOnly, nil
 
 	case model.CommitModeLLMOnly:
-		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, commitStyle, diff)
 		if gerr != nil {
 			return "", "", "", gerr
 		}
@@ -283,7 +291,7 @@ func generateCommitMessage(
 			// back to LLM (the user said "prefer script", but a
 			// broken script shouldn't block the merge entirely).
 			log.Printf("[commit-mode] %s: script_first script failed (%v), falling back to LLM", reqRow.ID, serr)
-			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, commitStyle, diff)
 			if gerr != nil {
 				return "", "", "", fmt.Errorf("script (%v) and LLM (%w) both failed", serr, gerr)
 			}
@@ -301,7 +309,7 @@ func generateCommitMessage(
 		if commitLang != "" && commitLang != "mixed" && scriptLang != "" && scriptLang != "mixed" && scriptLang != commitLang {
 			log.Printf("[commit-mode] %s: script_first output lang=%q != commit_lang=%q, falling back to LLM",
 				reqRow.ID, scriptLang, commitLang)
-			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, commitStyle, diff)
 			if gerr != nil {
 				return "", "", "", fmt.Errorf("script lang mismatch and LLM fallback failed: %w", gerr)
 			}
@@ -310,7 +318,7 @@ func generateCommitMessage(
 		return out, "", model.CommitModeScriptFirst, nil
 
 	case model.CommitModeLLMFirst:
-		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, commitStyle, diff)
 		if gerr == nil {
 			return out, pr, model.CommitModeLLMFirst, nil
 		}
@@ -327,7 +335,7 @@ func generateCommitMessage(
 	// Unreachable (model.IsValidCommitMode guards the switch
 	// above), but defensive: a mode that falls through becomes
 	// llm_only rather than panicking.
-	out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+	out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, commitStyle, diff)
 	if gerr != nil {
 		return "", "", "", gerr
 	}
@@ -355,6 +363,7 @@ func callLLMForCommit(
 	llmGateway *llm.Gateway,
 	reqRow *model.Requirement,
 	commitLang string,
+	commitStyle string,
 	diff string,
 ) (msg string, prTitle string, err error) {
 	if llmGateway == nil {
@@ -372,6 +381,7 @@ func callLLMForCommit(
 		ReqTitle:       title,
 		ReqDescription: desc,
 		CommitLang:     commitLang,
+		CommitStyle:    commitStyle,
 		Diff:           diff,
 	}
 	_ = ctx // reserved: future cancellation wiring for abortable SSE

@@ -189,6 +189,7 @@ export const projects = {
       auto: '自动检测 (auto)',
       zh: '中文 (zh)',
       en: 'English (en)',
+      mixed: '中英混用 (mixed)',
       hint: '未设置时，根据项目 git 历史自动检测语言。设置后会覆盖检测结果，用于 commit 信息与 PR 标题 / 正文。',
       saved: '已保存',
       saveFailed: '保存失败：{{msg}}',
@@ -197,6 +198,30 @@ export const projects = {
       sourceOverride: '手动',
       detectedLabel: '当前检测值：',
       noDetect: '尚未检测',
+    },
+    // Overview — 提交规范. The language dropdown above answers "which
+    // language"; these answer "which shape" (Conventional Commits or the
+    // project's own rules). Both live in one card and one PUT, because the
+    // prompt builders read them as a combination.
+    commitStyle: {
+      save: '保存',
+      saved: '已保存',
+      saveFailed: '保存失败：{{msg}}',
+      presetLabel: '提交规范',
+      presetConventional: 'Conventional Commits（推荐）',
+      presetNone: '不强制（跟随项目历史）',
+      presetCustom: '自定义',
+      customLabel: '补充规范',
+      customPlaceholder: '选「不强制」或「Conventional Commits」时为可选的补充规则；选「自定义」时为必填，将原样作为提交 / PR 规范使用。',
+      customRequired: '选择「自定义」时必须填写补充规范',
+      previewLabel: '规范预览',
+      previewHint: '下面是实际注入 AI 提示词的文本，随语言与预设实时变化。',
+      previewEmpty: '未配置提交规范 —— commit 与 PR 沿用项目历史风格，不注入额外规则。',
+      previewLoading: '渲染中…',
+      langBadgeAuto: '语言：自动',
+      langBadgeManual: '语言：已手动覆盖',
+      scriptOnlyWarn: '当前「提交推送模式」为「仅脚本」，commit 信息直接取脚本输出，此处的规范不会生效。',
+      customTooLong: '补充规范超过 {{max}} 字符，请精简后再保存',
     },
     // Overview — commit / push strategy (which path the merge pipeline
     // takes when the user leaves the merge-modal commit_message field

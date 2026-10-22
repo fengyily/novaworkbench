@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   projectsApi, runnerApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
-  type Project, type RunStatus, type PlatformToken,
+  type Project, type RunStatus, type PlatformToken, type CommitStylePreview,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, priorityLabelKeys, kindOf, API_BASE, authedFetch,
   MARK_PRESETS, parseMarks,
@@ -232,6 +232,198 @@ function CommitPushConfigSection({
   );
 }
 
+// CommitStyleSection renders the whole 「提交风格」 card: the language pin
+// (which language) plus the convention preset + free-text supplements (which
+// shape). One card, one PUT — the prompt builders read all three as a
+// combination, so splitting them would open a window where half the style is
+// saved.
+//
+// The preview is fetched from the server (debounced) rather than re-rendered
+// in the browser. That's deliberate: the preview's whole job is to tell the
+// user what will actually reach the prompt, and a client-side copy of the
+// renderer is a copy that drifts. 400ms debounce keeps it off the keystroke
+// path while still feeling live.
+function CommitStyleSection({
+  langOverride,
+  detectedLang,
+  preset,
+  custom,
+  commitMode,
+  saving,
+  onSave,
+}: {
+  langOverride: string;
+  detectedLang: string;
+  preset: string;
+  custom: string;
+  commitMode: string;
+  saving: boolean;
+  onSave: (lang: string, preset: string, custom: string) => Promise<void> | void;
+}) {
+  const { t } = useTranslation();
+  // "" (never configured) and "none" render identically server-side; the
+  // dropdown normalises "" to "none" on first edit so the stored value
+  // becomes an explicit choice.
+  const [draftLang, setDraftLang] = useState(langOverride);
+  const [draftPreset, setDraftPreset] = useState(preset === '' ? 'none' : preset);
+  const [draftCustom, setDraftCustom] = useState(custom);
+
+  // Re-sync when the parent re-loads the project row (scanner refresh,
+  // save from another tab) so the form never sits on a stale value.
+  useEffect(() => setDraftLang(langOverride), [langOverride]);
+  useEffect(() => setDraftPreset(preset === '' ? 'none' : preset), [preset]);
+  useEffect(() => setDraftCustom(custom), [custom]);
+
+  const [preview, setPreview] = useState<CommitStylePreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  // Debounced server render. Runs on the drafts, not the saved values, so
+  // the user sees the effect of what they're typing before committing to it.
+  useEffect(() => {
+    let cancelled = false;
+    setPreviewing(true);
+    const timer = setTimeout(() => {
+      projectsApi
+        .previewCommitStyle(draftPreset, draftCustom, draftLang)
+        .then(p => { if (!cancelled) setPreview(p); })
+        .catch(() => { if (!cancelled) setPreview(null); })
+        .finally(() => { if (!cancelled) setPreviewing(false); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [draftPreset, draftCustom, draftLang]);
+
+  const customRequired = draftPreset === 'custom';
+  // Mirrors the backend cap (model.CommitStyleCustomMaxLen) so the save
+  // button disables before the round-trip rejects it. Backend stays the
+  // authority — this is only about not letting the user click into a 400.
+  const customTooLong = draftCustom.trim().length > 4000;
+  const dirty =
+    draftLang !== langOverride ||
+    draftCustom !== custom ||
+    draftPreset !== (preset === '' ? 'none' : preset);
+  const disabled =
+    saving || !dirty || (customRequired && !draftCustom.trim()) || customTooLong;
+
+  // The source badge keys off the override value itself, not
+  // commit_lang_source: the service writes "user"/"auto" while this badge
+  // used to compare against "override", so a manually pinned language never
+  // showed the badge it was supposed to show.
+  const overridden = draftLang !== '';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select
+          className="form-input"
+          style={{ flex: '1 1 160px', maxWidth: 220 }}
+          value={draftLang}
+          onChange={e => setDraftLang(e.target.value)}
+          disabled={saving}
+          aria-label={t('projects.detail.commitLang.label')}
+        >
+          <option value="">{t('projects.detail.commitLang.auto')}</option>
+          <option value="zh">{t('projects.detail.commitLang.zh')}</option>
+          <option value="en">{t('projects.detail.commitLang.en')}</option>
+          <option value="mixed">{t('projects.detail.commitLang.mixed')}</option>
+        </select>
+        {!overridden && detectedLang && (
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {t('projects.detail.commitLang.detectedLabel')}
+            <code style={{ background: 'var(--color-bg-2, #f1f5f9)', padding: '1px 6px', borderRadius: 4 }}>
+              {detectedLang}
+            </code>
+          </span>
+        )}
+        {!overridden && !detectedLang && (
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+            {t('projects.detail.commitLang.noDetect')}
+          </span>
+        )}
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={disabled}
+          onClick={() => onSave(draftLang, draftPreset, draftCustom)}
+        >
+          {saving ? t('projects.detail.basicSaving') : t('projects.detail.commitStyle.save')}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select
+          className="form-input"
+          style={{ flex: '1 1 220px', maxWidth: 340 }}
+          value={draftPreset}
+          onChange={e => setDraftPreset(e.target.value)}
+          disabled={saving}
+          aria-label={t('projects.detail.commitStyle.presetLabel')}
+        >
+          <option value="conventional">{t('projects.detail.commitStyle.presetConventional')}</option>
+          <option value="none">{t('projects.detail.commitStyle.presetNone')}</option>
+          <option value="custom">{t('projects.detail.commitStyle.presetCustom')}</option>
+        </select>
+      </div>
+
+      <textarea
+        className="form-input"
+        rows={3}
+        style={{ fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 12 }}
+        placeholder={t('projects.detail.commitStyle.customPlaceholder')}
+        value={draftCustom}
+        onChange={e => setDraftCustom(e.target.value)}
+        disabled={saving}
+        aria-label={t('projects.detail.commitStyle.customLabel')}
+      />
+      {customRequired && !draftCustom.trim() && (
+        <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)' }}>
+          ⚠ {t('projects.detail.commitStyle.customRequired')}
+        </div>
+      )}
+      {customTooLong && (
+        <div style={{ fontSize: 12, color: 'var(--color-error)' }}>
+          ⚠ {t('projects.detail.commitStyle.customTooLong', { max: 4000 })}
+        </div>
+      )}
+
+      <div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+          {t('projects.detail.commitStyle.previewLabel')}
+          <span style={{ marginLeft: 6 }}>
+            {previewing ? t('projects.detail.commitStyle.previewLoading') : t('projects.detail.commitStyle.previewHint')}
+          </span>
+        </div>
+        <pre
+          style={{
+            margin: 0,
+            padding: '8px 10px',
+            background: 'var(--color-bg-2, #f1f5f9)',
+            borderRadius: 6,
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            maxHeight: 220,
+            overflow: 'auto',
+            fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+          }}
+        >
+          {preview?.example ? preview.example : ''}
+          {preview?.commit ? `\n\n${preview.commit}` : ''}
+          {!preview?.example && !preview?.commit && (
+            t('projects.detail.commitStyle.previewEmpty')
+          )}
+        </pre>
+      </div>
+
+      {commitMode === 'script_only' && (
+        <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', lineHeight: 1.5 }}>
+          ⚠ {t('projects.detail.commitStyle.scriptOnlyWarn')}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ProjectDetail() {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
@@ -315,8 +507,11 @@ export default function ProjectDetail() {
   // Overview: commit / PR language override (pins wizard-generated commit
   // messages, push summaries, and PR titles/bodies). Empty string = auto
   // (fall back to commit_lang detected from git history).
-  const [commitLangSaving, setCommitLangSaving] = useState(false);
-  const [commitLangMsg, setCommitLangMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // 「提交风格」card: language pin + convention preset + supplements, saved
+  // together by handleCommitStyleSave. (Replaces the old commitLang-only
+  // state, which the three-field PUT supersedes.)
+  const [commitStyleSaving, setCommitStyleSaving] = useState(false);
+  const [commitStyleMsg, setCommitStyleMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Manual repo sync (POST /api/projects/{id}/sync). syncMsg doubles as the
   // transient toast that auto-clears after a few seconds.
@@ -691,31 +886,40 @@ export default function ProjectDetail() {
     }
   };
 
-  // ── Overview: commit / PR language override ───────────────────────────────
-  // Pinned language used by the wizard pipeline when generating commit
-  // messages, push summaries, and PR titles/bodies. value="" → revert to
-  // auto (the value auto-detected from git history by the scanner).
-  const handleCommitLangChange = async (value: string) => {
-    if (!id || commitLangSaving) return;
-    const normalized = value ?? '';
-    setCommitLangSaving(true);
-    setCommitLangMsg(null);
+  // ── Overview: 「提交风格」(language + convention) ─────────────────────────
+  // One PUT for all three fields: language pin, convention preset, and the
+  // free-text supplements. The prompt builders read them as a combination,
+  // so three separate calls would let the card show a half-saved style.
+  // lang="" reverts the pin to the scanner's auto-detected value.
+  const handleCommitStyleSave = async (
+    nextLang: string,
+    nextPreset: string,
+    nextCustom: string
+  ) => {
+    if (!id || commitStyleSaving) return;
+    setCommitStyleSaving(true);
+    setCommitStyleMsg(null);
     try {
-      const updated = await projectsApi.setCommitLangOverride(id, normalized);
+      const updated = await projectsApi.setCommitStyle(
+        id,
+        nextLang,
+        nextPreset,
+        nextCustom
+      );
       setProject(updated);
-      setCommitLangMsg({
+      setCommitStyleMsg({
         ok: true,
-        text: t('projects.detail.commitLang.saved'),
+        text: t('projects.detail.commitStyle.saved'),
       });
     } catch (e: unknown) {
-      setCommitLangMsg({
+      setCommitStyleMsg({
         ok: false,
-        text: t('projects.detail.commitLang.saveFailed', {
+        text: t('projects.detail.commitStyle.saveFailed', {
           msg: e instanceof Error ? e.message : String(e),
         }),
       });
     } finally {
-      setCommitLangSaving(false);
+      setCommitStyleSaving(false);
     }
   };
 
@@ -1835,68 +2039,43 @@ export default function ProjectDetail() {
             )}
           </div>
 
-          {/* Commit / PR language override — pins the language used by the
-              wizard pipeline for commit messages, push summaries, and PR
-              titles/bodies. Empty value = auto (use the git-history detected
-              value). The active source (auto vs manual override) is surfaced
-              inline so the user can tell which one is currently in effect. */}
+          {/* 提交风格 — one card, two dimensions: which language (pinned, or
+              auto-detected from git history) and which shape (Conventional
+              Commits / custom rules). Both reach the same prompt builders, so
+              they save together. */}
           <div className="detail-section" style={{ marginTop: 16 }}>
             <div className="section-header" style={{ marginBottom: 12 }}>
               <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.commitLang.label')}</span>
               <span
-                data-testid="commit-lang-source"
+                data-testid="commit-style-source"
                 style={{
                   fontSize: 12,
-                  color: project.commit_lang_source === 'override'
+                  color: project.commit_lang_override
                     ? 'var(--color-primary)'
                     : 'var(--color-text-muted)',
-                  fontWeight: project.commit_lang_source === 'override' ? 600 : 400,
+                  fontWeight: project.commit_lang_override ? 600 : 400,
                 }}
               >
-                {project.commit_lang_source === 'override'
+                {project.commit_lang_override
                   ? t('projects.detail.commitLang.overrideBadge')
                   : t('projects.detail.commitLang.sourceAuto')}
               </span>
             </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <select
-                className="form-input"
-                style={{ flex: '1 1 200px', maxWidth: 280 }}
-                value={project.commit_lang_override ?? ''}
-                onChange={e => handleCommitLangChange(e.target.value)}
-                disabled={commitLangSaving}
-                aria-label={t('projects.detail.commitLang.label')}
-              >
-                <option value="">{t('projects.detail.commitLang.auto')}</option>
-                <option value="zh">{t('projects.detail.commitLang.zh')}</option>
-                <option value="en">{t('projects.detail.commitLang.en')}</option>
-              </select>
-              {commitLangSaving && (
-                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                  {t('projects.detail.basicSaving')}
-                </span>
-              )}
-            </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
               {t('projects.detail.commitLang.hint')}
-              <div style={{ marginTop: 6 }}>{t('projects.detail.aiContextHint')}</div>
-              {project.commit_lang && project.commit_lang !== 'auto' && project.commit_lang_source !== 'override' && (
-                <span style={{ marginLeft: 6 }}>
-                  {t('projects.detail.commitLang.detectedLabel')}
-                  <code style={{ background: 'var(--color-bg-2, #f1f5f9)', padding: '1px 6px', borderRadius: 4 }}>
-                    {project.commit_lang}
-                  </code>
-                </span>
-              )}
-              {!project.commit_lang && (
-                <span style={{ marginLeft: 6, fontStyle: 'italic' }}>
-                  {t('projects.detail.commitLang.noDetect')}
-                </span>
-              )}
             </div>
-            {commitLangMsg && (
-              <div style={{ marginTop: 8, fontSize: 12, color: commitLangMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
-                {commitLangMsg.ok ? '✅ ' : '❌ '}{commitLangMsg.text}
+            <CommitStyleSection
+              langOverride={project.commit_lang_override ?? ''}
+              detectedLang={project.commit_lang ?? ''}
+              preset={project.commit_style_preset ?? ''}
+              custom={project.commit_style_custom ?? ''}
+              commitMode={project.commit_mode ?? 'llm_only'}
+              saving={commitStyleSaving}
+              onSave={handleCommitStyleSave}
+            />
+            {commitStyleMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: commitStyleMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {commitStyleMsg.ok ? '✅ ' : '❌ '}{commitStyleMsg.text}
               </div>
             )}
           </div>
