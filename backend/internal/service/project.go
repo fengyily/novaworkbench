@@ -1030,8 +1030,19 @@ func injectCredentials(remote, platform, tokenSecret, gitUserName string) string
 		return remote
 	}
 	u, err := url.Parse(remote)
-	if err != nil || u.Scheme == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		// git@…:owner/repo.git or any non-HTTP URL — leave alone.
+	if err != nil {
+		// url.Parse returns a nil *url.URL on error, so this branch must NOT
+		// touch u — the scp-like `git@host:owner/repo.git` form fails with
+		// "first path segment in URL cannot contain colon" and used to panic
+		// the whole server here (nil deref at the log.Printf below).
+		// Pass-through is still the right answer: SSH remotes are key-based,
+		// so there is no token to inject in the first place.
+		log.Printf("[gitlab-debug] injectCredentials: unparseable URL ssh=%v url=%s err=%v, pass-through",
+			isSSHRemote(remote), redactUserinfo(remote), err)
+		return remote
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		// git@…:owner/repo.git, ssh://… or any other non-HTTP URL — leave alone.
 		log.Printf("[gitlab-debug] injectCredentials: non-http URL host=%q scheme=%q, pass-through",
 			u.Host, u.Scheme)
 		return remote

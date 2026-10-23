@@ -431,11 +431,11 @@ func TestValidatePlatformToken_Dispatcher(t *testing.T) {
 		// dispatcher picks the right validator and surfaces SOMETHING.
 		wantPrefix string
 	}{
-		{"gitlab", "TOKEN_INVALID: GitLab base_url"},        // baseURL="" → validator says so
-		{"gitea", "TOKEN_INVALID: Gitea 必须填写 base_url"},    // baseURL="" → validator says so
+		{"gitlab", "TOKEN_INVALID: GitLab base_url"},          // baseURL="" → validator says so
+		{"gitea", "TOKEN_INVALID: Gitea 必须填写 base_url"},       // baseURL="" → validator says so
 		{"bitbucket", "TOKEN_INVALID: Bitbucket Data Center"}, // DC baseURL="" → validator says so
-		{"github", ""},                                       // baseURL="" → falls back to https://api.github.com; will fail at network layer with a real error
-		{"fake", ""},                                         // unknown → silent nil
+		{"github", ""}, // baseURL="" → falls back to https://api.github.com; will fail at network layer with a real error
+		{"fake", ""},   // unknown → silent nil
 	}
 	for _, tt := range tests {
 		t.Run(tt.platform, func(t *testing.T) {
@@ -625,13 +625,13 @@ func TestTokenFormatWarning_GitHub(t *testing.T) {
 	// Cases that should NOT emit a warning (the token looks like a real
 	// PAT of some kind, or it has the canonical prefix family).
 	plausible := []string{
-		"ghp_" + strings.Repeat("a", 36),                  // classic PAT (40 chars total)
+		"ghp_" + strings.Repeat("a", 36),                           // classic PAT (40 chars total)
 		"github_pat_" + strings.Repeat("x", 82-len("github_pat_")), // fine-grained PAT
-		"gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // OAuth
-		"ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // GitHub App user token
-		"ghs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // GitHub App server token
-		"ghr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // refresh token
-		strings.Repeat("a", 40),                          // 40 chars, no prefix (legacy / fine-grained without prefix)
+		"gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",             // OAuth
+		"ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",             // GitHub App user token
+		"ghs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",             // GitHub App server token
+		"ghr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",             // refresh token
+		strings.Repeat("a", 40),                                    // 40 chars, no prefix (legacy / fine-grained without prefix)
 	}
 	for _, tok := range plausible {
 		if w := tokenFormatWarning("github", tok); w != "" {
@@ -768,6 +768,7 @@ func TestValidateGitHubToken_401_RealPAT_NoWarning(t *testing.T) {
 var _ = secret.Decrypt
 var _ = json.Unmarshal
 var _ = os.Getenv
+
 func TestFetchArgsCredentialHelper(t *testing.T) {
 	with := strings.Join(fetchArgs("/p", "main", true), " ")
 	if !strings.Contains(with, "credential.helper=") {
@@ -802,5 +803,75 @@ func TestRedactUserinfo(t *testing.T) {
 		if got := redactUserinfo(c.in); got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// injectCredentials must never panic, whatever the remote looks like. url.Parse
+// returns a nil *url.URL on error and the scp-like `git@host:owner/repo.git`
+// form is such a case ("first path segment in URL cannot contain colon"); the
+// pre-0.5.x code dereferenced that nil in a log call and took the whole server
+// down on every remote architect-design run of an SSH-origin project.
+func TestInjectCredentials_NeverPanics(t *testing.T) {
+	remotes := []string{
+		"git@github.com:fengyily/novaworkbench.git",       // scp-like: parse error
+		"ssh://git@github.com/fengyily/novaworkbench.git", // explicit ssh
+		"https://github.com/fengyily/novaworkbench.git",   // normal HTTPS
+		"http://gitlab.example.com/team/proj.git",         // normal HTTP
+		"https://github.com:abc/a/b.git",                  // invalid port → parse error
+		"https://github.com/%zz/a/b.git",                  // bad escape → parse error
+		"github.com:fengyily/novaworkbench.git",           // scheme-looking but no //,
+		"",                                                // empty
+		"   ",                                             // whitespace only
+		"/local/path/repo",                                // bare path
+	}
+	for _, remote := range remotes {
+		for _, tok := range []string{"", "ghp_secret1234567890"} {
+			tok := tok
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("injectCredentials(%q, token=%q) panicked: %v", remote, tok, r)
+					}
+				}()
+				_ = injectCredentials(remote, "github", tok, "F1")
+				_ = injectCredentials(remote, "gitlab", tok, "F1")
+			}()
+		}
+	}
+}
+
+// Pass-through shapes (SSH / unparseable) must come back byte-identical —
+// rewriting them would break the `git@host:path` shorthand git relies on.
+func TestInjectCredentials_PassthroughUnchanged(t *testing.T) {
+	cases := []string{
+		"git@github.com:fengyily/novaworkbench.git",
+		"ssh://git@github.com/fengyily/novaworkbench.git",
+		"https://github.com:abc/a/b.git",
+	}
+	for _, remote := range cases {
+		if got := injectCredentials(remote, "github", "ghp_secret1234567890", "F1"); got != remote {
+			t.Errorf("remote %q: got %q, want unchanged", remote, got)
+		}
+	}
+}
+
+// HTTPS remotes still get the token embedded (the path that must keep working).
+func TestInjectCredentials_HTTPSInjects(t *testing.T) {
+	got := injectCredentials("https://github.com/fengyily/novaworkbench.git", "github", "ghp_secret1234567890", "F1")
+	if !strings.Contains(got, "ghp_secret1234567890") {
+		t.Fatalf("github token not injected: %q", got)
+	}
+	if !strings.Contains(got, "github.com/fengyily/novaworkbench.git") {
+		t.Fatalf("host/path mangled: %q", got)
+	}
+	// gitlab: username goes in the user slot, token in the password slot
+	got = injectCredentials("https://gitlab.com/team/proj.git", "gitlab", "glpat-xyz123456", "fengyi")
+	if !strings.HasPrefix(got, "https://fengyi:glpat-xyz123456@gitlab.com/") {
+		t.Fatalf("gitlab user:token shape wrong: %q", got)
+	}
+	// gitlab without a username falls back to the oauth2 form
+	got = injectCredentials("https://gitlab.com/team/proj.git", "gitlab", "glpat-xyz123456", "")
+	if !strings.HasPrefix(got, "https://oauth2:glpat-xyz123456@gitlab.com/") {
+		t.Fatalf("gitlab oauth2 fallback wrong: %q", got)
 	}
 }
