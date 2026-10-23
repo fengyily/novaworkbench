@@ -280,7 +280,7 @@ export const projects = {
     colPriority: 'Priority',
     colStatus: 'Status',
     colAgentServer: 'Agent server',
-    colTokens: 'Tokens (in/out)',
+    colTokens: 'Tokens',
     colCost: 'Cost',
     colCreatedAt: 'Created',
     colUpdatedAt: 'Updated',

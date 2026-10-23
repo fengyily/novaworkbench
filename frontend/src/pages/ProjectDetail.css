@@ -232,17 +232,11 @@
   background: var(--color-primary-light, #eef2ff) !important;
 }
 
-/* Requirements table status column (#5 in the .pr-table) — same chip-group
-   sizing as the cross-project RequirementsList so the two lists read as one
-   visual family. The cell also holds the claude-pulse-dot (active wizard
-   job indicator) which is small enough not to need its own column rule.
-   Let .status-chips own its internal flex-wrap so a 3-chip row on a tight
-   viewport wraps gracefully to a second line instead of overflowing.
-   Column order: 1 id / 2 type / 3 title / 4 priority / 5 status. */
-.pr-table thead th:nth-child(5),
-.pr-table tbody td:nth-child(5) {
-  min-width: 240px;
-}
+/* The status column's width now lives with the other column rules
+   (`.pr-table .pr-c-status`) — the cell also holds the claude-pulse-dot
+   (active wizard job indicator), which is small enough not to need its
+   own rule. `.status-chips` owns its internal flex-wrap so a 3-chip row
+   on a tight viewport wraps instead of overflowing. */
 
 .pr-branch {
   font-family: var(--font-mono, monospace);
@@ -260,8 +254,89 @@
 }
 
 .pr-title {
-  max-width: 320px;
   color: var(--color-text);
+}
+
+/* ── Requirements table: column widths ────────────────────────────
+   Keyed by class, not by position. The old `.pr-table th:nth-child(5)`
+   rule had drifted (it was written before the tree column existed) and,
+   more importantly, a positional ladder cannot survive inserting the
+   44px select column: every index would shift and the retargeting would
+   be invisible.
+
+   Measured budget with every column shown: 1282px of table. The frame is
+   ~1156px at a 1440px viewport (220px sidebar + page padding), so the
+   table does NOT fit everywhere — the two rules below pick the order in
+   which columns give way:
+
+     1. the two money/id columns are already held to narrow targets; the
+        title keeps at least 200px because it is the thing being scanned
+     2. below 1560px viewport, `created_at` is dropped (recency is what
+        this list is sorted by; the exact value stays on the row tooltip)
+     3. below 1240px, the id goes too (it is an opaque handle, and the
+        detail page still shows it)
+     4. below that the frame scrolls (`.pr-list` has overflow-x: auto)
+
+   Hiding by column class rather than trimming widths is deliberate: a
+   trimmed column still costs min-content, whereas a hidden one returns
+   its full width to the title. */
+.pr-table .pr-c-id {
+  width: 84px;
+  max-width: 84px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.pr-table .pr-c-type { width: 112px; }
+.pr-table .pr-c-status { min-width: 152px; }
+.pr-table .pr-c-agent { width: 128px; }
+.pr-table .pr-c-num {
+  width: 104px;
+  max-width: 104px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pr-table .pr-c-cost { width: 88px; max-width: 88px; }
+.pr-table .pr-c-time {
+  /* min-width, never max: a half-truncated timestamp ("10/22/2026 18…")
+     is worse than useless, so this column is allowed to take the width it
+     needs and the title gives it up instead. The clip wrapper below still
+     guards the pathological case (a locale with a long date format). */
+  min-width: 132px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+.pr-table .pr-c-title {
+  /* Only flexible column. Capped for the same reason as the cross-project
+     list: the marks + tags rows inside refuse to shrink, so without a cap
+     the title demands 400px+ and starves its neighbours. */
+  min-width: 200px;
+  max-width: 300px;
+}
+
+/* Column shedding, in priority order (see the note above). The created
+   timestamp goes first because the list's default sort is recency, so the
+   "when did this last move" column is the one users actually read. */
+@media (max-width: 1559px) {
+  .pr-table .pr-c-created { display: none; }
+}
+@media (max-width: 1239px) {
+  .pr-table .pr-c-id { display: none; }
+}
+.pr-table .pr-c-dim { color: var(--color-text-muted); }
+
+/* Metadata cells wrap their content so the column can actually shrink —
+   in `table-layout: auto` the cell's min-content otherwise wins over the
+   declared width, which is how the last column used to end up off-frame. */
+.pr-cell-clip {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Title cell with mark chips + title text on a single line. The cell stays

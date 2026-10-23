@@ -281,7 +281,7 @@ export const projects = {
     colPriority: '优先级',
     colStatus: '状态',
     colAgentServer: 'Agent 服务器',
-    colTokens: 'Tokens (入/出)',
+    colTokens: 'Token',
     colCost: '成本',
     colCreatedAt: '创建时间',
     colUpdatedAt: '更新时间',

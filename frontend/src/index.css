@@ -345,7 +345,12 @@ body.no-scroll {
   background: var(--color-surface, #fff);
   border: 1px solid var(--color-border, #E2E8F0);
   border-radius: 8px;
-  overflow: hidden;
+  /* Scroll rather than clip. `overflow: hidden` silently cut the last
+     column in half on a 1280px viewport with no scrollbar to suggest it
+     was there — the table looked broken, not scrollable. The radius still
+     clips the header background to the frame. */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .req-table {

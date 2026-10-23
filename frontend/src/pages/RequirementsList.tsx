@@ -22,6 +22,10 @@ import {
 import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import {
+  RowSelectBox, SelectAllBox, BatchBar, BatchDeleteDialog,
+} from '../components/RequirementBatch/RequirementBatch';
+import { useRowSelection } from '../components/RequirementBatch/useRowSelection';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
 import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
@@ -110,8 +114,10 @@ export default function RequirementsList() {
   const [addChildFor, setAddChildFor] = useState<string | null>(null);
 
   // ---- Batch select + delete ----
-  // An immutable Set, matching the activeKinds / expanded idiom on this page.
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Selection is scoped to `filteredReqs` (the whole filter result, collapsed
+  // sub-requirements included), never to the rows currently rendered — see
+  // useRowSelection. The confirm step + tray come from the shared component so
+  // this page and the project tab cannot drift apart.
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [riskAck, setRiskAck] = useState(false);
@@ -236,48 +242,23 @@ export default function RequirementsList() {
     return [...masters, ...requirements.filter(r => r.parent_id && keep.has(r.parent_id))];
   }, [requirements, statusFilter, search]);
 
-  const toggleOne = (id: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-
   // Select-all covers the whole filtered result set — NOT just the rows
   // currently on screen. A collapsed sub-requirement is still part of the
   // filter result, and skipping it would leave survivors behind after a
   // "delete everything", which is the one complaint this feature must not earn.
-  const toggleAll = () => {
-    setSelected(prev => {
-      const allIds = filteredReqs.map(r => r.id);
-      const allOn = allIds.length > 0 && allIds.every(id => prev.has(id));
-      return allOn ? new Set<string>() : new Set(allIds);
-    });
-  };
+  const selection = useRowSelection(filteredReqs.map(r => r.id));
 
-  const clearSelection = () => setSelected(new Set());
-
-  const allSelected = filteredReqs.length > 0 && filteredReqs.every(r => selected.has(r.id));
-  const someSelected = !allSelected && filteredReqs.some(r => selected.has(r.id));
-
-  // Drop ids that fell out of the filter result (or were deleted by someone
-  // else) so the batch request can never carry a row the user cannot see.
+  // Announce the selection count for screen readers — the tray itself is a
+  // purely visual element, and "3 rows are now armed" is exactly the kind of
+  // state change a sighted user sees for free.
   useEffect(() => {
-    const visible = new Set(filteredReqs.map(r => r.id));
-    setSelected(prev => {
-      const next = new Set<string>();
-      prev.forEach(id => { if (visible.has(id)) next.add(id); });
-      return next.size === prev.size ? prev : next;
-    });
-  }, [filteredReqs]);
-
-  // `indeterminate` is not an HTML attribute — it can only be set as a DOM
-  // property, hence the ref rather than a JSX prop.
-  const selectAllRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected;
-  }, [someSelected]);
+    setLiveMsg(
+      selection.count > 0
+        ? t('requirements.batch.selectedAria', { n: selection.count, total: filteredReqs.length })
+        : '',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection.count, filteredReqs.length]);
 
   // Assembles over filteredReqs, never the raw requirements: a child is
   // already anchored to its visible parent by the memo above, so a parent
@@ -403,35 +384,17 @@ export default function RequirementsList() {
     </div>
   );
 
-  // One checkbox renderer shared by the desktop row and the mobile card.
-  //
-  // Both hosts navigate on click, so the box has to defeat three separate
-  // behaviours: stopPropagation on change/click keeps the surrounding row (or
-  // card button) from navigating, stopPropagation on mousedown keeps the
-  // desktop row's drag machinery from starting, and draggable={false} stops
-  // the input itself from being picked up as a drag source.
+  // One checkbox renderer for both hosts — the shared component handles the
+  // click/drag suppression every one of these rows needs.
   const selectionCheckbox = (r: Requirement) => (
-    <input
-      type="checkbox"
-      className="req-select-box"
-      checked={selected.has(r.id)}
-      onChange={(e) => { e.stopPropagation(); toggleOne(r.id); }}
-      onClick={(e) => e.stopPropagation()}
-      onMouseDown={(e) => e.stopPropagation()}
-      draggable={false}
-      aria-label={t('requirements.list.selectRowAria', {
+    <RowSelectBox
+      checked={selection.isSelected(r.id)}
+      label={t('requirements.batch.selectRowAria', {
         title: r.title || t('requirements.list.noTitle'),
       })}
+      onToggle={() => selection.toggle(r.id)}
     />
   );
-
-  const childChip = (r: Requirement, depth: number) => {
-    const n = childrenByParent.get(r.id)?.length ?? 0;
-    if (depth === 0 && n > 0) {
-      return <span className="req-tag-chip req-tree-count">{t('requirements.tree.childCount', { n })}</span>;
-    }
-    return null;
-  };
 
   const draggedReq = dragId ? requirements.find(r => r.id === dragId) : undefined;
   const canDrop = (target: Requirement) =>
@@ -543,7 +506,7 @@ export default function RequirementsList() {
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
           onClick={() => navigate(`/requirements/${r.id}`)}
-          className={`req-row req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${depth === 0 && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}${selected.has(r.id) ? ' req-row-selected' : ''}`}
+          className={`req-row req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${depth === 0 && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}${selection.isSelected(r.id) ? ' rb-selected' : ''}`}
           draggable
           onDragStart={e => onDragStart(e, r)}
           onDragEnd={endDrag}
@@ -551,14 +514,16 @@ export default function RequirementsList() {
           onDragLeave={() => dropId === r.id && setDropId(null)}
           onDrop={e => onRowDrop(e, r)}
         >
-          <td className="req-tree-col">
-            {/* Selection box first, then the tree toggle. Child rows leave
-                the toggle slot empty on purpose — the directory-tree
-                connector is drawn on this cell by CSS. */}
-            {selectionCheckbox(r)}
-            {depth === 0 && treeToggle(r, depth)}
-          </td>
-          <td data-label={t('requirements.list.colType')}>
+          {/* Selection has its OWN 44px column. Cramming the box into the
+              tree gutter (the previous attempt) put two unrelated controls
+              in 56px and made the <td> a flex container, which drops the
+              cell out of the table's box model — the column stopped
+              honouring its width and the row stopped aligning. */}
+          <td className="rb-col-select">{selectionCheckbox(r)}</td>
+          {/* Child rows leave the tree slot empty on purpose — the
+              directory-tree connector is drawn on this cell by CSS. */}
+          <td className="req-tree-col">{depth === 0 && treeToggle(r, depth)}</td>
+          <td className="req-c-type" data-label={t('requirements.list.colType')}>
             {/* Priority dot folded INTO the Type cell, ahead of the
                 kind-badge. Mirrors the project-detail requirements tab —
                 the dedicated Priority column was visually dead even on
@@ -588,7 +553,7 @@ export default function RequirementsList() {
               </span>
             </span>
           </td>
-          <td className={`req-row-title${depth > 0 ? ' is-child req-tree-child-title' : ''}`} data-label={t('requirements.list.colTitle')}>
+          <td className={`req-c-title req-row-title${depth > 0 ? ' is-child req-tree-child-title' : ''}`} data-label={t('requirements.list.colTitle')}>
             <div className="req-row-title-text">
               {/* Preset marks (important / follow_up / blocked / at_risk)
                   render INLINE with the title (chip strip BEFORE the
@@ -596,13 +561,17 @@ export default function RequirementsList() {
                   stay on a single line. Empty list → nothing rendered
                   (so unmarked rows don't get extra spacing). Colors
                   come from MARK_PRESETS in api/client.ts so the
-                  detail-page editor stays in sync. */}
+                  detail-page editor stays in sync.
+
+                  No child-count chip here: the chevron in the gutter
+                  already says "this master has children", and the violet
+                  "Sub-requirements 3" chip was eating ~120px of the only
+                  column worth protecting — the title. */}
               <MarksStrip marks={r.marks} />
               {scheduleClock(r)}
               <span className="req-row-title-text-label">
                 {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
               </span>
-              {childChip(r, depth)}
             </div>
             {/* Mirror the project-page chip strip: tags render
                 under the title as a 3-chip cap with +N overflow.
@@ -637,7 +606,7 @@ export default function RequirementsList() {
               );
             })()}
           </td>
-          <td data-label={t('requirements.list.colStatus')}>
+          <td className="req-c-status" data-label={t('requirements.list.colStatus')}>
             <StatusChips req={r} />
           </td>
           {/* Model column — the developer-stage model actually
@@ -645,16 +614,23 @@ export default function RequirementsList() {
               --settings env). Empty for requirements whose coding
               stage hasn't run yet (or that predate this column);
               we show a dim em-dash rather than guessing. */}
-          <td data-label={t('requirements.list.colModel')} className="req-row-model">
+          <td data-label={t('requirements.list.colModel')} className="req-c-model req-row-model">
+            {/* No robot emoji: the column header already names the model, and
+                the glyph was eating ~20px of the tightest column in the
+                table. */}
             {r.developer_model ? (
               <span className="req-row-model-tag" title={r.developer_model}>
-                🤖 {r.developer_model}
+                {r.developer_model}
               </span>
             ) : (
               <span className="req-row-dim">—</span>
             )}
           </td>
-          <td data-label={t('requirements.list.colProject')}>{projectNameOf(r.project_id)}</td>
+          <td className="req-c-project" data-label={t('requirements.list.colProject')}>
+            <span className="req-cell-clip" title={projectNameOf(r.project_id)}>
+              {projectNameOf(r.project_id)}
+            </span>
+          </td>
           {/* Agent-server column: now carries the full DevSourceBadge
               (local dev / 🛰️ agent server name) so users see where
               the requirement actually ran. The previous plain
@@ -662,12 +638,12 @@ export default function RequirementsList() {
               dev-env column — merging them removes the
               duplication. The badge itself falls back to nothing
               when dev_source is empty (coding never ran). */}
-          <td data-label={t('requirements.list.colAgentServer')} className="req-row-devsource">
+          <td data-label={t('requirements.list.colAgentServer')} className="req-c-agent req-row-devsource">
             <DevSourceBadge req={r} compact />
           </td>
           <td
             data-label={t('requirements.list.colUpdated')}
-            className="req-row-updated"
+            className="req-c-updated req-row-updated"
             title={r.updated_at ? fmtRelative(r.updated_at) : undefined}
           >
             {fmtDateTime(r.updated_at)}
@@ -704,7 +680,6 @@ export default function RequirementsList() {
             <span className="req-row-title-text-label">
               {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
             </span>
-            {childChip(r, depth)}
           </div>
           <div className="req-card-mobile-foot">
             <span className="req-card-mobile-project" title={projectName}>
@@ -728,7 +703,7 @@ export default function RequirementsList() {
         <div
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
-          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}${selected.has(r.id) ? ' req-card-mobile-selected' : ''}`}
+          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}${selection.isSelected(r.id) ? ' rb-selected' : ''}`}
         >
           {/* Sibling of the card, never a child: the card is a <button>
               and an <input> nested in one is invalid HTML whose click the
@@ -744,8 +719,8 @@ export default function RequirementsList() {
 
   // ---- Batch delete ----
   const selectedReqs = useMemo(
-    () => filteredReqs.filter(r => selected.has(r.id)),
-    [filteredReqs, selected],
+    () => filteredReqs.filter(r => selection.selected.has(r.id)),
+    [filteredReqs, selection.selected],
   );
   // Deleting a parent does NOT cascade: its sub-requirements are detached
   // and promoted to top level. That is the most surprising thing about this
@@ -764,13 +739,13 @@ export default function RequirementsList() {
   };
 
   const handleBatchDelete = async () => {
-    if (deleting || selected.size === 0) return;
+    if (deleting || selection.count === 0) return;
     setDeleting(true);
     try {
-      const res = await requirementsApi.batchDelete(Array.from(selected));
+      const res = await requirementsApi.batchDelete(Array.from(selection.selected));
       const failed = res.failed?.length ?? 0;
       setConfirmOpen(false);
-      setSelected(new Set());
+      selection.clear();
       setRiskAck(false);
       await loadRequirements();
       // One source of truth, two channels: the visible banner and the
@@ -778,8 +753,8 @@ export default function RequirementsList() {
       setBatchResult({ deleted: res.deleted, failed });
       setLiveMsg(
         failed > 0
-          ? t('requirements.list.deletePartial', { n: res.deleted, m: failed })
-          : t('requirements.list.deleteDone', { n: res.deleted }),
+          ? t('requirements.batch.partial', { n: res.deleted, m: failed })
+          : t('requirements.batch.done', { n: res.deleted }),
       );
     } catch (e) {
       setLiveMsg(e instanceof Error ? e.message : String(e));
@@ -788,73 +763,22 @@ export default function RequirementsList() {
     }
   };
 
-  // Structure copied from ProjectsList.renderDeleteModal — the modal /
-  // risk-panel / btn-row-2col vocabulary is shared app-wide, so batch
-  // delete reads as the same action the user has already seen on /projects.
-  const renderBatchDeleteModal = () => {
-    if (!confirmOpen) return null;
-    const n = selected.size;
-    const preview = selectedReqs.slice(0, 5);
-    const rest = n - preview.length;
-    const canConfirm = childRiskCount === 0 || riskAck;
-    return (
-      <div className="modal-overlay" onClick={() => { if (!deleting) setConfirmOpen(false); }}>
-        <div className="modal-box" onClick={e => e.stopPropagation()}>
-          <h3 className="modal-title-danger">
-            {t('requirements.list.deleteModal.title', { n })}
-          </h3>
-          <div className="modal-confirm-text">
-            {t('requirements.list.deleteModal.body')}
-          </div>
-
-          <ul className="req-batch-title-list">
-            {preview.map(r => (
-              <li key={r.id}>{r.title || t('requirements.list.noTitle')}</li>
-            ))}
-            {rest > 0 && (
-              <li className="req-batch-title-more">
-                {t('requirements.list.deleteModal.moreTitles', { n: rest })}
-              </li>
-            )}
-          </ul>
-
-          {childRiskCount > 0 && (
-            <div className="modal-risk-panel">
-              <div className="modal-risk-title">
-                {t('requirements.list.deleteModal.childRiskTitle', { n: childRiskCount })}
-              </div>
-              <div className="modal-risk-desc">
-                {t('requirements.list.deleteModal.childRiskDesc')}
-              </div>
-              <label className="modal-risk-check">
-                <input
-                  type="checkbox"
-                  checked={riskAck}
-                  onChange={e => setRiskAck(e.target.checked)}
-                />
-                <span>{t('requirements.list.deleteModal.childRiskAck')}</span>
-              </label>
-            </div>
-          )}
-
-          <div className="modal-actions btn-row-2col">
-            <button className="btn" onClick={() => setConfirmOpen(false)} disabled={deleting}>
-              {t('requirements.list.deleteModal.cancel')}
-            </button>
-            <button
-              className="btn btn-danger"
-              onClick={handleBatchDelete}
-              disabled={!canConfirm || deleting}
-            >
-              {deleting
-                ? t('requirements.list.deleteModal.deleting')
-                : t('requirements.list.deleteModal.confirm', { n })}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  // The confirm step is the shared component: same modal frame, same
+  // sub-requirement risk panel and same verbs as the project tab, so "delete a
+  // batch of requirements" is one action in this product, not two.
+  const renderBatchDeleteModal = () => (
+    <BatchDeleteDialog
+      open={confirmOpen}
+      busy={deleting}
+      count={selection.count}
+      titles={selectedReqs.map(r => r.title || t('requirements.list.noTitle'))}
+      childRiskCount={childRiskCount}
+      ack={riskAck}
+      onAckChange={setRiskAck}
+      onConfirm={handleBatchDelete}
+      onCancel={() => { if (!deleting) setConfirmOpen(false); }}
+    />
+  );
 
   return (
     <div className="requirements-list-page">
@@ -970,40 +894,27 @@ export default function RequirementsList() {
         </span>
       </div>
 
-      {/* Batch bar — rendered only while something is selected, so it never
-          occupies space or leaves a ghost when the selection is empty. The
-          "N of M" count spells out the scope, so the user can verify that
-          select-all really means "everything the filter matched" including
-          the sub-requirements currently collapsed out of sight. */}
-      {selected.size > 0 && (
-        <div className="req-batch-bar">
-          <span className="req-batch-count">
-            {t('requirements.list.batchBarLabel', { n: selected.size, total: filteredReqs.length })}
-          </span>
-          <div className="req-batch-actions">
-            <button type="button" className="btn btn-sm" onClick={toggleAll}>
-              {t('requirements.list.batchSelectAll')}
-            </button>
-            <button type="button" className="btn btn-sm" onClick={clearSelection}>
-              {t('requirements.list.batchClear')}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-danger"
-              onClick={openConfirm}
-              disabled={deleting}
-            >
-              {t('requirements.list.batchDeleteBtn')}
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Staging tray — the one loud element on this page. Rendered only
+          while something is selected, so it never occupies space or leaves
+          a ghost when the selection is empty. Its count names BOTH numbers
+          so the user can verify that select-all really means "everything
+          the filter matched", including the sub-requirements currently
+          collapsed out of sight. */}
+      <BatchBar
+        selectedCount={selection.count}
+        total={filteredReqs.length}
+        busy={deleting}
+        allSelected={selection.allSelected}
+        onSelectAll={selection.toggleAll}
+        onClear={selection.clear}
+        onDelete={openConfirm}
+      />
 
       {batchResult && (
-        <div className={`req-batch-banner${batchResult.failed > 0 ? ' is-partial' : ' is-ok'}`}>
+        <div className={`rb-banner${batchResult.failed > 0 ? ' is-partial' : ' is-ok'}`}>
           {batchResult.failed > 0
-            ? t('requirements.list.deletePartial', { n: batchResult.deleted, m: batchResult.failed })
-            : t('requirements.list.deleteDone', { n: batchResult.deleted })}
+            ? t('requirements.batch.partial', { n: batchResult.deleted, m: batchResult.failed })
+            : t('requirements.batch.done', { n: batchResult.deleted })}
         </div>
       )}
 
@@ -1044,32 +955,24 @@ export default function RequirementsList() {
           <table className="req-table table-cards">
             <thead>
               <tr>
-                <th className="req-tree-col">
-                  <input
-                    ref={selectAllRef}
-                    type="checkbox"
-                    className="req-select-box"
-                    checked={allSelected}
-                    onChange={(e) => { e.stopPropagation(); toggleAll(); }}
-                    onClick={(e) => e.stopPropagation()}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    draggable={false}
-                    aria-label={t('requirements.list.selectAllAria')}
-                    title={t('requirements.list.selectAllAria')}
+                <th className="rb-col-select">
+                  <SelectAllBox
+                    checked={selection.allSelected}
+                    indeterminate={selection.someSelected}
+                    label={t('requirements.batch.selectAllAria', { n: filteredReqs.length })}
+                    onToggle={selection.toggleAll}
                   />
                 </th>
-                {/* 96→112 once the dot+badge pair lives inside a nowrap
-                    flex row (.req-type-cell); the extra slack keeps the
-                    wiki pill from clipping on narrow viewports. */}
-                <th style={{ width: 112 }}>{t('requirements.list.colType')}</th>
-                <th>{t('requirements.list.colTitle')}</th>
-                <th>{t('requirements.list.colStatus')}</th>
-                <th>{t('requirements.list.colModel')}</th>
-                <th>{t('requirements.list.colProject')}</th>
+                <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
+                <th className="req-c-type">{t('requirements.list.colType')}</th>
+                <th className="req-c-title">{t('requirements.list.colTitle')}</th>
+                <th className="req-c-status">{t('requirements.list.colStatus')}</th>
+                <th className="req-c-model">{t('requirements.list.colModel')}</th>
+                <th className="req-c-project">{t('requirements.list.colProject')}</th>
                 {/* Priority column removed — the dot moved into the Type
                     cell above. */}
-                <th>{t('requirements.list.colAgentServer')}</th>
-                <th>{t('requirements.list.colUpdated')}</th>
+                <th className="req-c-agent">{t('requirements.list.colAgentServer')}</th>
+                <th className="req-c-updated">{t('requirements.list.colUpdated')}</th>
               </tr>
             </thead>
             <tbody>
