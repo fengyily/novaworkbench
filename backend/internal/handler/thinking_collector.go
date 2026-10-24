@@ -51,7 +51,11 @@ func (c *thinkingCollector) addBlock(s string) {
 	if c.sawDelta {
 		return
 	}
-	if c.buf.Len() > 0 && s != "" {
+	// Only insert the paragraph break when the previous turn did not already
+	// end with one. endTurn() appends "\n\n" after a streamed turn, so an
+	// unconditional separator here produced FOUR newlines between a streamed
+	// turn and the next batched-only turn.
+	if c.buf.Len() > 0 && s != "" && !strings.HasSuffix(c.buf.String(), "\n\n") {
 		c.add("\n\n")
 	}
 	c.add(s)

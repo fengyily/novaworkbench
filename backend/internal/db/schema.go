@@ -1574,7 +1574,12 @@ var (
 	// MySQL cannot index TEXT columns (needs a key length), so every column
 	// that is a PK/UNIQUE/index target becomes a VARCHAR. Column definitions
 	// all start at the beginning of a line in the canonical schema.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
+	// NOTE: every column that appears as a PRIMARY KEY / UNIQUE / indexed
+	// column in canonicalSchema must be listed here — MySQL cannot index a
+	// bare TEXT column. sub_task_id was missing until 2026-10-24, which made
+	// `CREATE TABLE sub_task_thinking` fail on MySQL (TEXT PRIMARY KEY
+	// without a prefix length), while SQLite/Postgres silently accepted it.
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)
