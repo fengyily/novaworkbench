@@ -1276,7 +1276,11 @@ func (s *RequirementService) UpdateDesignBaseSHA(id, sha string) error {
 // fallback chain resolves the value) so a later coding-stage run can pick
 // up the same base even when the user forgot to re-pick it on the coding
 // form, AND so the merge stage targets the PR at the user-chosen base
-// instead of project.DefaultBranch. STAMP-IF-NON-EMPTY: empty input clears
+// instead of project.DefaultBranch. The CODING stage calls it too, with the
+// base it actually resolved for this run — otherwise a base switched on the
+// "start coding" form would leave the push stage reading the design stage's
+// stale value, and the code would be developed against one branch but
+// pushed onto another. STAMP-IF-NON-EMPTY: empty input clears
 // the column (used when the user explicitly blanks the field), and a
 // non-empty input always overwrites — re-runs deliberately update the row
 // so a deliberate base switch flips the PR target on the next merge.
@@ -1371,10 +1375,14 @@ func (s *RequirementService) UpdateAutoPushFlags(id string, commit, push, pr boo
 // UpdateNoBranch stamps the "develop on base branch" intent onto the
 // requirement. Stamped once when the coding stage prologue resolves the
 // preflight toggle; pointer-nil input from the request body preserves the
-// previous value (DB default = false). Read by ContinueCoding / AdjustCoding
-// (to land on the same checkout), autoPushPR (to bypass the dev==base guard),
-// push_pr_base shell job (to pick the no-branch sub-task path), LocalMerge
-// (to short-circuit the merge), and Cleanup (to skip worktree removal). Mirrors
+// previous value (DB default = false). The LaunchSpec path also stamps it
+// before the design stage dispatches, so the design stage builds a detached
+// worktree instead of a feat/<reqID> branch. Read by ContinueCoding /
+// AdjustCoding (to land on the same checkout), autoPushPR (to bypass the
+// dev==base guard), push_pr_base shell job (to pick the no-branch sub-task
+// path), LocalMerge (to short-circuit the merge), and Cleanup (a no-branch
+// row now owns a real detached worktree, so cleanup removes it and guards
+// against deleting unshipped commits). Mirrors
 // UpdateAutoPush's write-through semantics so a development-completion point
 // that runs asynchronously after a restart reads the same intent as the
 // prologue did.

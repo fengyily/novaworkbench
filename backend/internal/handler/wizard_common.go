@@ -517,11 +517,40 @@ func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Require
 // resolve to projectPath with a nil error (legacy in-place behavior); a git
 // repo whose worktree add fails returns a non-nil error.
 //
+// A no-branch requirement gets a DETACHED HEAD worktree parked on the base
+// line instead of a branch-shaped one — the design stage then produces no
+// feat/<reqID> branch at all.
+//
 // logf may be nil; nil disables log echoing silently so the legacy callers
 // keep working unchanged.
 func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defaultBranch string, skipSync bool, logf func(string)) (string, error) {
 	if req == nil || projectPath == "" {
 		return projectPath, nil
+	}
+	if req.NoBranch {
+		// No-branch mode: a DETACHED HEAD worktree parked on the base line.
+		// No branch is created — not here, not on the remote — and the
+		// project's checkout is never touched.
+		//
+		// This branch has to come BEFORE the "already have a worktree_path →
+		// reuse it" path below: that path does not detach an existing
+		// worktree, so a design-stage feat/<reqID> worktree would stay
+		// branch-shaped and the requirement would end up with a branch after
+		// all.
+		if defaultBranch == "" {
+			defaultBranch = "main"
+		}
+		wtPath, err := h.worktreeH.ensureDetachedWorktreeFrom(context.Background(),
+			req.ProjectID, projectPath, req.ID, defaultBranch, skipSync, logf)
+		if err != nil {
+			return "", err
+		}
+		if perr := h.reqSvc.UpdateWorktree(req.ID, "", wtPath); perr != nil {
+			log.Printf("[wizard] anchorWorktree %s: persist detached worktree: %v", req.ID, perr)
+		}
+		req.WorktreePath = wtPath
+		req.BranchName = ""
+		return wtPath, nil
 	}
 	if req.WorktreePath != "" {
 		// Cross-requirement contamination guard: the persisted path must
@@ -747,10 +776,17 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		return
 	}
 	dir := proj.LocalPath
-	base := proj.DefaultBranch
-	if base == "" {
-		base = "main"
-	}
+	// base = the base branch this REQUIREMENT was developed against — the one
+	// the user picked at the design / coding stage, persisted on
+	// requirements.base_branch. The project's default_branch is only the
+	// last-resort fallback of the chain.
+	//
+	// The old code read proj.DefaultBranch as the ONLY source, so a
+	// requirement whose base was "develop" got its code pushed straight onto
+	// the project main branch "main" — a straight violation of "push to the
+	// base branch" — and the currentBranch != base guard in push_pr_base.go
+	// then rejected the push with a misleading "please switch back to base".
+	base := resolveBaseBranch(reqRow, proj)
 	platformType := proj.PlatformType
 
 	// Resolve the dev branch the same way the manual push does. An
@@ -765,8 +801,15 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		dev, _ = devBranchAndDir(reqRow, dir)
 	}
 	if dev == "" || dev == "HEAD" {
-		log.Printf("[auto-push] %s: no dev branch (detached HEAD?), skip", reqRow.ID)
-		return
+		// The no-branch mode has no dev branch by design: its isolated
+		// worktree runs on a DETACHED HEAD parked on the base line, so
+		// branch_name is empty and devBranchAndDir reports an empty dev.
+		// The push target IS the base branch, so the guard must not swallow
+		// the auto-push.
+		if !reqRow.NoBranch {
+			log.Printf("[auto-push] %s: no dev branch (detached HEAD?), skip", reqRow.ID)
+			return
+		}
 	}
 	// dev == base 安全闸门：dev 与 base 相同意味着没有 worktree 隔离
 	// (开发在主 checkout 上直接做了),直推会把未隔离的改动推到 main,

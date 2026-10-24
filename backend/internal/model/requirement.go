@@ -165,15 +165,24 @@ type Requirement struct {
 	AutoPushRemote bool `json:"auto_push_remote"`
 	AutoCreatePR   bool `json:"auto_create_pr"`
 	// NoBranch records the "develop on base branch" choice made at the coding
-	// stage prologue. When true, the requirement skipped worktree creation
-	// and branch creation; coding, commit, and push all happen directly on the
-	// base branch, with PR creation skipped (gh/glab/tea reject head==base).
+	// stage prologue. When true, the requirement still develops in an ISOLATED
+	// worktree — but that worktree runs on a DETACHED HEAD parked on the base
+	// line, so no branch is created anywhere (neither locally nor on the
+	// remote). Coding, commit, and push all happen inside that worktree, the
+	// push lands directly on the base branch
+	// (git push origin HEAD:refs/heads/<base>), and PR creation is skipped
+	// (gh/glab/tea reject head==base). The project's own checkout is never
+	// touched.
+	//
+	// branch_name stays empty for such rows while worktree_path points at the
+	// detached worktree — that pair is exactly "isolated worktree, no branch".
 	// Read by ContinueCoding/AdjustCoding (to pick the same checkout) and by
 	// autoPushPR / push_pr_shell / LocalMerge / Cleanup to keep behavior
-	// consistent with how the code was first developed. false = legacy
-	// "feat/<reqID> worktree + auto-PR" flow. Stamped once when the coding
-	// stage prologue runs; nil pointer fields in codingRunParams preserve the
-	// previous value so re-runs that omit the field stay consistent.
+	// consistent with how the code was first developed. false = the
+	// "feat/<reqID> worktree + auto-PR" flow. Stamped when the coding stage
+	// prologue runs and, for the LaunchSpec path, before the design stage
+	// dispatches; nil pointer fields in codingRunParams preserve the previous
+	// value so re-runs that omit the field stay consistent.
 	NoBranch bool `json:"no_branch"`
 	// DesignAgentServerID records WHERE this requirement's architect-design
 	// stage was run. Stamped by the design stage prologue (mirror of
@@ -203,13 +212,21 @@ type Requirement struct {
 	// snapshot. Empty for legacy rows and requirements whose design stage was
 	// skipped (no remote / non-git / unborn HEAD — Skipped branch).
 	DesignBaseSHA string `json:"design_base_sha"`
-	// BaseBranch is the baseline branch chosen at the design stage and reused
-	// by the development + merge stages. Stamped by the design prologue with
-	// the user-picked base (or project.DefaultBranch if none) so the dev
+	// BaseBranch is the baseline branch the user picked at the design /
+	// development stage, reused by the merge + push stages. It is NOT the
+	// project's main branch — projects.default_branch is only the last
+	// fallback of the three-step resolution chain
+	// (row.base_branch → project.default_branch → "main").
+	//
+	// Stamped by the design prologue with the user-picked base so the dev
 	// stage can stay in sync when the user re-uses the design stage but
 	// forgets to re-pick a base on the coding form, AND so the merge stage
-	// can target the PR at the chosen base. Empty for legacy rows; the merge
-	// stage then falls back to project.DefaultBranch.
+	// can target the PR at the chosen base. The coding stage writes it back
+	// too: when the user switches the base on the "start coding" form, the
+	// value that was actually used becomes the one every later stage reads,
+	// so the coding baseline and the push target can never drift apart.
+	// Empty for legacy rows; the merge stage then falls back to
+	// project.DefaultBranch.
 	BaseBranch string `json:"base_branch"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
@@ -428,7 +445,8 @@ type LaunchSpec struct {
 	BaseBranch    string `json:"base_branch,omitempty"`
 	SplitTasks    bool   `json:"split_tasks"`
 	// NoBranch toggles the "develop on base branch" mode (v0.6.x). true 时
-	// coding 阶段跳过 worktree 创建与 PR 创建,直接在 base 分支 commit/push。
+	// coding 阶段使用 detached HEAD 隔离 worktree(不创建任何分支),提交后直接
+	// 推送到 base 分支并跳过 PR 创建。
 	// 之前三个 dispatch 入口(dispatchImmediateCoding /
 	// dispatchImmediateDesignAndCoding / dispatchScheduled)都把这个字段 silent
 	// drop 了,导致前端 toggle 没生效。bool (非 *bool) 是有意为之:launch
