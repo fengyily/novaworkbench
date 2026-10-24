@@ -928,16 +928,17 @@ func (s *IssueMonitorService) ClaimDueLaunches(ctx context.Context, monitorID st
 		return nil, err
 	}
 	defer tx.Rollback()
-	// Tx has no Query method (the wrapper only exposes Exec/QueryRow), so
-	// we go through the embedded *sql.Tx with an explicit Rebind to keep
-	// the ?/$N rewriting portable across SQLite/MySQL/Postgres.
-	rows, err := tx.Tx.Query(
-		s.db.Rebind(
-			`SELECT id, monitor_id, requirement_id, mode, run_at, attempts, last_error
-			 FROM issue_monitor_pending_launches
-			 WHERE monitor_id = ? AND run_at <= ?
-			 ORDER BY run_at
-			 LIMIT ?`),
+	// tx.Query (not tx.Tx.Query) so the wrapper's Rebind AND its UTC
+	// normalization apply. Reaching through to the raw *sql.Tx used to skip
+	// normalizeArgs; the driver then rendered the bound time in LOCAL time
+	// while rows are stored as UTC, so on a +08:00 host this claimed launches
+	// that were still up to eight hours in the future.
+	rows, err := tx.Query(
+		`SELECT id, monitor_id, requirement_id, mode, run_at, attempts, last_error
+		 FROM issue_monitor_pending_launches
+		 WHERE monitor_id = ? AND run_at <= ?
+		 ORDER BY run_at
+		 LIMIT ?`,
 		monitorID, time.Now(), limit)
 	if err != nil {
 		return nil, err

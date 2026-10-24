@@ -324,6 +324,19 @@ func (t *Tx) QueryRow(query string, args ...any) *sql.Row {
 	return t.Tx.QueryRow(d.Rebind(query), d.normalizeArgs(args)...)
 }
 
+// Query is the multi-row counterpart of QueryRow. It exists so callers never
+// have to reach through to t.Tx.Query: doing that skips normalizeArgs, and
+// normalizeArgs is what converts time.Time to UTC. On SQLite the driver
+// renders a bound time.Time as a LOCAL-time string, so a raw-tx comparison
+// like `run_at <= ?` silently matched rows up to the UTC offset in the
+// FUTURE on any non-UTC host (issue_monitor's ClaimDueLaunches claimed
+// not-yet-due launches; TestPendingLaunches_RoundTrip was red on CST and
+// green on UTC CI, which is how it survived).
+func (t *Tx) Query(query string, args ...any) (*sql.Rows, error) {
+	d := &DB{dialect: t.dialect}
+	return t.Tx.Query(d.Rebind(query), d.normalizeArgs(args)...)
+}
+
 // Init opens the database described by cfg and runs schema migrations.
 func Init(cfg Config) (*DB, error) {
 	d := &DB{dialect: Dialect(cfg.Driver)}
