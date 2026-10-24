@@ -150,13 +150,19 @@ type remoteRunInput struct {
 	// idle timer resets on every NDJSON line. Populated by the helper
 	// (caller leaves it nil).
 	heartbeats chan<- struct{}
-	// SystemPrompt is forwarded to the worker as `systemPrompt`. Empty for
-	// the architect / coding callers — those carry the role persona inside
-	// the -p payload itself (see workerRunRequest's docstring), so leaving
-	// it zero keeps their behaviour byte-identical. The wiki caller passes
-	// its role persona here so the remote run gets the same
-	// --append-system-prompt the local run gets (plan mode appends rather
-	// than replaces; see agent-worker/server.mjs buildClaudeArgs).
+	// SystemPrompt is forwarded to the worker as `systemPrompt`.
+	// For the architect stage it carries the role persona (+ attachment
+	// manifest) — the local path passes the same string via
+	// llm.StreamOpts.SystemPrompt, so local and remote runs behave
+	// identically. Empty when the 「设计者上下文」toggle is off: the
+	// worker then emits no --append-system-prompt at all and the remote
+	// claude falls back to its own default system prompt.
+	// The coding callers carry their persona inside the -p payload
+	// (see workerRunRequest's docstring), so they leave this zero.
+	// The wiki caller passes its role persona here so the remote run gets
+	// the same role persona the local run gets; in plan mode the worker
+	// appends it via --append-system-prompt rather than replacing the
+	// CLI's plan-mode instructions.
 	SystemPrompt string
 	// DisallowedTools is forwarded to the worker as `disallowedTools`
 	// (→ claude --disallowedTools "A B C"). Empty for architect / coding.
@@ -2016,14 +2022,17 @@ func workerCodeStale(h workerHealth) bool {
 // process env, so we don't need to strip the ANTHROPIC_* keys — the worker
 // passes the map straight to the child.
 //
-// systemPrompt is forwarded verbatim from opts and is empty for the
-// architect / coding remote paths: their persona is passed in the prompt
-// itself (the -p payload includes the role system prompt as a preamble),
-// matching the previous CLI invocation's behavior. The wiki path DOES set
-// it (remoteRunInput.SystemPrompt) so the remote run gets the same role
-// persona the local run gets; in plan mode the worker appends it via
-// --append-system-prompt rather than replacing the CLI's plan-mode
-// instructions.
+// systemPrompt is forwarded verbatim from opts. The architect path DOES set
+// it (remoteRunInput.SystemPrompt): it carries the architect persona + the
+// attachment manifest, exactly the string the local path hands to
+// llm.StreamOpts.SystemPrompt, so local and remote plan-mode runs behave
+// identically. It is empty when the 「设计者上下文」toggle is off — the worker
+// then emits no --append-system-prompt at all and the remote claude falls
+// back to its own default system prompt (which carries the plan-mode
+// instructions). The coding path leaves it empty (that persona rides inside
+// the -p payload). The wiki path also sets it, and in plan mode the worker
+// appends it via --append-system-prompt rather than replacing the CLI's
+// plan-mode instructions.
 //
 // disallowedTools is likewise forwarded verbatim; nil (architect / coding)
 // is omitempty-dropped, so only the wiki path actually puts a

@@ -1570,6 +1570,13 @@ export interface DesignCodingImmediateReq {
   no_branch?: boolean;
   dev_mode?: '' | 'session' | 'design';
   sync_mode?: '' | 'local' | 'remote';
+  /**
+   * Designer-context toggle for the design stage. true = the architect
+   * persona is NOT injected (no --append-system-prompt at all).
+   * false / omitted = keep the role prompt (historical behaviour).
+   * Only affects the design stage.
+   */
+  skip_role_context?: boolean;
 }
 
 export interface DesignCodingImmediateResp {

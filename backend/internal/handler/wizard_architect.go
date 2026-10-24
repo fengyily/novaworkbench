@@ -116,6 +116,18 @@ type designRunParams struct {
 	WorkDir        string
 	Prompt         string
 	SystemPrompt   string
+	// SkipRoleContext — 「设计者上下文」开关的内部表示（取反式命名：
+	// 零值 false = 带上架构师 persona = 今天的默认行为）。
+	// true ⇒ system prompt 槽完全空置（不下发 --append-system-prompt），
+	// 方案设计改由「需求描述 + 附件清单」+ claude CLI 自带上下文驱动。
+	// 注意：这只摘掉 persona，模型 / claude_config 的解析仍走 roleConfig。
+	SkipRoleContext bool
+	// AttachManifest — 需求附件清单（## 📎 已附加文件）。
+	// 勾选态：拼在 persona 之后进 system prompt（与今天逐字节一致）。
+	// 关闭态：system prompt 槽空置，清单改挂任务提示词，否则附件失联。
+	// 远端执行时清单里是远端目录（resolveAttachDir 传了 agentServerID），
+	// 与文件实际同步到的位置一致。
+	AttachManifest string
 	Model          string // 已经应用请求体覆盖
 	ClaudeConfigID string
 	ReadKnowledge  bool
@@ -182,9 +194,14 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// Only honored when the requirement is in {designing, designed}
 		// — see prepareArchitectDesign's status whitelist.
 		Regenerate bool `json:"regenerate"`
+		// SkipRoleContext — 「设计者上下文」开关。false（缺省）= 带上架构师
+		// 角色提示词（历史行为）；true = 不注入任何 system prompt，只传入需求
+		// 描述 + 附件清单，采用 claude 自带上下文。
+		// 旧客户端 / curl / 定时任务不带该字段 ⇒ false ⇒ 行为不变。
+		SkipRoleContext bool `json:"skip_role_context"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch, body.Regenerate)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch, body.Regenerate, body.SkipRoleContext)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -352,7 +369,10 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 	// regenerate is reserved exclusively for the user-driven "重新生成"
 	// HTTP CTA in ArchitectDesign. Schedules treat every dispatch as a
 	// first-run / re-run, never a deliberate re-fork-from-scratch.
-	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch, false)
+	// skipRoleContext=false: the scheduler has no UI to toggle the
+	// 「设计者上下文」switch on, so it keeps the historical behavior
+	// (architect persona attached).
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch, false, false)
 	if af != nil {
 		return "", af
 	}
@@ -385,7 +405,14 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // for the user-driven "重新生成" HTTP body; scheduler / immediate /
 // import paths must pass false explicitly so the compiler catches a
 // forgotten wiring site (R1 in req_11e485759f583db8).
-func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string, regenerate bool) (*designRunParams, *store.Job, *apiFailure) {
+//
+// skipRoleContext — 「设计者上下文」开关。false（缺省）= 带上架构师 persona
+// （历史行为，本地路径逐字节不变）；true = system prompt 槽完全空置，不下发
+// --append-system-prompt，方案改由「需求描述 + 附件清单」+ claude 自带上下文
+// 驱动。取反式命名让零值 = 安全默认（= 今天的行为），旧调用方不带该字段 ⇒
+// false ⇒ 行为不变。模型 / claude_config 的解析不受此开关影响（仍走
+// roleConfig）。
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string, regenerate bool, skipRoleContext bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -637,7 +664,9 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// design_job_id across runs" invariant that the pre-move code maintained
 	// via the early-return on wdErr.
 
-	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
+	// rolePrompt = 架构师 persona；model / claudeConfigID 仍然来自同一个
+	// roleConfig —— 关掉 persona 不等于关掉角色上的模型与网关绑定。
+	rolePrompt, model, claudeConfigID := h.roleConfig("architect")
 	// Append the per-requirement attachment manifest so the architect sees
 	// the same files the analyst did and can ground the design on real
 	// evidence (logs / specs / repro screenshots). When the user picked an
@@ -646,8 +675,22 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// ~/.nova/attachments/<req_id>/ first; on sync failure the prompt
 	// silently falls back to local paths.
 	attachDir := h.resolveAttachDir(context.Background(), requirementID, agentServerID)
-	if m := h.attachManifestFor(requirementID, attachDir); m != "" {
-		systemPrompt = systemPrompt + "\n\n" + m
+	manifest := h.attachManifestFor(requirementID, attachDir)
+
+	// SystemPrompt 的组装：
+	//   skipRoleContext=false（默认）→ persona + 清单，与今天逐字节一致
+	//                                （本地路径零回归）；
+	//   skipRoleContext=true          → 空串：streamArgs 会完全不下发
+	//                                   --append-system-prompt，claude 用自己的
+	//                                   默认 system prompt（含 plan-mode 内建
+	//                                   指令）；清单改由任务提示词承载，否则
+	//                                   附件会失联。
+	systemPrompt := rolePrompt
+	if manifest != "" {
+		systemPrompt = systemPrompt + "\n\n" + manifest
+	}
+	if skipRoleContext {
+		systemPrompt = ""
 	}
 	// Per-request model override (highest precedence); empty means role default.
 	if modelOverride != "" {
@@ -681,6 +724,8 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		WorkDir:        "",
 		Prompt:         "",
 		SystemPrompt:   systemPrompt,
+		SkipRoleContext: skipRoleContext,
+		AttachManifest:  manifest,
 		Model:          model,
 		ClaudeConfigID: claudeConfigID,
 		ReadKnowledge:  readKnowledge,
@@ -852,7 +897,22 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// 需求标题始终作为锚点：resume 分支依赖「续接的会话已携带需求」这一假设，
 	// 一旦该假设不成立（会话失效 / 被清理 / 上下文被压缩），模型就完全看不到
 	// 任务内容。带上标题的成本极低，可避免该假设失效时提示词变成空壳。
+	//
+	// 「设计者上下文」关闭时的两块需求物料：
+	//
+	// ① descBlock —— resume/fork 分支今天只带需求标题，正文靠「续接的分析师
+	//    会话已携带需求」这条假设；persona 缺席后该假设不再可靠，需求描述
+	//    必须显式出现在任务提示词里。
+	// ② 附件清单 —— system prompt 槽此时是空的，附件清单必须跟着需求物料
+	//    一起挪进任务提示词，否则 Claude 看不到用户上传的日志 / 截图。
+	//    清单是自包含的 markdown 块（service/attachment.go），作为任务提示词的
+	//    前缀读起来完全正常（与知识库块 / Skills 块同类）。
+	descBlock := ""
+	if p.SkipRoleContext && p.Req.Description != "" {
+		descBlock = "## 需求描述\n" + p.Req.Description + "\n\n"
+	}
 	prompt := "## 需求标题\n" + p.Req.Title + "\n\n" +
+		descBlock +
 		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、数据模型/数据库变更、实现风险及应对。"
@@ -865,20 +925,29 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
 			"方案应涵盖：整体实现思路、需要新增或修改的文件、数据模型/数据库变更、实现风险及应对。" +
 			"请先复述你对需求的理解，再给出方案。"
-		// Context-compression handoff (fresh-session path only): when the
-		// design stage was previously compressed, the requirement carries a
-		// Chinese summary we want the architect to see as scene-setting
-		// context. We only inject on the fresh-session path because the
-		// resume path (skipAnalysis==false) inherits the analyst conversation
-		// natively via --resume, where the prior design summary isn't
-		// applicable. The prefix also goes BEFORE the rest of the prompt so
-		// the model treats it as ground truth rather than as a post-hoc
-		// addendum, and the parenthetical disclaimer discourages the model
-		// from acting on it as if it were a fresh instruction.
-		if p.Req.DesignContextSummary != "" {
-			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-				p.Req.DesignContextSummary + "\n\n" + prompt
-		}
+	}
+	// 附件清单前缀 —— 只在关闭态出现（勾选态它在 system prompt 里）。
+	// 勾选态（默认）此块是 no-op，提示词与改动前逐字节一致。
+	if p.SkipRoleContext && p.AttachManifest != "" {
+		prompt = p.AttachManifest + "\n\n" + prompt
+	}
+	// Context-compression handoff (fresh-session path only): when the
+	// design stage was previously compressed, the requirement carries a
+	// Chinese summary we want the architect to see as scene-setting
+	// context. We only inject on the fresh-session path because the
+	// resume path (skipAnalysis==false) inherits the analyst conversation
+	// natively via --resume, where the prior design summary isn't
+	// applicable. The prefix also goes BEFORE the rest of the prompt so
+	// the model treats it as ground truth rather than as a post-hoc
+	// addendum, and the parenthetical disclaimer discourages the model
+	// from acting on it as if it were a fresh instruction.
+	//
+	// Moved out of the skip-analysis branch so it stays the OUTERMOST
+	// prefix — the summary is scene-setting and must precede both the
+	// attachment manifest and the requirement body.
+	if p.SkipAnalysis && p.SourceSID == "" && p.Req.DesignContextSummary != "" {
+		prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+			p.Req.DesignContextSummary + "\n\n" + prompt
 	}
 	// Sub-requirement: append the master-requirement context (its settled
 	// description / plan / attachment manifest) plus the 「主需求关联上下文」
@@ -1007,6 +1076,12 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
 				SyncMode:       p.SyncMode,
+				// 「设计者上下文」：把架构师 persona（+ 附件清单）透传给远端
+				// claude，与本地路径对齐。此前远端分支不设这个字段 ⇒ 远端既
+				// 没有 persona 也没有附件清单（附件传上去了却从没告诉模型）。
+				// 空串（关闭态）时 worker 不下发 --append-system-prompt，
+				// 远端 claude 用自己的默认 system prompt —— 与本地一致。
+				SystemPrompt: p.SystemPrompt,
 				// Forward the user-picked base branch so the remote worker
 				// anchors its worktree at origin/<base> and the hard sync
 				// gate (inside prepareRemoteAgentRun's fallback chain) runs

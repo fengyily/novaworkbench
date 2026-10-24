@@ -182,9 +182,9 @@ func TestPrepareDesignWorkspace_GateFailure(t *testing.T) {
 	}
 
 	p := &designRunParams{
-		Req:           req,
-		ProjectPath:   work,
-		BaseBranch:    "main",
+		Req:         req,
+		ProjectPath: work,
+		BaseBranch:  "main",
 		// SourceSID + SkipAnalysis both false → resume path; the prompt
 		// branch matters here only in that it must NOT run on failure.
 		SourceSID:    "somesid",
@@ -315,9 +315,9 @@ func TestPrepareDesignWorkspace_SuccessStampsBaseline(t *testing.T) {
 	}
 
 	p := &designRunParams{
-		Req:           req,
-		ProjectPath:   work,
-		BaseBranch:    baseBranch,
+		Req:         req,
+		ProjectPath: work,
+		BaseBranch:  baseBranch,
 		// resume path (analyst session present) — picks the simpler prompt
 		// branch so the test doesn't need to fabricate a docBlock.
 		SourceSID:    "analyst-sid",
@@ -462,7 +462,7 @@ func TestRegenerateForksFromAnalystSession(t *testing.T) {
 	// service so the assertions below are still meaningful even when
 	// af != nil.
 	_, _, _ = h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", true,
+		context.Background(), reqID, "", "", "", false, "", "", true, false,
 	)
 
 	// design_revisions must contain ONE new row (frozen from the prior
@@ -543,7 +543,7 @@ func TestNonRegenerateStillResumesDesignSession(t *testing.T) {
 	// untouched (the architect hasn't even run yet — the test fails at
 	// the worktree sync step, not at the design persistence step).
 	_, _, _ = h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", false,
+		context.Background(), reqID, "", "", "", false, "", "", false, false,
 	)
 
 	var nRev int
@@ -608,7 +608,7 @@ func TestRegenerateRejectsWrongStatus(t *testing.T) {
 				t.Fatalf("seed status: %v", err)
 			}
 			_, _, af := h.prepareArchitectDesign(
-				context.Background(), reqID, "", "", "", false, "", "", true,
+				context.Background(), reqID, "", "", "", false, "", "", true, false,
 			)
 			got := af != nil
 			if got != c.want {
@@ -637,7 +637,7 @@ func TestRegenerateAllowsPostDesignStatus(t *testing.T) {
 				t.Fatalf("seed status: %v", err)
 			}
 			_, _, af := h.prepareArchitectDesign(
-				context.Background(), reqID, "", "", "", false, "", "", true,
+				context.Background(), reqID, "", "", "", false, "", "", true, false,
 			)
 			if af != nil && af.Code == "INVALID_STATUS" {
 				t.Fatalf("regenerate on allowed status=%q must NOT short-circuit on whitelist: %v", status, af)
@@ -733,7 +733,7 @@ func TestArchitectDesignRejectsLiveApplyJob(t *testing.T) {
 	}
 
 	_, _, af := h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", true,
+		context.Background(), reqID, "", "", "", false, "", "", true, false,
 	)
 	if af == nil {
 		t.Fatalf("prepareArchitectDesign accepted regenerate while apply_job alive — must reject")
@@ -748,7 +748,7 @@ func TestArchitectDesignRejectsLiveApplyJob(t *testing.T) {
 		t.Fatalf("clear apply_job_id: %v", uerr)
 	}
 	_, _, af2 := h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", true,
+		context.Background(), reqID, "", "", "", false, "", "", true, false,
 	)
 	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
 		t.Fatalf("cleared apply_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
@@ -772,7 +772,7 @@ func TestArchitectDesignRejectsLiveCodingJob(t *testing.T) {
 	}
 
 	_, _, af := h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", true,
+		context.Background(), reqID, "", "", "", false, "", "", true, false,
 	)
 	if af == nil {
 		t.Fatalf("prepareArchitectDesign accepted regenerate while coding job alive — must reject")
@@ -787,7 +787,7 @@ func TestArchitectDesignRejectsLiveCodingJob(t *testing.T) {
 		t.Fatalf("clear coding_job_id: %v", uerr)
 	}
 	_, _, af2 := h.prepareArchitectDesign(
-		context.Background(), reqID, "", "", "", false, "", "", true,
+		context.Background(), reqID, "", "", "", false, "", "", true, false,
 	)
 	if af2 != nil && af2.Code == "DESIGN_JOB_ACTIVE" {
 		t.Fatalf("cleared coding_job still triggers DESIGN_JOB_ACTIVE: %v", af2)
@@ -949,13 +949,13 @@ func TestArchitectRemoteMissingSessionIDClearsDesignSession(t *testing.T) {
 		t.Fatalf("reload req: %v", err)
 	}
 	p := &designRunParams{
-		Req:           req,
-		NewDesignSID:  "sid-pre-minted", // exactly the row currently on disk
-		SourceSID:     "sid-pre-minted", // simulating a re-run that resumed it
-		Fork:          false,
-		SkipAnalysis:  false,
+		Req:            req,
+		NewDesignSID:   "sid-pre-minted", // exactly the row currently on disk
+		SourceSID:      "sid-pre-minted", // simulating a re-run that resumed it
+		Fork:           false,
+		SkipAnalysis:   false,
 		ClaudeConfigID: "",
-		Model:         "sonnet",
+		Model:          "sonnet",
 	}
 
 	// Remote-CLI-silent-exit shape: no session_id, no error string, no
@@ -1038,9 +1038,9 @@ func TestArchitectRemoteStaleSessionHasSideTargetedMessage(t *testing.T) {
 
 			h.finalizeArchitectRun(
 				claudeStreamOutcome{
-					sessionID:            "sid-stale",
-					staleSession:         true,
-					errMsg:               "",
+					sessionID:              "sid-stale",
+					staleSession:           true,
+					errMsg:                 "",
 					SessionFileMissingSide: c.side,
 				},
 				p, job, nil,
@@ -1126,9 +1126,9 @@ func TestArchitectRemoteStaleSessionLocalSideStillReportsMissing(t *testing.T) {
 
 	h.finalizeArchitectRun(
 		claudeStreamOutcome{
-			sessionID:             "sid-stale-local",
-			staleSession:          true,
-			errMsg:                "",
+			sessionID:              "sid-stale-local",
+			staleSession:           true,
+			errMsg:                 "",
 			SessionFileMissingSide: "local",
 		},
 		p, job, nil,
@@ -1353,7 +1353,7 @@ func TestImportDesign_RejectsBusyJob(t *testing.T) {
 
 // TestImportDesign_RejectsEmptyContent — case 4.
 //
-// An empty string would otherwise land in design_docs='' and make the page
+// An empty string would otherwise land in design_docs=” and make the page
 // render a blank designer pane. The handler's trim+empty check (and the
 // service's defense-in-depth duplicate) both reject.
 func TestImportDesign_RejectsEmptyContent(t *testing.T) {
@@ -1458,7 +1458,7 @@ func TestImportDesignFile_AcceptsMdTxt_RejectsPdf_RejectsOversize(t *testing.T) 
 			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 		var resp struct {
-			Success bool   `json:"success"`
+			Success bool `json:"success"`
 			Data    struct {
 				Content string `json:"content"`
 			} `json:"data"`
@@ -1529,4 +1529,304 @@ func buildMultipart(t *testing.T, filename string, content []byte) (*bytes.Buffe
 		t.Fatalf("close multipart: %v", err)
 	}
 	return body, w.FormDataContentType()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 「设计者上下文」显式开关（req_8cfaec1a6c9b0691）
+//
+// 方案设计阶段把架构师 persona（+ 附件清单）通过 --append-system-prompt
+// 注入 claude。这个注入此前是隐式的 —— 用户在 UI 上看不到、也关不掉 —— 而且
+// 本地与 Agent Server 两条路径行为不一致（远端分支根本没给
+// remoteRunInput.SystemPrompt 赋值 ⇒ 远端既无 persona 也无附件清单）。
+//
+// 开关语义：
+//   勾选（默认）= persona + 清单进 system prompt。本地路径与改动前逐字节一致；
+//                远端被有意对齐到本地（顺带修掉「附件传上去了却从没告诉模型」）。
+//   不勾选       = system prompt 槽完全空置（连 --append-system-prompt flag
+//                 都不下发），需求物料（描述 + 附件清单）改走任务提示词，
+//                 claude 用它自带的上下文（含 plan-mode 内建指令）。
+//
+// 下面几个用例分别钉住：prepareArchitectDesign 的两态产出、
+// prepareDesignWorkspace 的物料归位、以及远端分支的 SystemPrompt 透传
+// （最后这条正是「远端丢 persona」的根因，必须防回归）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// newRoleContextTestEnv wires the minimum handler graph the 「设计者上下文」
+// code paths touch.
+//
+// The role / claude-config services are NOT optional here: roleConfig only
+// guards `h.roleSvc == nil` — with roleSvc wired but claudeCfg missing,
+// ResolveRoleConfig would nil-deref. Both are seeded with SeedDefaults so the
+// 'architect' role carries its default persona.
+//
+// The requirement is seeded with a description AND a design_session_id:
+// the latter makes prepareArchitectDesign take the RESUME branch
+// (sourceSID = design_session_id, no fork ⇒ no anchored-fork gate), which is
+// the branch whose prompt today carries only the title — exactly the branch
+// that needs the description moved in when the toggle is off.
+//
+// One attachment is seeded so the manifest is non-empty: the manifest is the
+// material that must move from the system prompt into the task prompt when
+// the toggle is off.
+func newRoleContextTestEnv(t *testing.T) (*db.DB, string, *WizardHandler) {
+	t.Helper()
+	dir, _ := os.MkdirTemp("", "role-ctx-")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reqID := seedRequirementForSchedule(t, d)
+	if _, err := d.Exec(
+		`UPDATE requirements SET description = ?, design_session_id = ? WHERE id = ?`,
+		"用户希望登录页支持短信验证码登录。", "sid-design", reqID,
+	); err != nil {
+		t.Fatalf("seed description / design_session_id: %v", err)
+	}
+	if _, err := d.Exec(
+		`INSERT INTO requirement_attachments (id, requirement_id, filename, stored_path, mime_type, size_bytes, sha256, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"att_role_ctx", reqID, "spec.md", "spec.md", "text/markdown", 42, "sha-role-ctx", "登录流程规格",
+	); err != nil {
+		t.Fatalf("seed attachment: %v", err)
+	}
+
+	roleSvc := service.NewRoleService(d)
+	if err := roleSvc.SeedDefaults(); err != nil {
+		t.Fatalf("seed roles: %v", err)
+	}
+	h := &WizardHandler{
+		db:           d,
+		reqSvc:       service.NewRequirementService(d, nil),
+		projectSvc:   service.NewProjectService(d, nil, nil),
+		settingSvc:   service.NewSettingService(d),
+		jobs:         store.NewJobStore(8),
+		designRevSvc: service.NewDesignRevisionService(d),
+		roleSvc:      roleSvc,
+		claudeCfg:    service.NewClaudeConfigService(d),
+		attachSvc:    service.NewAttachmentService(d),
+	}
+	return d, reqID, h
+}
+
+// seedDesignWorkspaceGit points the seeded project at a real on-disk git
+// checkout with a reachable origin so prepareDesignWorkspace's hard-sync gate
+// and worktree anchoring succeed. Mirrors the fixture used by
+// TestPrepareDesignWorkspace_SuccessStampsBaseline.
+//
+// Each call gets its own upstream + clone (t.TempDir() is unique per call),
+// and the worktree root is derived from the project path — so two calls in
+// the same test never collide on the shared worktree directory.
+func seedDesignWorkspaceGit(t *testing.T, d *db.DB) {
+	t.Helper()
+	const projID = "proj_seed_sched" // matches seedRequirementForSchedule's project id
+	const baseBranch = "main"
+	upstreamDir := filepath.Join(t.TempDir(), "origin.git")
+	mustGit(t, "", "git", "init", "--bare", "--initial-branch="+baseBranch, upstreamDir)
+	seed := filepath.Join(t.TempDir(), "seed")
+	mustGit(t, "", "git", "clone", upstreamDir, seed)
+	mustGit(t, seed, "git", "config", "user.email", "test@nova")
+	mustGit(t, seed, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("init"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, seed, "git", "add", "README.md")
+	mustGit(t, seed, "git", "commit", "-m", "init")
+	mustGit(t, seed, "git", "push", "origin", "HEAD:"+baseBranch)
+
+	work := filepath.Join(t.TempDir(), "work")
+	mustGit(t, "", "git", "clone", upstreamDir, work)
+	mustGit(t, work, "git", "config", "user.email", "test@nova")
+	mustGit(t, work, "git", "config", "user.name", "Test")
+	if _, err := d.Exec(
+		`UPDATE projects SET local_path = ?, remote_url = ? WHERE id = ?`,
+		work, upstreamDir, projID); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+}
+
+// TestPrepareArchitectDesign_SkipRoleContextEmptiesSystemPrompt pins the
+// OFF state of the toggle: the system prompt slot must be COMPLETELY empty
+// — not "persona without the manifest", but empty — so llm.streamArgs omits
+// the --append-system-prompt flag altogether and claude falls back to its own
+// default system prompt (which is what carries the plan-mode instructions).
+//
+// The attachment manifest must survive the move: it is requirement material
+// (the user's uploaded logs / specs), not role prompt, so it is carried in
+// designRunParams.AttachManifest and re-homed into the task prompt.
+func TestPrepareArchitectDesign_SkipRoleContextEmptiesSystemPrompt(t *testing.T) {
+	_, reqID, h := newRoleContextTestEnv(t)
+
+	p, _, af := h.prepareArchitectDesign(context.Background(), reqID, "", "", "", false, "", "main", false, true)
+	if af != nil {
+		t.Fatalf("prepareArchitectDesign failed: %v", af)
+	}
+	if !p.SkipRoleContext {
+		t.Fatalf("SkipRoleContext = false, want true")
+	}
+	if p.SystemPrompt != "" {
+		t.Fatalf("SystemPrompt = %q, want \"\" (toggle off ⇒ no --append-system-prompt at all)", p.SystemPrompt)
+	}
+	if p.AttachManifest == "" {
+		t.Fatalf("AttachManifest = \"\", want the manifest so it can move into the task prompt")
+	}
+	if !strings.Contains(p.AttachManifest, "spec.md") {
+		t.Fatalf("AttachManifest = %q, want it to mention the seeded attachment", p.AttachManifest)
+	}
+}
+
+// TestPrepareArchitectDesign_KeepsPersonaByDefault pins the ON state: the
+// default (the toggle omitted from the request body, i.e. every legacy
+// caller / curl / scheduled task) must keep today's behavior byte-for-byte —
+// persona AND manifest both in the system prompt.
+//
+// The zero value of the internal field has to be the SAFE side: a caller
+// that forgets to wire the flag must never silently lose the persona.
+func TestPrepareArchitectDesign_KeepsPersonaByDefault(t *testing.T) {
+	_, reqID, h := newRoleContextTestEnv(t)
+
+	p, _, af := h.prepareArchitectDesign(context.Background(), reqID, "", "", "", false, "", "main", false, false)
+	if af != nil {
+		t.Fatalf("prepareArchitectDesign failed: %v", af)
+	}
+	if p.SkipRoleContext {
+		t.Fatalf("SkipRoleContext = true, want false (default = keep the persona)")
+	}
+	if !strings.Contains(p.SystemPrompt, "资深软件架构师") {
+		t.Fatalf("SystemPrompt must carry the architect persona by default, got %q", p.SystemPrompt)
+	}
+	if !strings.Contains(p.SystemPrompt, "spec.md") {
+		t.Fatalf("SystemPrompt must carry the attachment manifest by default, got %q", p.SystemPrompt)
+	}
+}
+
+// TestPrepareDesignWorkspace_UncheckedMovesMaterialIntoPrompt pins the
+// end-to-end contract of the OFF state: the requirement description AND the
+// attachment manifest must be present in the task prompt (which local and
+// Agent-server runs share), because the system prompt slot is empty.
+//
+// The default state must NOT contain either — there the manifest lives in
+// the system prompt and the description rides on the resumed analyst
+// conversation. Duplicating them into the task prompt would change the
+// default path's prompt bytes.
+func TestPrepareDesignWorkspace_UncheckedMovesMaterialIntoPrompt(t *testing.T) {
+	// ── OFF: system prompt empty, material moves into the task prompt ──
+	dOff, reqOff, hOff := newRoleContextTestEnv(t)
+	seedDesignWorkspaceGit(t, dOff)
+
+	pOff, jobOff, af := hOff.prepareArchitectDesign(context.Background(), reqOff, "", "", "", false, "", "main", false, true)
+	if af != nil {
+		t.Fatalf("prepareArchitectDesign (off) failed: %v", af)
+	}
+	if !hOff.prepareDesignWorkspace(pOff, jobOff) {
+		lines, status, _ := jobOff.Snapshot()
+		t.Fatalf("prepareDesignWorkspace (off) failed (status=%s, lines=%+v)", status, lines)
+	}
+	if !strings.Contains(pOff.Prompt, "## 需求描述") {
+		t.Fatalf("toggle off: task prompt must carry the requirement description, got:\n%s", pOff.Prompt)
+	}
+	if !strings.Contains(pOff.Prompt, "短信验证码登录") {
+		t.Fatalf("toggle off: task prompt must carry the requirement description body, got:\n%s", pOff.Prompt)
+	}
+	if !strings.Contains(pOff.Prompt, "spec.md") {
+		t.Fatalf("toggle off: task prompt must carry the attachment manifest, got:\n%s", pOff.Prompt)
+	}
+
+	// ── ON: system prompt carries both, task prompt carries neither ──
+	dOn, reqOn, hOn := newRoleContextTestEnv(t)
+	seedDesignWorkspaceGit(t, dOn)
+
+	pOn, jobOn, af := hOn.prepareArchitectDesign(context.Background(), reqOn, "", "", "", false, "", "main", false, false)
+	if af != nil {
+		t.Fatalf("prepareArchitectDesign (on) failed: %v", af)
+	}
+	if !hOn.prepareDesignWorkspace(pOn, jobOn) {
+		lines, status, _ := jobOn.Snapshot()
+		t.Fatalf("prepareDesignWorkspace (on) failed (status=%s, lines=%+v)", status, lines)
+	}
+	if strings.Contains(pOn.Prompt, "## 需求描述") {
+		t.Fatalf("toggle on: task prompt must NOT duplicate the requirement description, got:\n%s", pOn.Prompt)
+	}
+	if strings.Contains(pOn.Prompt, "spec.md") {
+		t.Fatalf("toggle on: task prompt must NOT duplicate the attachment manifest, got:\n%s", pOn.Prompt)
+	}
+	if !strings.Contains(pOn.Prompt, "## 需求标题") {
+		t.Fatalf("toggle on: task prompt must still carry the requirement title, got:\n%s", pOn.Prompt)
+	}
+}
+
+// TestArchitectRemoteCallSiteForwardsSystemPrompt is a source-level wiring
+// guard: the remote architect branch MUST forward p.SystemPrompt into
+// remoteRunInput.SystemPrompt.
+//
+// This is the exact spot where the remote path used to drop the architect
+// persona AND the attachment manifest — the files were SFTP'd to the agent
+// host but the prompt never told the model they existed. The failure mode
+// is invisible to the compiler (both sides are strings), so we assert the
+// wiring directly against the AST, the same way the RC-1 guard above does
+// for sourceSID.
+//
+// If this test fails after a refactor: check that the remoteRunInput literal
+// in execArchitectDesign still carries SystemPrompt.
+func TestArchitectRemoteCallSiteForwardsSystemPrompt(t *testing.T) {
+	const srcFile = "wizard_architect.go"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, srcFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", srcFile, err)
+	}
+
+	type literal struct {
+		pos    token.Position
+		fields map[string]string
+	}
+	var literals []literal
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		ident, ok := cl.Type.(*ast.Ident)
+		if !ok || ident.Name != "remoteRunInput" {
+			return true
+		}
+		l := literal{pos: fset.Position(cl.Pos()), fields: map[string]string{}}
+		for _, elt := range cl.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			l.fields[key.Name] = renderExpr(kv.Value)
+		}
+		literals = append(literals, l)
+		return true
+	})
+
+	if len(literals) == 0 {
+		t.Fatalf("no remoteRunInput composite literal found in %s — "+
+			"if execArchitectDesign was refactored, update this guard to match", srcFile)
+	}
+
+	for _, l := range literals {
+		got, present := l.fields["SystemPrompt"]
+		if !present {
+			t.Fatalf("%s: remoteRunInput literal at %s has no SystemPrompt field — "+
+				"the architect persona (+ attachment manifest) would never reach the remote claude",
+				srcFile, l.pos)
+		}
+		if got != "p.SystemPrompt" {
+			t.Fatalf("%s: remoteRunInput{SystemPrompt: %s} at %s — regression.\n"+
+				"the remote architect branch must forward the SAME string the local branch "+
+				"passes via llm.StreamOpts.SystemPrompt, so local and remote runs behave "+
+				"identically for the 「设计者上下文」toggle (empty string = no "+
+				"--append-system-prompt at all).",
+				srcFile, got, l.pos)
+		}
+	}
 }

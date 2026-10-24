@@ -87,6 +87,11 @@ type designCodingImmediateReq struct {
 	AutoCreatePR        *bool  `json:"auto_create_pr"`
 	DevMode             string `json:"dev_mode"`
 	SyncMode            string `json:"sync_mode"`
+	// SkipRoleContext — 「设计者上下文」开关（仅作用于 design 阶段）。
+	// false/缺省 = 带上架构师 persona（历史行为）；true = 不注入任何 system
+	// prompt，只传需求描述 + 附件清单 + claude 自带上下文。
+	// 缺省字段 ⇒ LaunchSpec 等旧调用点行为不变。
+	SkipRoleContext bool `json:"skip_role_context"`
 }
 
 // RunImmediateDesignAndCoding is the HTTP entry point that chains the
@@ -183,7 +188,7 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// both treat it as "start from where the requirement is"), so it must
 	// never widen the session decision. The user-driven "重新生成" CTA
 	// lives in ArchitectDesign's HTTP body alone.
-	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, designBase, false)
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, designBase, false, body.SkipRoleContext)
 	if af != nil {
 		return "", af
 	}
@@ -230,6 +235,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 		body.SyncMode,
 		designBase,
 		false,
+		body.SkipRoleContext,
 	)
 	if af != nil {
 		return "", af
