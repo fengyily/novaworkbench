@@ -922,13 +922,16 @@ func (r *SubTaskRunner) Run(
 	workDir := ""
 	switch {
 	case req.NoBranch:
-		// Designed to run on the base branch in the main checkout. Make the
-		// blast radius explicit in the log: everything here touches the real
-		// repository (see the 2026-10-24 incident).
-		workDir = projPath
-		if workDir != "" {
+		// No-branch requirements develop on a DETACHED HEAD worktree since
+		// the 2026-10-24 no-branch isolation rework (see worktree_base.go's
+		// resolveNoBranchWorkDir), so the canonical case is still an isolated
+		// directory. Only rows written by an older build have no worktree and
+		// genuinely run in the project checkout — those get an explicit
+		// warning, because that directory is the user's real repository.
+		workDir = resolveNoBranchWorkDir(req, projPath)
+		if workDir == projPath && workDir != "" {
 			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf(
-				"⚠️ 本需求为「不创建分支」模式：子任务直接运行在项目主目录 %q（不是隔离 worktree）。此目录是真实仓库，任何删除/重置操作都会影响未提交的改动。", workDir)})
+				"⚠️ 本需求为「不创建分支」模式且没有隔离 worktree（旧版本遗留行）：子任务将直接运行在项目主目录 %q。此目录是真实仓库，任何删除/重置操作都会影响未提交的改动。", workDir)})
 		}
 	case req.WorktreePath != "":
 		// Drift guard: the persisted worktree_path must match the path for

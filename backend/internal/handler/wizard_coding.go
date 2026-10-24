@@ -1701,12 +1701,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 // restoreNoBranchBase puts a no-branch requirement's checkout back on its base
 // branch after the coding agent finishes.
 //
-// Why this is needed: the no-branch prompt tells the agent to work directly on
-// <base>, but nothing enforces it. On 2026-10-24 the developer agent created
-// `fix/req_e07a00ed55b2be73`, pushed it, and left HEAD there. The subsequent
-// 「推送并发起 PR」 path (RunPushBaseShellJob → execPushBaseShell) has a guard
-// requiring HEAD == base and failed 38ms in — so the user's own push button
-// silently did nothing, and they had to hand-create a sub-task to recover.
+// Scope: LEGACY rows only. New no-branch runs develop in a detached HEAD
+// worktree (worktree_base.go), so the project checkout is never touched and
+// this is a no-op. Rows written by an older build developed straight in the
+// checkout, and there the agent can leave HEAD on a branch of its own making —
+// on 2026-10-24 it created `fix/req_e07a00ed55b2be73`, pushed it and stayed on
+// it, after which 「推送并发起 PR」 failed in 38ms on the HEAD == base guard.
+// The push path has since learned to push HEAD:refs/heads/<base> and no
+// longer requires HEAD == base, so this is a convenience, not a dependency.
 //
 // Safety rules (best-effort, never fails the job):
 //   - Skip when HEAD is already base (the common case).
