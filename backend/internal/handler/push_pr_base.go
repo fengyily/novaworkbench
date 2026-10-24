@@ -8,7 +8,9 @@
 // chose to develop on base, so the PR head==base rejection is the whole point.
 //
 // Differences from push_pr_shell.go:
-//   - dev == base (no dev branch; we operate on the project's base branch)
+//   - dev == base (no dev branch; we operate on the requirement's designated
+//     base branch — requirements.base_branch, with the project's
+//     default_branch only as the last-resort fallback)
 //   - no "merge origin/base into dev" step (already on base)
 //   - no gh/glab/tea PR step
 //   - source tag = SubTaskSourcePushBase (so SubTaskPanel / merge stage can
@@ -86,16 +88,18 @@ func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, rem
 		return existing.JobID, existing.ID, nil
 	}
 
-	// Resolve the local workdir: the project's main checkout. WorktreePath
-	// is empty for no-branch rows so devBranchAndDir collapses to the project
-	// checkout (currentBranch == base by construction — StartCoding /
-	// AdjustCoding / ContinueCoding all checkout base before claude spawns).
+	// Resolve the local workdir: the requirement's isolated worktree. A
+	// no-branch requirement now develops in a DETACHED HEAD worktree parked
+	// on the base line, so the commit lives there and the push has to happen
+	// from there too. Rows written by an older build (which developed
+	// straight in the project checkout) have an empty worktree_path and fall
+	// back to the project directory — their behaviour is unchanged.
 	proj, perr := r.projectSvc.Get(reqRow.ProjectID)
 	if perr != nil || proj == nil {
 		log.Printf("[push-base-shell] %s: project load failed (%v), skip", reqRow.ID, perr)
 		return "", "", nil
 	}
-	dir := proj.LocalPath
+	dir := resolveNoBranchWorkDir(reqRow, proj.LocalPath)
 	if dir == "" {
 		log.Printf("[push-base-shell] %s: no local workdir, skip", reqRow.ID)
 		return "", "", nil
@@ -184,16 +188,22 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送 base 流程启动（no-branch 模式, base=" + base + "）"})
 
-	// ── Sanity: refuse to run if the project's main checkout isn't actually
-	// on the base branch anymore (an AdjustCoding round-trip could leave the
-	// row with NoBranch=true but the working dir detached). The branch
-	// checkout at StartCoding / AdjustCoding / ContinueCoding normally handles
-	// this; the check here is a belt-and-suspenders guard for re-dispatched
-	// jobs after a restart.
-	if cur := currentBranch(dir); cur != "" && cur != "HEAD" && cur != base {
+	// ── Sanity: refuse to run if the working dir isn't actually on the base
+	// branch anymore (an AdjustCoding round-trip could leave the row with
+	// NoBranch=true but the working dir on some other branch). A DETACHED
+	// HEAD is the normal shape of the no-branch mode now — the isolated
+	// worktree sits on the base line with no branch checked out — so it is
+	// allowed through.
+	cur := currentBranch(dir)
+	if cur != "" && cur != "HEAD" && cur != base {
 		job.Append(store.LogLine{Type: "error", Content: "❌ 当前 HEAD 在分支 " + cur + ",cur != base=" + base + ",拒绝推送。请先切回 base 分支后重试。"})
 		job.Finish(1, store.JobError)
 		return
+	}
+	detached := cur == "HEAD"
+	if detached {
+		job.Append(store.LogLine{Type: "message",
+			Content: "🌿 从隔离 worktree 的 detached HEAD 直推 base: " + base + "（不新建分支）"})
 	}
 
 	credEnv, credCleanup := r.assembleShellJobCredEnv(reqRow, dir, projectPath, job)
@@ -241,10 +251,10 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ git fetch origin " + base + " 跳过: " + ferr.Error()})
 	}
 
-	// ── Step 3 (conditional): push base to origin. No PR step (no-branch
-	// path always skips PR creation; gh/glab/tea reject head==base). When
-	// autoPushRemote=false the user opted out of pushing — bail here so the
-	// commit sits locally until they push manually.
+	// ── Step 3: commit-only bail. No PR step (no-branch path always skips
+	// PR creation; gh/glab/tea reject head==base). When autoPushRemote=false
+	// the user opted out of pushing — bail here so the commit sits locally
+	// until they push manually.
 	if !autoPushRemote {
 		job.Append(store.LogLine{Type: "result", Content: "✅ 已本地提交至 base 分支 " + base + "（未推送 — 在 start-coding 弹窗里关掉了 auto_push_remote）"})
 		job.Append(store.LogLine{Type: "done", Content: "✅ commit-only 流程完成"})
@@ -252,15 +262,42 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		log.Printf("[push-base-shell] job %s finished for %s (autoPushRemote=false, commit-only)", job.ID, reqRow.ID)
 		return
 	}
-	if _, perr := git("push", "-u", "origin", base); perr != nil {
-		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 首次 push base 失败，尝试 pull --rebase 后重推: " + perr.Error()})
-		if _, rerr := git("pull", "--rebase", "origin", base); rerr != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ git pull --rebase 失败: " + rerr.Error()})
-			job.Finish(1, store.JobError)
-			return
+	// ── Step 4 (conditional): push the current HEAD onto the base branch.
+	//
+	// A detached HEAD cannot carry an upstream, so the refspec form
+	// (HEAD:refs/heads/<base>) is used and `-u` is omitted. No branch is
+	// created on either side — only refs/heads/<base> moves forward.
+	pushArgs := pushBaseRefspecArgs(detached, base)
+	if _, perr := git(pushArgs...); perr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 首次 push base 失败，尝试 rebase 后重推: " + perr.Error()})
+		if detached {
+			// `git pull --rebase` has no clear meaning on a detached HEAD, so
+			// fetch + rebase explicitly (git supports rebase on a detached
+			// HEAD). Never force-push — a rejected push is the user's cue to
+			// resolve the conflict themselves.
+			if _, ferr := git("fetch", "origin", base); ferr != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ git fetch origin " + base + " 失败: " + ferr.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
+			if _, rerr := git("rebase", "origin/"+base); rerr != nil {
+				// Abort so the worktree stays usable and the user can resolve
+				// the conflict by hand.
+				_, _ = git("rebase", "--abort")
+				job.Append(store.LogLine{Type: "error", Content: "❌ git rebase origin/" + base + " 失败（可能与 base 上的新提交冲突）: " + rerr.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
+		} else {
+			if _, rerr := git("pull", "--rebase", "origin", base); rerr != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ git pull --rebase 失败: " + rerr.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
 		}
-		if out2, perr2 := git("push", "-u", "origin", base); perr2 != nil {
+		if out2, perr2 := git(pushArgs...); perr2 != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ git push base 失败: " + out2 + " " + perr2.Error()})
+			appendProtectedBaseHint(job, out2, perr2)
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -269,10 +306,44 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		job.Append(store.LogLine{Type: "message", Content: "⬆️ 已推送 base → origin"})
 	}
 
+	// The push advanced refs/heads/<base> on the remote and origin/<base>
+	// locally, but the project checkout's LOCAL base branch still points at
+	// the old commit. Fast-forward it when the project directory is sitting
+	// on that branch — best effort, a failure here is cosmetic.
+	if cur := currentBranch(projectPath); cur == base {
+		if _, err := gitRun(projectPath, "merge", "--ff-only", "origin/"+base); err != nil {
+			log.Printf("[push-base-shell] %s: 项目 checkout 快进 base 失败（可忽略）: %v", reqRow.ID, err)
+		}
+	}
+
 	job.Append(store.LogLine{Type: "result", Content: "✅ 已提交并推送至 base 分支 " + base + "\n\n(no-branch 模式:跳过 PR 创建,head==base 在 gh/glab/tea 会拒绝)"})
 	job.Append(store.LogLine{Type: "done", Content: "✅ 推送 base 流程完成"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[push-base-shell] job %s finished for %s", job.ID, reqRow.ID)
+}
+
+// appendProtectedBaseHint surfaces an actionable message when the remote
+// rejected the push because the base branch is protected (GitHub branch
+// protection / required PR). The raw remote text is passed through so the
+// operator sees the platform's own wording.
+//
+// The no-branch path never force-pushes — a protected base is a policy
+// decision, and silently overwriting it would be the wrong move. The hint
+// points the user at the branch strategy instead.
+func appendProtectedBaseHint(job *store.Job, out string, err error) {
+	if job == nil {
+		return
+	}
+	raw := strings.ToLower(out + " " + err.Error())
+	hit := strings.Contains(raw, "protected") ||
+		strings.Contains(raw, "denied") ||
+		strings.Contains(raw, "pre-receive hook declined") ||
+		strings.Contains(raw, "拒绝")
+	if !hit {
+		return
+	}
+	job.Append(store.LogLine{Type: "error",
+		Content: "❌ base 分支受保护，推送被拒: " + strings.TrimSpace(out) + "。请改用「新建 feat/req_xxx 分支」策略。"})
 }
 
 // assembleShellJobCredEnv is the SubTaskRunner-side twin of WizardHandler.

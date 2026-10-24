@@ -570,6 +570,12 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 		// (dir) works regardless of which worktree has dev checked out.
 		ahead, behind = aheadBehind(dir, target, dev)
 	}
+	// The no-branch mode has no dev branch (its worktree sits on a detached
+	// HEAD on the base line). Echo the base as the development landing spot
+	// so the UI doesn't render an empty branch.
+	if reqRow.NoBranch && (dev == "" || dev == "HEAD") {
+		dev = target
+	}
 	prURL := ""
 	// No-branch 模式:v0.6.x 的 dev==base 场景下 buildPRURL 会生成退化的
 	// `.../compare/main...main` 链接,前端拿到这个 URL 后会尝试「打开 PR」,
@@ -634,7 +640,7 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	if reqRow.NoBranch {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"ok":            true,
-			"message":       "不创建分支模式:代码已直接在 base 分支,无需合并",
+			"message":       "不创建分支模式:代码已在隔离 worktree 中开发并直接推送到 base 分支,无需合并",
 			"no_branch":     true,
 			"target_branch": defaultBranch,
 		})
@@ -1014,8 +1020,14 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	if h.usesAgentServer(reqRow) {
 		dev = remoteBranchFor(reqRow)
 	} else if dev == "" || dev == "HEAD" {
-		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
-		return
+		// The no-branch mode has no dev branch by design: its isolated
+		// worktree runs on a DETACHED HEAD parked on the base line, so
+		// branch_name is empty. The push target IS the base branch, so the
+		// guard must not reject the manual push.
+		if !reqRow.NoBranch {
+			writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
+			return
+		}
 	}
 	remote := remoteURL(dir)
 	if remote == "" {
@@ -1804,7 +1816,9 @@ func buildIdentityEnv(name, email string) []string {
 // force=true. Idempotent: a requirement without a worktree returns ok.
 // POST /api/requirements/{id}/worktree/cleanup {force?:bool}
 func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
-	reqRow, dir, _, _, ok := h.loadReqProject(w, r)
+	// base is the requirement's designated base branch (requirements.base_branch
+	// → project.DefaultBranch → "main"); loadReqProject already resolves it.
+	reqRow, dir, base, _, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -1849,18 +1863,18 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 		// else: keep going and clean the local leftovers too.
 	}
 
-	// No-branch 模式 (v0.6.x):从未创建 worktree / 分支,但前一个 run 留下的
-	// BranchName / WorktreePath 残留字段会让后续 run 误以为存在 worktree。
-	// 主动清零再 short-circuit,语义上「清理」= 无操作 + 持久化字段归位。
-	if reqRow.NoBranch {
-		if reqRow.BranchName != "" || reqRow.WorktreePath != "" {
+	// No-branch 模式:现在它有真实的隔离 worktree(detached HEAD @ base 线),
+	// 所以清理要真的把它删掉。只有「旧版本直接在项目目录开发」的行
+	// (worktree_path 为空)才真的无事可做 —— 那时「清理」= 清掉残留字段。
+	if reqRow.NoBranch && reqRow.WorktreePath == "" {
+		if reqRow.BranchName != "" {
 			if cerr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); cerr != nil {
 				log.Printf("[worktree-cleanup] %s: no-branch clear stale fields: %v", reqRow.ID, cerr)
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"ok":        true,
-			"message":   "不创建工作分支模式:无 worktree / 分支需要清理",
+			"message":   "不创建分支模式（旧版本直接在项目目录开发）:无 worktree 需要清理",
 			"no_branch": true,
 		})
 		return
@@ -1896,6 +1910,17 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 					"worktree 存在未提交改动，请先提交或勾选 force 强制清理: "+string(filesJSON))
 				return
 			}
+			// A detached HEAD's COMMITS are invisible to uncommittedFiles()
+			// (it only lists uncommitted files), so the dirty check above
+			// would happily delete a worktree that still holds unshipped
+			// commits. Count them explicitly.
+			if reqRow.NoBranch {
+				if n := unpushedCommitCount(wtPath, base); n > 0 {
+					writeError(w, http.StatusConflict, "WORKTREE_UNPUSHED",
+						fmt.Sprintf("worktree 尚有 %d 个未推送到 %s 的提交，请先推送或勾选 force 强制清理", n, base))
+					return
+				}
+			}
 		}
 		if err := RemoveWorktree(dir, wtPath, body.Force); err != nil {
 			writeError(w, http.StatusInternalServerError, "WORKTREE_REMOVE_FAILED",
@@ -1912,6 +1937,15 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 		// still checked out somewhere — the user can drop it manually).
 		if _, err := gitRun(dir, "branch", "-D", reqRow.BranchName); err != nil {
 			log.Printf("[worktree-cleanup] branch -D %s failed (ok): %v", reqRow.BranchName, err)
+		}
+	} else if reqRow.NoBranch {
+		// A no-branch row has no branch of its own, but a requirement that
+		// started in branch mode (or went through the design stage before
+		// the no_branch choice was made) can still have a leftover
+		// feat/<reqID> branch. Drop it by its derived name.
+		designBranch := branchPrefixForKind(reqRow.Kind) + "/" + reqRow.ID
+		if _, err := gitRun(dir, "branch", "-D", designBranch); err != nil {
+			log.Printf("[worktree-cleanup] %s: 清理设计阶段分支 %s 失败（可忽略）: %v", reqRow.ID, designBranch, err)
 		}
 	}
 	if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
