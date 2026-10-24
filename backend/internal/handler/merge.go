@@ -1384,7 +1384,14 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("## 重要约束\n")
 	b.WriteString("- 所有 git 操作必须显式 `git -C <dir>` 或先 `cd` 到工作目录再执行。\n")
 	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
-	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
+	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n\n")
+
+	// 工作目录安全约束。2026-10-24 的事故现场：推送子任务在 PR 已经创建成功后
+	// 发现工作目录消失，于是 rm -rf 自己的 cwd + 4 次 clone + 40 轮 gh pr checks
+	// 轮询，空转 11 分钟。这一段直接把「不许删目录 / 目录没了就停 / 不要轮询 CI」
+	// 写进 prompt；后端另有硬拦截（见 sub_task_runner.go）。
+	b.WriteString(promptpkg.WorkingDirSafety)
+	b.WriteString("\n")
 
 	// 末尾追加「本项目 Git 约定」块：包含 GitCommitConvention（禁 AI 署名）、
 	// 提交风格、提交推送模式、平台凭据注入提示、PR 摘要模板（forPR=true）。

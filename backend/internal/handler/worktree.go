@@ -87,6 +87,29 @@ func WorktreePath(projectPath, reqID string) string {
 	return filepath.Join(worktreeRoot(projectPath), reqID)
 }
 
+// underDir reports whether path is strictly inside dir (path == dir does NOT
+// count). Both sides are cleaned and symlink-resolved so a symlinked home
+// (macOS /var → /private/var) doesn't produce a false negative.
+//
+// This is the containment guard every destructive filesystem operation in this
+// package must run before removing a directory. The 2026-10-24 incident
+// (fs_test.go deleting the developer's real ~/workspace) is the reason it
+// exists: a path that is *computed* rather than *user-supplied* still has to
+// be proven safe before RemoveAll, because a single upstream bug in the
+// computation turns a cleanup into data loss.
+func underDir(path, dir string) bool {
+	if path == "" || dir == "" {
+		return false
+	}
+	cleanPath := canonicalPath(path)
+	cleanDir := canonicalPath(dir)
+	rel, err := filepath.Rel(cleanDir, cleanPath)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // WorktreePathMatches reports whether the persisted worktree_path on a
 // requirement row still corresponds to the path WorktreePath would compute
 // for (projectPath, reqID). The expected-path return value is what callers
@@ -415,7 +438,18 @@ func ensureWorktreeCore(projectPath, reqID, branch, baseBranch string, logf func
 		}
 	}
 	if _, err := os.Stat(wtPath); err == nil {
-		_ = os.RemoveAll(wtPath)
+		// Containment guard: this RemoveAll exists to clear an UNREGISTERED
+		// leftover at the computed worktree path. If a future change makes
+		// worktreeRoot/WorktreePath return something outside the worktrees
+		// root (a path bug, an empty projectPath collapsing filepath.Base to
+		// ".", a symlinked home), refusing here turns silent data loss into a
+		// visible no-op: the subsequent `git worktree add` then fails with
+		// "already exists" and the caller surfaces a real error.
+		if root := worktreeRoot(projectPath); underDir(wtPath, root) {
+			_ = os.RemoveAll(wtPath)
+		} else if logf != nil {
+			logf("⚠️ 拒绝删除不在 worktree 根目录内的残留目录: " + wtPath)
+		}
 	}
 	if startRef != "" {
 		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, startRef); err == nil {

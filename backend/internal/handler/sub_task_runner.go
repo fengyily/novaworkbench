@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -40,11 +42,11 @@ const DefaultSubTaskConcurrency = 4
 // `<<<SUMMARY>>>` then stays in the implementation buffer where it can be
 // debugged, and the run progresses normally. R2 / R9 from the design doc.
 type phaseTracker struct {
-	active       string // "" | "understanding" | "implementation" | "summary"
-	emitEmitted  bool // whether at least one sentinel was ever matched
-	understanding string
+	active         string // "" | "understanding" | "implementation" | "summary"
+	emitEmitted    bool   // whether at least one sentinel was ever matched
+	understanding  string
 	implementation string
-	summary       string
+	summary        string
 	// implementationBytes counts bytes fed into the IMPLEMENTATION buffer; used
 	// for the R9 summaryGuard threshold. Reset only on UNKNOWN→UNDERSTANDING
 	// transition so a "revisit implementation" loop still counts the new text.
@@ -886,43 +888,104 @@ func (r *SubTaskRunner) Run(
 	}
 	job.SetModel(modelName)
 
-	// Workdir: prefer the requirement's isolated worktree. Fallback to
-	// project checkout for legacy rows.
-	workDir := ""
+	// Workdir resolution.
+	//
+	// HISTORY / WHY THIS IS STRICT NOW
+	//
+	// This used to be "prefer req.WorktreePath, otherwise fall back to the
+	// project checkout". That fallback is how a manual sub-task ended up
+	// running with --dangerously-skip-permissions inside the user's REAL
+	// repository on 2026-10-24 (req_e07a00ed55b2be73): the project's
+	// local_path had been rewritten (vital-ble-sdk → vivalink-sdk), which
+	// cascade-clears requirements.worktree_path, so the child silently
+	// relocated from the isolated worktree to the live checkout. It then
+	// spent the next 11 minutes trying to "repair" a directory it no longer
+	// owned.
+	//
+	// New contract:
+	//   * NoBranch requirement  → the project checkout is the CORRECT location
+	//     by design (no branch, no worktree). Allowed, but stated loudly in
+	//     the job log, and the destructive-command guard is forced on.
+	//   * Branch requirement    → ONLY an isolated worktree is acceptable. If
+	//     the persisted path is missing/drifted/absent on disk we CREATE one
+	//     here (same helper the wizard stages use) instead of falling back.
+	//     If anchoring fails the sub-task fails — never the checkout.
 	var proj *model.Project
+	projPath := ""
 	if r.projectSvc != nil {
 		if p, perr := r.projectSvc.Get(req.ProjectID); perr == nil {
 			proj = p
-			workDir = proj.LocalPath
+			projPath = p.LocalPath
 		}
 	}
-	if req.WorktreePath != "" {
+
+	workDir := ""
+	switch {
+	case req.NoBranch:
+		// Designed to run on the base branch in the main checkout. Make the
+		// blast radius explicit in the log: everything here touches the real
+		// repository (see the 2026-10-24 incident).
+		workDir = projPath
+		if workDir != "" {
+			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf(
+				"⚠️ 本需求为「不创建分支」模式：子任务直接运行在项目主目录 %q（不是隔离 worktree）。此目录是真实仓库，任何删除/重置操作都会影响未提交的改动。", workDir)})
+		}
+	case req.WorktreePath != "":
 		// Drift guard: the persisted worktree_path must match the path for
 		// THIS reqID at the current project's local_path. Otherwise the
 		// sub-task would run in another requirement's directory
-		// (req_c46e8d66491ae3a2 → req_cd5079181af7335a). Log + drop the
-		// stale path; anchorWorktree on the next coding round will clear
-		// the persisted row.
-		projPath := ""
-		if proj != nil {
-			projPath = proj.LocalPath
-		}
+		// (req_c46e8d66491ae3a2 → req_cd5079181af7335a).
 		if matches, expected := WorktreePathMatches(req.ID, req.WorktreePath, projPath); !matches {
-			log.Printf("[sub-task] %s (sub_task %s): drifted worktree_path %q (expected %q) — falling back to project dir",
+			log.Printf("[sub-task] %s (sub_task %s): drifted worktree_path %q (expected %q) — re-anchoring",
 				req.ID, st.ID, req.WorktreePath, expected)
-			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf("⚠️ 子任务：持久化的 worktree 路径 %q 与 reqID %s 不匹配，回退到项目目录 %q", req.WorktreePath, req.ID, projPath)})
-		} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf(
+				"⚠️ 子任务：持久化的 worktree 路径 %q 与当前项目不匹配（期望 %q），将重新创建隔离 worktree", req.WorktreePath, expected)})
+		} else if _, statErr := os.Stat(req.WorktreePath); statErr != nil {
+			// Previously silent: the row claimed a worktree, the directory was
+			// gone, and the child quietly ran in the main checkout instead.
+			log.Printf("[sub-task] %s (sub_task %s): worktree_path %q missing on disk (%v) — re-anchoring",
+				req.ID, st.ID, req.WorktreePath, statErr)
+			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf(
+				"⚠️ 子任务：worktree 目录 %q 已不存在，将重新创建", req.WorktreePath)})
+		} else {
 			workDir = req.WorktreePath
 		}
 	}
+
+	// Branch-mode requirements that still have no usable worktree get one
+	// created now. EnsureWorktreeLogged reuses the exact strategy order the
+	// wizard's anchorWorktree uses (origin/<base> → HEAD → existing branch),
+	// including the project's platform-token credential injection.
+	if workDir == "" && !req.NoBranch && projPath != "" {
+		branch := branchPrefixForKind(req.Kind) + "/" + req.ID
+		base := req.BaseBranch
+		if base == "" && proj != nil {
+			base = proj.DefaultBranch
+		}
+		if base == "" {
+			base = "main"
+		}
+		logf := func(msg string) { job.Append(store.LogLine{Type: "message", Content: msg}) }
+		job.Append(store.LogLine{Type: "phase", Content: "🌿 子任务需要隔离工作目录，正在创建 worktree..."})
+		wtPath, wErr := EnsureWorktreeLogged(context.Background(), req.ProjectID, projPath, req.ID, branch, base, logf)
+		if wErr != nil {
+			diag := fmt.Sprintf("❌ 无法为子任务创建隔离 worktree（sub_task_id=%s, req_id=%s, project=%q）：%v。已拒绝在项目主目录 %q 中运行，以免破坏真实仓库。",
+				st.ID, req.ID, projPath, wErr, projPath)
+			job.Append(store.LogLine{Type: "error", Content: diag})
+			job.Finish(1, store.JobError)
+			r.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, diag, time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
+			return
+		}
+		workDir = wtPath
+		if perr := r.reqSvc.UpdateWorktree(req.ID, branch, wtPath); perr != nil {
+			log.Printf("[sub-task] persist worktree for %s: %v", req.ID, perr)
+		}
+	}
+
 	if workDir == "" {
 		// 诊断增强：把尝试过的目录都带上，便于运维/用户一眼看到失败原因
 		// （req_b646601dbc5e7ac3 现象：定时任务日志只打一行「无法解析工作目录」，
 		//  完全看不出哪个 worktree 没 stat 通过、项目的本地路径是什么）。
-		projPath := ""
-		if proj != nil {
-			projPath = proj.LocalPath
-		}
 		diag := fmt.Sprintf("❌ 无法解析工作目录（sub_task_id=%s, req_id=%s, project_id=%s, worktree_path=%q, project_local_path=%q）",
 			st.ID, req.ID, req.ProjectID, req.WorktreePath, projPath)
 		job.Append(store.LogLine{Type: "error", Content: diag})
@@ -930,6 +993,7 @@ func (r *SubTaskRunner) Run(
 		r.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, diag, time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
 		return
 	}
+	job.Append(store.LogLine{Type: "message", Content: "📁 工作目录: " + workDir})
 
 	// v0.5.x: 三阶段（理解 / 实施 / 小结）只在手动触发路径打开。auto / push_pr
 	// 子任务的 live log 渲染和自动批派逻辑保持不变——它们依然走单一的 artifact
@@ -963,7 +1027,9 @@ func (r *SubTaskRunner) Run(
 	// Agent Server 再用远端目录；同步失败静默回退本地路径（resolveAttachDirFor 内部处理）。
 	goesRemote := effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil
 	remoteID := ""
-	if goesRemote { remoteID = effectiveServerID }
+	if goesRemote {
+		remoteID = effectiveServerID
+	}
 	attachDir := resolveAttachDirFor(context.Background(), r.attachSvc, r.agentSvrSvc, req.ID, remoteID)
 	// body 里 `nova://attachment/<id>` 占位符换成该附件在本次执行环境下的真实
 	// 绝对路径，避免 AI 拿到无法解析的 URI（前端无法在 prompt 里写绝对磁盘路径，
@@ -990,6 +1056,9 @@ func (r *SubTaskRunner) Run(
 		prompt += briefInstructionsBlock
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+	// 工作目录安全约束：禁止删除/重置工作目录、工作目录消失即停止、禁止轮询 CI。
+	// 2026-10-24 事故的直接教训（子任务在真实仓库里跑 rm -rf + clone 恢复循环）。
+	prompt += "\n" + promptpkg.WorkingDirSafety + "\n"
 	// Replace the legacy GitCommitConvention tail with the full project
 	// context block (GitCommitConvention lives at the head of the rendered
 	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
@@ -1168,10 +1237,6 @@ func (r *SubTaskRunner) Run(
 	// assembleGitCredEnv's caller already knows the workdir but we re-pass
 	// proj.LocalPath here so script-mode (commit_script=…) and the worktree
 	// see the same NOVA_COMMIT_* triple.
-	projPath := ""
-	if proj != nil {
-		projPath = proj.LocalPath
-	}
 	if platEnv := platformRunEnv(r.projectSvc, r.platformSvc, req, workDir, projPath); len(platEnv) > 0 {
 		credEnv = append(credEnv, platEnv...)
 	}
@@ -1191,6 +1256,16 @@ func (r *SubTaskRunner) Run(
 		systemPromptForRun = ""
 	}
 
+	// Push/PR children get an absolute wall-clock ceiling on top of the
+	// idle timeout. Rationale: the 2026-10-24 push sub-task spent 11 minutes
+	// in a polling loop (`gh pr checks` ×40, 15s apart) after its job was
+	// effectively done. Idle timeouts don't catch that — every poll resets
+	// them, because the child keeps producing output. A hard deadline does.
+	var hardTimeout time.Duration
+	if st.Source == model.SubTaskSourcePushPR || st.Source == model.SubTaskSourcePushBase {
+		hardTimeout = subtaskPushTimeout()
+	}
+
 	var out claudeStreamOutcome
 	if !fork {
 		// ContinueSubTask path: single attempt, no fallback. Per user
@@ -1200,9 +1275,9 @@ func (r *SubTaskRunner) Run(
 		out = r.runLocalSubTaskAttempt(
 			st, job, prompt, systemPromptForRun, modelName,
 			sourceSID, newSID,
-			adjust, /*forkFlag*/ false,
+			adjust /*forkFlag*/, false,
 			freshSession, bare,
-			workDir, subUsage, finalConfigID, credEnv, phaseTrack,
+			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
 		)
 	} else {
 		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
@@ -1246,9 +1321,9 @@ func (r *SubTaskRunner) Run(
 				st, job, prompt, systemPromptForRun, modelName,
 				src, sidForThisAttempt,
 				/*adjustFlag*/ idx == 0 && adjust,
-				/*forkFlag*/  true,
+				/*forkFlag*/ true,
 				freshSession, bare,
-				workDir, subUsage, finalConfigID, credEnv, phaseTrack,
+				workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -1297,6 +1372,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	finalConfigID string,
 	credEnv []string,
 	tracker *phaseTracker,
+	hardTimeout time.Duration,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -1335,12 +1411,12 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		//     under newSID and a later --resume <newSID> finds it.
 		//   - bare=true → same argv shape as freshSession, but SystemPrompt=""
 		//     so the CLI uses its built-in defaults (no role persona).
-		SessionID:    sessionIDForCLI,
-		Resume:       resumeFlag,
-		Fork:         forkFor,
+		SessionID:     sessionIDForCLI,
+		Resume:        resumeFlag,
+		Fork:          forkFor,
 		ForkSessionID: newSID,
-		ExtraEnv:     credEnv, // HTTPS git creds + committer identity
-		IdleTimeout:  subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
+		ExtraEnv:      credEnv,              // HTTPS git creds + committer identity
+		IdleTimeout:   subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
@@ -1348,6 +1424,18 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
 	defer cancel()
+	// Absolute wall-clock ceiling (push/PR children only). Idle timeouts reset
+	// on every emitted line, so a child that busy-polls CI never trips them;
+	// this one is unconditional. 0 disables it.
+	if hardTimeout > 0 {
+		timer := time.AfterFunc(hardTimeout, func() {
+			log.Printf("[sub-task] %s: hard timeout %v reached, cancelling claude", st.ID, hardTimeout)
+			job.Append(store.LogLine{Type: "error", Content: "⏱️ 子任务达到总时长上限（" + hardTimeout.String() + "），已中止。"})
+			cancel()
+			killProcessGroup(cmd)
+		})
+		defer timer.Stop()
+	}
 	// v0.5.x: phase tracker sink. nil unless the row is manual-triggered
 	// (phaseEnabled gate). The closure also streams SSE markers + DB writes
 	// synchronously inside the stream loop — fine because tracker.feed is
@@ -1370,7 +1458,136 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 			)
 		}
 	}
-	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, codingStallTimeout)
+	return runClaudeStream(subTaskSink{jobSink: jobSink{job: job}, workDir: workDir}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, codingStallTimeout)
+}
+
+// subTaskSink is jobSink plus the sub-task safety guard (streamGuard).
+//
+// It exists because a sub-task runs with --dangerously-skip-permissions
+// inside a directory that may be the user's live repository: one bad tool
+// call is unrecoverable, and the 2026-10-24 run showed that the model will
+// happily try to "repair" its own missing working directory with rm -rf and
+// a re-clone loop. Two checks, both evaluated by runClaudeStream:
+//
+//   - CheckStreamHealth: if workDir no longer exists, abort immediately.
+//     This is language-agnostic — it does not depend on parsing the CLI's
+//     English/Chinese error text — and it fires within one stream event of
+//     the deletion.
+//   - GuardToolUse: if a Bash command (or a Write with a destructive path)
+//     would delete/reset/move workDir or one of its ancestors, veto it.
+//
+// Both are deliberately conservative about workDir == "": an empty value
+// disables the checks rather than matching everything.
+type subTaskSink struct {
+	jobSink
+	workDir string
+}
+
+// CheckStreamHealth implements streamGuard.
+func (s subTaskSink) CheckStreamHealth() string {
+	if s.workDir == "" {
+		return ""
+	}
+	if _, err := os.Stat(s.workDir); err != nil {
+		if os.IsNotExist(err) {
+			return "❌ 工作目录已被删除（" + s.workDir + "），已中止子任务。目录可能被外部进程移除；请检查后重新创建 worktree / 项目检出再重试。"
+		}
+		return "❌ 工作目录不可读（" + s.workDir + "）：" + err.Error() + "，已中止子任务。"
+	}
+	return ""
+}
+
+// GuardToolUse implements streamGuard.
+func (s subTaskSink) GuardToolUse(toolName string, input map[string]interface{}) string {
+	if s.workDir == "" || input == nil {
+		return ""
+	}
+	cmd, _ := input["command"].(string)
+	if cmd == "" {
+		return ""
+	}
+	if reason := destructiveCommandReason(toolName, cmd, s.workDir); reason != "" {
+		return "❌ 已阻止破坏性命令（会删除/重置工作目录 " + s.workDir + "）：" + truncateStr(cmd, 300) + "。" + reason
+	}
+	return ""
+}
+
+// destructiveCommandReason inspects a Bash command string and reports why it
+// must not run inside workDir ("" = allowed).
+//
+// Scope note: this is a targeted guard against the failure mode that actually
+// happened — an agent deciding to delete its own working tree — not a general
+// shell sandbox. It only flags commands that name workDir itself (or a parent
+// of it), so ordinary cleanup like `rm -rf build/` or `git checkout -- .`
+// keeps working.
+// namesWorkDirOrAncestor reports whether cmd mentions workDir or any of its
+// parent directories. Deleting an ANCESTOR of the working directory destroys
+// it just as thoroughly as naming the directory itself — `rm -rf
+// ~/.novaworkbench/worktrees/proj` takes out req_abc with it.
+//
+// Single-segment ancestors are skipped so the check can never degrade into
+// "any command containing a common path word"; every candidate must keep at
+// least one separator.
+func namesWorkDirOrAncestor(cmd, workDir string) bool {
+	if cmd == "" || workDir == "" {
+		return false
+	}
+	for p := filepath.Clean(workDir); len(p) > 1 && strings.Count(p, string(filepath.Separator)) >= 1; p = filepath.Dir(p) {
+		if strings.Contains(cmd, p) {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+	}
+	return false
+}
+
+func destructiveCommandReason(toolName, cmd, workDir string) string {
+	if toolName != "Bash" {
+		return ""
+	}
+	lower := strings.ToLower(cmd)
+
+	// A command that cannot touch workDir (or any of its ancestors) at all is
+	// allowed without further analysis. Cheap pre-filter so log-noise and
+	// false positives stay low.
+	targetsWorkDir := namesWorkDirOrAncestor(cmd, workDir) || strings.Contains(cmd, "WORKTREE") || strings.Contains(cmd, "$PWD")
+	if !targetsWorkDir {
+		// `git reset --hard` / `git clean -fdx` / `git worktree remove` act on
+		// the CURRENT directory and therefore always hit workDir.
+		switch {
+		case strings.Contains(lower, "git reset --hard"):
+			return "git reset --hard 会丢弃工作目录中的全部未提交改动。"
+		case strings.Contains(lower, "git clean -fdx") || strings.Contains(lower, "git clean -xfd"):
+			return "git clean -fdx 会删除工作目录中所有未跟踪文件。"
+		case strings.Contains(lower, "git worktree remove"):
+			return "git worktree remove 会移除工作目录本身。"
+		}
+		return ""
+	}
+
+	// Commands naming workDir (or an ancestor) explicitly: block the
+	// destructive families.
+	hasRmRecursive := (strings.Contains(lower, "rm -rf") || strings.Contains(lower, "rm -fr") ||
+		strings.Contains(lower, "rm -r -f") || strings.Contains(lower, "rm --recursive"))
+	switch {
+	case hasRmRecursive:
+		return "禁止删除工作目录或其父目录。"
+	case strings.Contains(lower, "rm -rf .") || strings.Contains(lower, "rm -rf ..") ||
+		strings.Contains(lower, "rm -fr .") || strings.Contains(lower, "rm -fr .."):
+		return "禁止用相对路径删除当前目录或其父目录。"
+	case strings.Contains(lower, "git reset --hard"):
+		return "git reset --hard 会丢弃工作目录中的全部未提交改动。"
+	case strings.Contains(lower, "git clean -fdx") || strings.Contains(lower, "git clean -xfd"):
+		return "git clean -fdx 会删除工作目录中所有未跟踪文件。"
+	case strings.Contains(lower, "git worktree remove"):
+		return "git worktree remove 会移除工作目录本身。"
+	case strings.HasPrefix(strings.TrimSpace(lower), "mv ") || strings.Contains(lower, " mv "):
+		return "禁止移动/重命名工作目录。"
+	}
+	return ""
 }
 
 // staleSourceCandidates builds the fallback chain of source session IDs to
@@ -1655,6 +1872,24 @@ func activeConfigMetaFor(claudeCfg *service.ClaudeConfigService) (id, currency s
 func subtaskIdleTimeout() time.Duration {
 	const def = 30 * time.Minute
 	raw := os.Getenv("NOVA_SUBTASK_IDLE_TIMEOUT")
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// subtaskPushTimeout is the absolute wall-clock ceiling applied to push_pr /
+// push_base sub-tasks (NOVA_SUBTASK_TIMEOUT, default 15m). These children do
+// a bounded amount of work — commit, merge base, push, open a PR — so a run
+// that exceeds 15 minutes is stuck, not busy. The 2026-10-24 push sub-task
+// burned 11 minutes polling `gh pr checks` after the PR already existed.
+//
+// Deliberately NOT applied to ordinary coding sub-tasks: "how long may a real
+// implementation take" has no safe answer, and the rolling idle timeout
+// already covers the silent case.
+func subtaskPushTimeout() time.Duration {
+	const def = 15 * time.Minute
+	raw := os.Getenv("NOVA_SUBTASK_TIMEOUT")
 	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
 		return d
 	}

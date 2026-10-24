@@ -626,26 +626,28 @@ type lastUsageSnapshot struct {
 // so the frontend never has to derive it from raw fields.
 //
 // Why cache_read IS part of `used`:
-//   The Anthropic API reports the four fields PER TURN. For a single turn,
-//   the prompt sent to the model equals (input_tokens + cache_creation +
-//   cache_read) — every token in the current prompt is one of: fresh input,
-//   just cached, or read from cache. That prompt size equals the current
-//   context window (claude /context reports the same number).
 //
-//   A previous iteration excluded cr under the assumption that
-//   SubTaskService.Finish SUMs cache_read across turns (double-counting).
-//   That assumption is wrong: Finish writes `out.lastUsage`, which is
-//   overwritten on every result event (wizard_stream.go: result case), so
-//   sub_tasks.cache_read_tokens is the LAST turn's cr — not cumulative.
-//   With last-turn data, input+cc alone returns "fresh tokens this turn",
-//   which undercounts vs the actual context window by tens of thousands of
-//   tokens once the conversation is long and most of the prompt is cached.
-//   That made the per-card bar show e.g. 5% while /context showed 62%.
+//	The Anthropic API reports the four fields PER TURN. For a single turn,
+//	the prompt sent to the model equals (input_tokens + cache_creation +
+//	cache_read) — every token in the current prompt is one of: fresh input,
+//	just cached, or read from cache. That prompt size equals the current
+//	context window (claude /context reports the same number).
+//
+//	A previous iteration excluded cr under the assumption that
+//	SubTaskService.Finish SUMs cache_read across turns (double-counting).
+//	That assumption is wrong: Finish writes `out.lastUsage`, which is
+//	overwritten on every result event (wizard_stream.go: result case), so
+//	sub_tasks.cache_read_tokens is the LAST turn's cr — not cumulative.
+//	With last-turn data, input+cc alone returns "fresh tokens this turn",
+//	which undercounts vs the actual context window by tens of thousands of
+//	tokens once the conversation is long and most of the prompt is cached.
+//	That made the per-card bar show e.g. 5% while /context showed 62%.
 //
 // used = input_tokens + cache_creation_tokens + cache_read_tokens
 // pct  = used / context_window * 100 (0 when window is unknown so the UI
-//        can still render a 0% placeholder). clampPct on the frontend
-//        caps the rendered bar at 100% so the user never sees >100.
+//
+//	can still render a 0% placeholder). clampPct on the frontend
+//	caps the rendered bar at 100% so the user never sees >100.
 //
 // `step` is omitted when empty so the same builder can serve both the SSE
 // payload (which carries step) and the persisted snapshot blob (which is
@@ -795,6 +797,25 @@ func (silentSink) emit(line store.LogLine) {}
 // the historical 200-byte ceiling inside toolResultContentMax. SubTaskRunner
 // passes 4096 so a Read of a large Markdown file or a Bash `npm install`
 // summary is at least partially visible to the user.
+// streamGuard is an optional interface a streamSink may implement to police a
+// claude run. Two hooks, both checked inside runClaudeStream's scan loop:
+//
+//   - CheckStreamHealth runs once per stdout line. Returning a non-empty
+//     reason aborts the run (process group killed, reason becomes the run's
+//     terminal error). Sub-task runs use it to notice that their working
+//     directory was deleted out from under the child.
+//   - GuardToolUse runs on every tool_use block BEFORE the tool executes.
+//     Returning a non-empty reason vetoes the call and aborts the run.
+//     Sub-task runs use it to block rm -rf <workdir> / git reset --hard /
+//     git worktree remove / git clean -fdx.
+//
+// Implemented as an optional interface (rather than extra parameters) so the
+// 26 existing runClaudeStream call sites stay untouched.
+type streamGuard interface {
+	CheckStreamHealth() string
+	GuardToolUse(toolName string, input map[string]interface{}) string
+}
+
 func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, toolResultMax int, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -875,11 +896,29 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		}
 	}
 
+	// Optional per-run guard implemented by the sink. SubTaskRunner uses it to
+	// (a) abort the run the moment the working directory disappears and
+	// (b) refuse a tool call that would delete/reset that directory. Both are
+	// direct responses to the 2026-10-24 incident, where a child kept running
+	// for 11 minutes after its cwd was deleted and issued `rm -rf <cwd>`.
+	guard, _ := sink.(streamGuard)
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		beat()
+		// Health check runs once per stdout line — frequent enough (the CLI
+		// emits an event per tool call / text delta) to catch a vanished
+		// directory within seconds, and free of extra goroutines.
+		if guard != nil {
+			if reason := guard.CheckStreamHealth(); reason != "" {
+				log.Printf("[%s] guard aborted run: %s", scope, reason)
+				out.errMsg = reason
+				killProcessGroup(cmd)
+				break
+			}
+		}
 		if line == "" {
 			continue
 		}
@@ -994,6 +1033,18 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				case "tool_use":
 					toolName, _ := b["name"].(string)
 					input, _ := b["input"].(map[string]interface{})
+					// Destructive-command guard: veto the tool call BEFORE its
+					// result can come back, then kill the process group so the
+					// child cannot retry or work around it. The reason string
+					// becomes the run's terminal error (see the break below).
+					if guard != nil {
+						if reason := guard.GuardToolUse(toolName, input); reason != "" {
+							log.Printf("[%s] guard blocked tool %s: %s", scope, toolName, reason)
+							out.errMsg = reason
+							killProcessGroup(cmd)
+							break // out of the content-block loop
+						}
+					}
 					// Capture the plan file content from a plan-mode Write to
 					// ~/.claude/plans/*.md. The assistant event carries the complete
 					// tool_use input (unlike stream_event input_json_delta which is
