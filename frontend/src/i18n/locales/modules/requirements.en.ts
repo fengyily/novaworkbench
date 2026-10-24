@@ -246,7 +246,7 @@ export const requirements = {
     preflightBranchStrategyWorktree: 'New feat/req_xxx branch (default)',
     preflightBranchStrategyWorktreeDesc: 'Create an isolated worktree; ship via gh/glab/tea auto push + PR.',
     preflightBranchStrategyBase: 'Develop directly on base branch',
-    preflightBranchStrategyBaseDesc: 'Skips worktree and PR creation; commit/push on base. ⚠️ Concurrent no-branch requirements may clash.',
+    preflightBranchStrategyBaseDesc: 'Develops in an isolated worktree (no branch created); commits are pushed straight to the base branch, no PR. ⚠️ Concurrent no-branch requirements may need a rebase on push.',
     preflightBranchStrategyBaseWarn: 'No-branch mode + Agent Server is not supported yet; execution env will switch to local.',
     preflightExecSection: 'Execution · Plan',
     preflightExecEnvLabel: 'Execution target',

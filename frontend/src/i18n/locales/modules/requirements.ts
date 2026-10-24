@@ -254,7 +254,7 @@ export const requirements = {
     preflightBranchStrategyWorktree: '新建 feat/req_xxx 分支（默认）',
     preflightBranchStrategyWorktreeDesc: '为本次需求创建隔离 worktree,提交后通过 gh/glab/tea 自动推送 + 创建 PR。',
     preflightBranchStrategyBase: '直接在 base 分支上开发',
-    preflightBranchStrategyBaseDesc: '跳过 worktree 与 PR 创建,commit / push 都在 base 分支。⚠️ 并发同模式需求可能冲突。',
+    preflightBranchStrategyBaseDesc: '在隔离 worktree 中开发（不创建任何分支），提交后直接推送到 base 分支，不创建 PR。⚠️ 并发同模式需求推送 base 时可能需要 rebase。',
     preflightBranchStrategyBaseWarn: '不创建分支 + Agent Server 暂不支持，执行环境将自动切到本地。',
     preflightExecSection: 'Execution · 执行计划',
     preflightExecEnvLabel: '执行环境',

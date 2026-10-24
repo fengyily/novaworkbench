@@ -38,6 +38,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
@@ -121,6 +122,26 @@ func dispatchLaunch(req *model.Requirement, spec *model.LaunchSpec, h *WizardHan
 	}
 	if req == nil {
 		return "", "", fail(400, "INVALID", "requirement is required")
+	}
+
+	// Stamp the no-branch intent BEFORE anything is dispatched.
+	//
+	// The design stage anchors the requirement's worktree via anchorWorktree,
+	// and that helper only builds a detached (branch-less) worktree when the
+	// row already says no_branch=true. Without this write-back a LaunchSpec
+	// run would create a feat/<reqID> branch at design time and the
+	// "develop on base" choice would only take effect one stage later.
+	//
+	// The detail-page path cannot be covered here: the user designs first and
+	// picks no_branch afterwards, so that path still creates a feat/<reqID>
+	// branch which the coding stage detaches — Cleanup drops the leftover
+	// branch by its derived name.
+	if spec.NoBranch && h != nil && h.reqSvc != nil {
+		if err := h.reqSvc.UpdateNoBranch(req.ID, true); err != nil {
+			log.Printf("[launch] %s: persist no_branch failed: %v", req.ID, err)
+		} else {
+			req.NoBranch = true
+		}
 	}
 
 	switch spec.Mode {

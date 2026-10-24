@@ -503,6 +503,28 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			baseBranch = "main"
 		}
 	}
+	// Write the base branch this run actually uses back onto the requirement.
+	//
+	// The base branch is the baseline the user picked at the design / coding
+	// stage and it lives on requirements.base_branch; the project's
+	// default_branch is only the LAST fallback of the three-step chain. The
+	// push stage (merge.go / wizard_common.go's autoPushPR) reads the
+	// requirement row, so without this write-back it would keep seeing the
+	// design stage's stale value while the code was developed against
+	// something else. In no-branch mode the consequence is the worst one:
+	// code developed on top of A gets pushed straight onto B.
+	//
+	// UpdateBaseBranch overwrites unconditionally for a non-empty value
+	// (service/requirement.go) and baseBranch is guaranteed non-empty here
+	// (the chain above falls back to "main"), so an empty value can never
+	// clear the column.
+	if p.RequirementID != "" && baseBranch != "" {
+		if perr := h.reqSvc.UpdateBaseBranch(p.RequirementID, baseBranch); perr != nil {
+			log.Printf("[start-coding] %s: failed to persist base_branch=%q: %v", p.RequirementID, baseBranch, perr)
+		} else if reqRow != nil {
+			reqRow.BaseBranch = baseBranch
+		}
+	}
 	// Stamp the development-environment provenance BEFORE the run starts.
 	// Doing it up front (rather than on the success path) means a failed or
 	// aborted remote run still leaves a record of WHICH Agent server holds
@@ -778,8 +800,22 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	//
 	// no-branch 模式例外：当本次运行显式选择「直接在 base 分支上开发」时,
 	// 不派生分支名,p.BranchName 保持 "" 并在下面走 no-branch 执行路径。
-	// 没有分支名也意味着 worktree 不创建 — 这正是用户想要的(直接在 base 上改)。
+	// no-branch 同样使用隔离 worktree,只是该 worktree 跑在 detached HEAD 上
+	// (不新建任何分支)—— 项目目录全程零改动。
 	noBranchMode := reqRow != nil && reqRow.NoBranch
+	if noBranchMode && p.BranchName != "" {
+		// The no_branch intent wins over an incoming branch_name.
+		//
+		// The LaunchSpec "develop immediately" path sends branch_name="feat/<reqID>"
+		// AND no_branch=true at the same time — wizard_immediate.go's
+		// resolveImmediateBranch always returns a non-empty name — and the old
+		// `p.BranchName != ""` check ran FIRST, so the branch silently won and
+		// the no_branch intent was dropped on the floor.
+		job.Append(store.LogLine{Type: "message",
+			Content: "🌿 不创建分支模式：忽略调用方传入的 branch_name=" + p.BranchName})
+		log.Printf("[start-coding] %s: no_branch wins over branch_name %q", p.RequirementID, p.BranchName)
+		p.BranchName = ""
+	}
 	if p.BranchName == "" && p.RequirementID != "" && !noBranchMode {
 		kind := ""
 		if reqRow != nil {
@@ -789,7 +825,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Append(store.LogLine{Type: "message", Content: "🌿 调用方未传 branch_name，已从需求 ID 派生默认分支: " + p.BranchName})
 		log.Printf("[start-coding] %s: derived default branch_name=%s (caller omitted it)", p.RequirementID, p.BranchName)
 	}
-	if p.BranchName != "" && p.RequirementID != "" {
+	// The worktree shape is decided by resolveCodingWorktreeMode so the
+	// no_branch intent always wins over an incoming branch_name (see the
+	// comment on the noBranchMode block above).
+	worktreeMode := resolveCodingWorktreeMode(noBranchMode, p.BranchName, p.RequirementID)
+	if worktreeMode == codingModeBranch {
 		wtPath, wtErr := EnsureWorktreeLogged(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, p.RequirementID, p.BranchName, baseBranch, func(s string) {
 			job.Append(store.LogLine{Type: "message", Content: s})
 		})
@@ -821,47 +861,40 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Finish(1, store.JobError)
 			return
 		}
-	} else if noBranchMode && p.RequirementID != "" {
-		// No-branch 模式:验证项目是 git 仓库、清理上一个 run 的 worktree 残留字段、
-		// 把 base 分支切到 worktree-safe 状态(拉最新 + checkout base)。
+	} else if worktreeMode == codingModeDetached {
+		// No-branch 模式:隔离 worktree(detached HEAD @ base 线)。
 		//
-		// 不创建 worktree — git 不允许多个 worktree 共享同一分支,
-		// 用户已明确接受「不创建分支 = 不隔离」这一前提;并发 no-branch 需求
-		// 会冲突,UI 会给出警告(ReqDetail preflightBaseHint)。
+		// git 不允许两个 worktree 检出同一分支,而 base 分支通常正被项目目录占用,
+		// 所以隔离 worktree 只能跑在 detached HEAD 上:既拿到 base 的内容,
+		// 又不新建任何分支(本地 / 远端都没有),项目目录全程零改动。
 		//
-		// 清理旧 BranchName/WorktreePath:上一个分支模式 run 留下的字段会让
-		// 续接路径误以为有 worktree 工作,先把它们清零再开始。
+		// 上游 fetch 由 EnsureDetachedWorktreeLogged 内部完成(它会调
+		// syncBaseBranch),这里不再重复 fetch。
 		if _, gerr := gitRun(p.ProjectPath, "rev-parse", "--is-inside-work-tree"); gerr != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 项目目录不是 git 仓库,无法在不创建分支模式下开发: " + p.ProjectPath})
 			job.Finish(6, store.JobError) // exitCode=6 区别于 ErrNotAGitRepo 的 1
 			return
 		}
-		if reqRow != nil && (reqRow.BranchName != "" || reqRow.WorktreePath != "") {
-			if perr := h.reqSvc.UpdateWorktree(p.RequirementID, "", ""); perr != nil {
-				log.Printf("[start-coding] failed to clear stale worktree fields for %s: %v", p.RequirementID, perr)
-			} else {
-				reqRow.BranchName, reqRow.WorktreePath = "", ""
-				job.Append(store.LogLine{Type: "message", Content: "🧹 已清理上一个分支模式 run 残留的 branch_name / worktree_path"})
-			}
-		}
-		// Agent Server 模式下跳过本地 syncBaseBranch —— 同步由远端 SSH 侧接管。
-		if p.AgentServerID == "" {
-			h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, baseBranch, func(s string) {
+		wtPath, wtErr := EnsureDetachedWorktreeLogged(context.Background(), projectIDForCreds(reqRow),
+			p.ProjectPath, p.RequirementID, baseBranch, func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
 			})
-		} else {
-			job.Append(store.LogLine{Type: "message", Content: "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"})
+		switch {
+		case wtErr == nil && wtPath != "":
+			workDir = wtPath
+			branchDir = wtPath
+			useWorktree = true
+			job.Append(store.LogLine{Type: "message",
+				Content: "🌿 已在隔离 worktree 中开发（detached HEAD @ " + baseBranch + "），不创建分支: " + wtPath})
+		case errors.Is(wtErr, ErrNotAGitRepo):
+			job.Append(store.LogLine{Type: "error", Content: "❌ 项目目录不是 git 仓库，无法创建隔离 worktree: " + p.ProjectPath})
+			job.Finish(1, store.JobError)
+			return
+		default:
+			job.Append(store.LogLine{Type: "error", Content: "❌ 创建隔离 worktree 失败: " + wtErr.Error()})
+			job.Finish(1, store.JobError)
+			return
 		}
-		// 强制切到 base(detached HEAD / 其他 ref 状态兜底)。失败只警告不终止 —
-		// 工作区脏时切不过去,后续的 `git pull --rebase` 会再次尝试。
-		if out, cerr := gitRun(p.ProjectPath, "checkout", baseBranch); cerr != nil {
-			job.Append(store.LogLine{Type: "warning", Content: "⚠️ git checkout " + baseBranch + " 失败(可能工作区脏): " + strings.TrimSpace(out) + " — 继续尝试"})
-		} else {
-			job.Append(store.LogLine{Type: "message", Content: "🌿 已切到 base 分支: " + baseBranch})
-		}
-		workDir = p.ProjectPath
-		branchDir = p.ProjectPath
-		job.Append(store.LogLine{Type: "message", Content: "📍 不创建分支模式:在项目目录直接开发,base=" + baseBranch})
 	}
 
 	// Checkout the development branch before coding. Skipped for worktrees
@@ -932,7 +965,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// job — the repo may have no remote at all, or the branch may have no
 	// upstream tracking info, in which case there is simply nothing to
 	// pull and we proceed on the already-checked-out branch.
-	if p.BranchName != "" || noBranchMode {
+	//
+	// The no-branch mode is excluded on purpose: its worktree runs on a
+	// DETACHED HEAD, which has no upstream, so `git pull --ff-only` is
+	// meaningless there. The detached worktree was already fetched from
+	// origin/<base> and fast-forwarded onto it when it was created.
+	if p.BranchName != "" && !noBranchMode {
 		// Inject the project's platform token into both `git pull` invocations
 		// (defect point 2). BuildEnv returns (nil, noop, nil) when the project
 		// has no token / SSH remote / missing fields, so a misconfigured
@@ -964,12 +1002,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 
 	// Persist the worktree location + branch so adjust-coding and the merge
 	// step can find the isolated working tree (jobs are in-memory; the path
-	// must live in the DB to survive a restart). No-branch mode keeps both
-	// columns empty (branch name + path are both ""), which is the explicit
-	// signal to AdjustCoding/ContinueCoding/Cleanup that no worktree exists.
+	// must live in the DB to survive a restart).
+	//
+	// The no-branch mode writes an EMPTY branch name together with the
+	// worktree path: that pair is exactly "isolated worktree, no branch".
+	// Every downstream reader (sub-task runner / orchestration / adjust /
+	// continue / push / cleanup) keys on worktree_path, so they all pick up
+	// the isolation without a single change.
 	if useWorktree && p.RequirementID != "" {
 		if perr := h.reqSvc.UpdateWorktree(p.RequirementID, p.BranchName, workDir); perr != nil {
 			log.Printf("[start-coding] failed to persist worktree for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.BranchName, reqRow.WorktreePath = p.BranchName, workDir
 		}
 	}
 
@@ -1864,13 +1908,21 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
-		// No-branch 模式:续接开发时主动切回 base 分支(避免 detached HEAD /
-		// 其他 ref 残留)。工作区脏时只警告不终止,后续 git 操作会再处理。
+		// No-branch 模式:保持在隔离 worktree 的 detached HEAD(base 线上)。
+		//
+		// base 分支正被项目目录占用,在 worktree 内 `git checkout <base>` 会失败;
+		// detached HEAD 本来就停在 base 线上,无需(也无法)再切一次。
+		// 旧版本直接在项目 checkout 开发的行 → 保持原行为。
 		if req.NoBranch && req.BaseBranch != "" {
-			if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
-				job.Append(store.LogLine{Type: "warning", Content: "⚠️ 追加调整切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+			if currentBranch(workDir) == "HEAD" {
+				job.Append(store.LogLine{Type: "message",
+					Content: "🌿 追加调整保持在隔离 worktree 的 detached HEAD(base 线上),未创建分支"})
 			} else {
-				job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
+				if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
+					job.Append(store.LogLine{Type: "warning", Content: "⚠️ 追加调整切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+				} else {
+					job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
+				}
 			}
 		}
 		adjustPrompt := body.Message
@@ -2158,13 +2210,21 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
-		// No-branch 模式:续接开发时主动切回 base 分支(避免 detached HEAD /
-		// 其他 ref 残留)。工作区脏时只警告不终止,后续 git 操作会再处理。
+		// No-branch 模式:保持在隔离 worktree 的 detached HEAD(base 线上)。
+		//
+		// base 分支正被项目目录占用,在 worktree 内 `git checkout <base>` 会失败;
+		// detached HEAD 本来就停在 base 线上,无需(也无法)再切一次。
+		// 旧版本直接在项目 checkout 开发的行 → 保持原行为。
 		if req.NoBranch && req.BaseBranch != "" {
-			if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
-				job.Append(store.LogLine{Type: "warning", Content: "⚠️ 续接开发切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+			if currentBranch(workDir) == "HEAD" {
+				job.Append(store.LogLine{Type: "message",
+					Content: "🌿 续接开发保持在隔离 worktree 的 detached HEAD(base 线上),未创建分支"})
 			} else {
-				job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
+				if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
+					job.Append(store.LogLine{Type: "warning", Content: "⚠️ 续接开发切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+				} else {
+					job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
+				}
 			}
 		}
 		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +
