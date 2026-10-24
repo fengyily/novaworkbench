@@ -1,6 +1,8 @@
 package service
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,15 @@ func TestBuildManifestSmoke(t *testing.T) {
 
 	svc := NewAttachmentService(d)
 	reqID := getFirstReqID(t, d)
+	if reqID == "" {
+		// The test suite sandboxes HOME (see TestMain), so the "live DB" this
+		// smoke test is written against is usually absent: LoadConfig falls
+		// back to a fresh sqlite file with no requirements. Skipping keeps the
+		// suite green while preserving the manual
+		// `NOVA_DB_DRIVER=postgres NOVA_DB_DSN=... go test -run TestBuildManifestSmoke`
+		// workflow its doc comment describes.
+		t.Skip("no requirements in the configured DB; point NOVA_DB_* at a populated DB to run this smoke test")
+	}
 	t.Logf("using req %s", reqID)
 
 	got := svc.BuildManifest(reqID, filepath.Join(AttachmentRoot(), reqID))
@@ -43,6 +54,9 @@ func getFirstReqID(t *testing.T, d *db.DB) string {
 	t.Helper()
 	var id string
 	err := d.QueryRow(`SELECT id FROM requirements ORDER BY created_at DESC LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "" // caller decides: this smoke test skips on an empty DB
+	}
 	if err != nil {
 		t.Fatalf("read req: %v", err)
 	}

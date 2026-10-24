@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,9 +118,28 @@ func generateSignerPair(t *testing.T) (host gossh.Signer, pemBytes []byte) {
 
 // secret.Decrypt returns an error if Init was not called. TestMain inits it
 // once for the whole service-package test binary.
+//
+// TestMain ALSO redirects HOME/USERPROFILE to a throwaway directory for the
+// whole binary. Several service paths resolve their on-disk location from
+// os.UserHomeDir() (the master secret at ~/.novaworkbench/secret.key, the
+// attachment store, the workspace root) — running the suite against the real
+// home means tests write into (and can delete from) the developer's actual
+// data directory. The handler package got the same treatment after
+// fs_test.go wiped the real ~/workspace on 2026-10-24; see
+// backend/internal/handler/home_isolation_test.go.
 func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "nova-test-home-*")
+	if err != nil {
+		panic("nova: cannot create sandbox HOME for tests: " + err.Error())
+	}
+	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("USERPROFILE", home) // Windows
+
 	_ = secret.Init()
-	m.Run()
+	code := m.Run()
+
+	_ = os.RemoveAll(home)
+	os.Exit(code)
 }
 
 func insertAgentServer(t *testing.T, d interface {
@@ -216,6 +236,7 @@ func TestAgentServerService_TestConnection_NotFound(t *testing.T) {
 		t.Errorf("missing AGENT_NOT_FOUND prefix: %q", err.Error())
 	}
 }
+
 // TestAgentServerService_WorktreeRootRoundTrip pins the per-server work-root
 // column through the real SQL path: created with an override, persisted
 // verbatim, clearable back to the global default (''), and settable again.

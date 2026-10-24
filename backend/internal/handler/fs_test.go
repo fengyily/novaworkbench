@@ -20,11 +20,14 @@ func newTestFsHandler(localPaths []string) *FsHandler {
 
 // TestResolveAllowedPath_UnderWorkspace: ~/workspace/** should pass when
 // $HOME/workspace exists on the test host.
+//
+// The home directory is a per-test sandbox (isolatedHome) — never the real
+// one. The previous version built the path from os.UserHomeDir() and then
+// `defer os.RemoveAll(workspace)`, which deleted the developer's REAL
+// ~/workspace (and every project checkout under it) on every test run. See
+// home_isolation_test.go for the full story.
 func TestResolveAllowedPath_UnderWorkspace(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir available")
-	}
+	home := isolatedHome(t)
 	workspace := filepath.Join(home, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
@@ -36,8 +39,15 @@ func TestResolveAllowedPath_UnderWorkspace(t *testing.T) {
 	if errCode != "" {
 		t.Fatalf("unexpected error: %s %s", errCode, errMsg)
 	}
-	if !strings.HasPrefix(got, workspace) {
-		t.Errorf("got %q, want under %q", got, workspace)
+	// resolveAllowedPath returns the symlink-RESOLVED path. The sandbox home
+	// lives under /var/folders/... which is a symlink to /private/var/folders/...
+	// on macOS, so compare against the resolved form of the expectation.
+	want := workspace
+	if resolved, rErr := filepath.EvalSymlinks(workspace); rErr == nil {
+		want = resolved
+	}
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("got %q, want under %q", got, want)
 	}
 }
 
@@ -51,11 +61,10 @@ func TestResolveAllowedPath_EtcRejected(t *testing.T) {
 }
 
 // TestResolveAllowedPath_DotDotEscape: ~/workspace/../../etc must be rejected.
+//
+// Sandboxed home — see TestResolveAllowedPath_UnderWorkspace for why.
 func TestResolveAllowedPath_DotDotEscape(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir available")
-	}
+	home := isolatedHome(t)
 	workspace := filepath.Join(home, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
@@ -96,11 +105,10 @@ func TestResolveAllowedPath_ProjectLocalPath(t *testing.T) {
 
 // TestResolveAllowedPath_SymlinkEscape: a symlink inside ~/workspace pointing
 // at /etc must be rejected after EvalSymlinks resolution.
+//
+// Sandboxed home — see TestResolveAllowedPath_UnderWorkspace for why.
 func TestResolveAllowedPath_SymlinkEscape(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir available")
-	}
+	home := isolatedHome(t)
 	workspace := filepath.Join(home, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
@@ -166,9 +174,9 @@ func TestGitBranches_NoRefresh_BackwardCompat(t *testing.T) {
 	}
 	// writeJSON wraps the body in {success, data, error}; decode the data block.
 	var envelope struct {
-		Success bool                     `json:"success"`
-		Data    map[string]interface{}   `json:"data"`
-		Error   map[string]interface{}   `json:"error"`
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+		Error   map[string]interface{} `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v", err)
