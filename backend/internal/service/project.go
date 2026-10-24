@@ -300,7 +300,11 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 	// the repo name derived from the remote URL.
 	if path == "" && req.RemoteURL != "" {
 		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, "workspace", repoName(req.RemoteURL))
+		name := repoName(req.RemoteURL)
+		if name == "" {
+			return nil, fmt.Errorf("REMOTE_URL_INVALID: cannot derive a repository directory name from %s", redactUserinfo(req.RemoteURL))
+		}
+		path = filepath.Join(home, "workspace", name)
 	}
 	if path == "" {
 		return nil, fmt.Errorf("local_path is required")
@@ -572,6 +576,15 @@ func repoName(url string) string {
 	if i := strings.LastIndex(s, "/"); i >= 0 {
 		s = s[i+1:]
 	}
+	// Reject the path-traversal sentinels: callers do
+	// filepath.Join(home, "workspace", repoName(url)), and filepath.Join CLEANS
+	// its result — so "." collapses to <home>/workspace (the workspace ROOT)
+	// and ".." collapses to <home>. A caller that then treats the result as a
+	// throwaway clone destination would be operating on the user's entire
+	// workspace, so return "" and let the caller fail loudly instead.
+	if s == "" || s == "." || s == ".." || strings.ContainsAny(s, `/\`) {
+		return ""
+	}
 	return s
 }
 
@@ -596,6 +609,12 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret, gitUserName string) 
 		platform, redactToken(tokenSecret), gitUserName, dest, branch)
 	cloneURL := injectCredentials(remote, platform, tokenSecret, gitUserName)
 	log.Printf("[gitlab-debug] cloneRepo final URL: %s", redactUserinfo(cloneURL))
+
+	// Record whether the destination already existed BEFORE git runs. On
+	// failure we only clean up a tree this call created — see the removal
+	// guard below.
+	_, statErr := os.Stat(dest)
+	destExistedBefore := statErr == nil
 
 	args := []string{"clone"}
 	if branch != "" && branch != "main" && branch != "master" {
@@ -623,7 +642,26 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret, gitUserName string) 
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		os.RemoveAll(dest) // clean up a half-finished clone
+		// Clean up a half-finished clone — but ONLY when it is provably ours.
+		//
+		// The previous unconditional `os.RemoveAll(dest)` was a data-loss
+		// hazard: dest is either a project's local_path (a live checkout with
+		// the user's uncommitted work) or <home>/workspace/<repo>. A single
+		// network hiccup during `git clone` — exactly what happened on
+		// 2026-10-24, when github.com:443 was unreachable — would then wipe
+		// the checkout the clone was supposed to update.
+		//
+		// Three conditions must all hold before we delete:
+		//   1. the destination did not exist before this call, and
+		//   2. git left nothing behind but a partial .git/ (plus, on some
+		//      failures, an empty worktree), and
+		//   3. the path is strictly inside <home>/workspace/<repo> — never the
+		//      workspace root or $HOME itself.
+		if !destExistedBefore && isHalfClonedTree(dest) && isInsideDefaultWorkspace(dest) {
+			os.RemoveAll(dest)
+		} else if destExistedBefore {
+			log.Printf("[clone] %s: clone failed; keeping pre-existing directory untouched", redactUserinfo(dest))
+		}
 		out := strings.TrimSpace(stdout.String() + stderr.String())
 		// Drop any userinfo from URLs in the error so the token never leaks.
 		out = redactUserinfo(out)
@@ -644,6 +682,56 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret, gitUserName string) 
 		return fmt.Errorf("%s — %w", out, err)
 	}
 	return nil
+}
+
+// isHalfClonedTree reports whether dir holds nothing but the wreckage a failed
+// `git clone` leaves behind: a `.git` directory and (optionally) an empty
+// working tree. A directory with any real file in it is somebody's checkout,
+// not ours to delete.
+//
+// Returned true only when dir exists, is a directory, and every top-level
+// entry is either `.git` or an empty directory.
+func isHalfClonedTree(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() == ".git" {
+			continue
+		}
+		if !e.IsDir() {
+			return false
+		}
+		sub, sErr := os.ReadDir(filepath.Join(dir, e.Name()))
+		if sErr != nil || len(sub) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// isInsideDefaultWorkspace reports whether dir is strictly inside
+// <home>/workspace. Mirrors validateWorkspacePath's rule but is usable before
+// the destination exists and never returns an error — callers use it as a
+// boolean gate on a destructive operation.
+func isInsideDefaultWorkspace(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	root := filepath.Join(home, "workspace")
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	cleanDir := filepath.Clean(absDir)
+	cleanRoot := filepath.Clean(root)
+	rel, err := filepath.Rel(cleanRoot, cleanDir)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // isMissingExecutable reports whether err is the Go runtime's "executable
