@@ -131,7 +131,7 @@ type codingRunParams struct {
 	// the new three flags win; when AutoPushPR alone is present it is treated
 	// as "all three stages enabled" (mirrors today's behavior).
 	AutoCommit   *bool `json:"auto_commit"`
-	AutoPush     *bool `json:"auto_push"`      // model field is AutoPushRemote (avoid DB-column name collision in JSON)
+	AutoPush     *bool `json:"auto_push"` // model field is AutoPushRemote (avoid DB-column name collision in JSON)
 	AutoCreatePR *bool `json:"auto_create_pr"`
 	// NoBranch toggles the "develop on base branch" mode (v0.6.x). When true,
 	// StartCoding skips worktree creation and forces the working dir to
@@ -1518,6 +1518,17 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 
 	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, nil, 0, codingStallTimeout)
 
+	// No-branch mode promises "develop directly on <base>". The agent does not
+	// always honour that: on 2026-10-24 it created `fix/<reqID>`, pushed it,
+	// and left the checkout there. The later 「推送并发起 PR」 run then died in
+	// 38ms because execPushBaseShell refuses to push unless HEAD == base
+	// (push_pr_base.go), and the user had to hand-build a manual sub-task.
+	// Restore the checkout to base here — best-effort and only when the tree
+	// is clean, so we never discard work the agent just did.
+	if noBranchMode {
+		h.restoreNoBranchBase(job, p.ProjectPath, baseBranch)
+	}
+
 	// The coding session id is already persisted upfront. Correct it only if
 	// the CLI reported a different id than the one we pre-minted (a safety
 	// net in case the --session-id override semantics ever change).
@@ -1643,6 +1654,51 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 // Failure policy mirrors the historical local path: GPG decrypt/provision
 // failures WARN (via job.Append) but do NOT abort — a working run is more
 // valuable than a signed-but-broken one on the developer's own machine.
+// restoreNoBranchBase puts a no-branch requirement's checkout back on its base
+// branch after the coding agent finishes.
+//
+// Why this is needed: the no-branch prompt tells the agent to work directly on
+// <base>, but nothing enforces it. On 2026-10-24 the developer agent created
+// `fix/req_e07a00ed55b2be73`, pushed it, and left HEAD there. The subsequent
+// 「推送并发起 PR」 path (RunPushBaseShellJob → execPushBaseShell) has a guard
+// requiring HEAD == base and failed 38ms in — so the user's own push button
+// silently did nothing, and they had to hand-create a sub-task to recover.
+//
+// Safety rules (best-effort, never fails the job):
+//   - Skip when HEAD is already base (the common case).
+//   - Refuse when the working tree is dirty: switching branches with
+//     uncommitted changes either fails or carries edits across branches, and
+//     either outcome would surprise the user. The existing guard in
+//     execPushBaseShell then still reports the real problem.
+//   - Switch to the LOCAL base branch only; if it does not exist, leave HEAD
+//     alone (a no-branch repo without a local base has bigger problems).
+func (h *WizardHandler) restoreNoBranchBase(job *store.Job, projectPath, base string) {
+	if projectPath == "" || base == "" {
+		return
+	}
+	cur := currentBranch(projectPath)
+	if cur == "" || cur == "HEAD" {
+		return // detached / unreadable — nothing safe to do
+	}
+	if cur == base {
+		return
+	}
+	if dirty, _ := gitRun(projectPath, "status", "--porcelain"); strings.TrimSpace(dirty) != "" {
+		job.Append(store.LogLine{Type: "warning", Content: "⚠️ 不创建分支模式：编码结束时工作区有未提交改动，未自动切回 " + base +
+			"（当前分支 " + cur + "）。请在推送前手动提交并切回 base。"})
+		return
+	}
+	if _, err := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+base); err != nil {
+		job.Append(store.LogLine{Type: "warning", Content: "⚠️ 不创建分支模式：本地不存在分支 " + base + "，未切回（当前 " + cur + "）。"})
+		return
+	}
+	if out, err := gitRun(projectPath, "checkout", base); err != nil {
+		job.Append(store.LogLine{Type: "warning", Content: "⚠️ 不创建分支模式：切回 " + base + " 失败: " + strings.TrimSpace(out+" "+err.Error())})
+		return
+	}
+	job.Append(store.LogLine{Type: "message", Content: "🌿 不创建分支模式：已把项目目录从 " + cur + " 切回 " + base})
+}
+
 func (h *WizardHandler) assembleGitCredEnv(reqRow *model.Requirement, workDir, projectPath string, job *store.Job) (env []string, cleanup func()) {
 	var cleanups []func()
 	cleanup = func() {
