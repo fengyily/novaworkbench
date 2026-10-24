@@ -70,11 +70,18 @@ func gitLabAPI(srv *httptest.Server) string { return srv.URL }
 
 // 1
 func TestValidateGitLabToken_NoDoubleSlash(t *testing.T) {
-	cases := []string{"http://172.20.210.36", "http://172.20.210.36/"}
+	// The mock server IS the GitLab instance under test: point both the
+	// base_url and the remote at it. The previous version hardcoded a LAN IP
+	// (172.20.210.36) while the mock listened on 127.0.0.1, so the assertion
+	// never exercised the mock — it made a real network call and took 20s to
+	// time out on any machine that isn't on that LAN.
+	srv := newGitLabMux(t, 401, 0, "", `{"message":"401 Unauthorized"}`, "")
+	remote := srv.URL + "/team/proj.git"
+
+	cases := []string{srv.URL, srv.URL + "/"}
 	for _, base := range cases {
 		t.Run(base, func(t *testing.T) {
-			srv := newGitLabMux(t, 401, 0, "", `{"message":"401 Unauthorized"}`, "")
-			err := validateGitLabToken(base, "x", "http://172.20.210.36/team/proj.git")
+			err := validateGitLabToken(base, "x", remote)
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
@@ -82,10 +89,9 @@ func TestValidateGitLabToken_NoDoubleSlash(t *testing.T) {
 			if strings.Contains(msg, "//-/") {
 				t.Errorf("error must not contain '//-/', got %q", msg)
 			}
-			if !strings.Contains(msg, "http://172.20.210.36/-/user_settings") {
-				t.Errorf("error must contain 'http://172.20.210.36/-/user_settings', got %q", msg)
+			if !strings.Contains(msg, srv.URL+"/-/user_settings") {
+				t.Errorf("error must contain %q, got %q", srv.URL+"/-/user_settings", msg)
 			}
-			_ = srv
 		})
 	}
 }

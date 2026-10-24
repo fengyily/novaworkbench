@@ -48,7 +48,11 @@ func TestBuildGitProjectBlock_FourModes(t *testing.T) {
 				CommitMode:   model.CommitModeScriptFirst,
 				CommitScript: "printf '%s' \"fix-up\"",
 			},
-			must: []string{"GitLab", "gl-prod", "$GITLAB_TOKEN", "$GITLAB_HOST", "先执行脚本", "先调 LLM 失败时回退到脚本", "printf '%s' \"fix-up\""},
+			// script_first = script runs FIRST, LLM is the fallback. (This row
+			// used to also require "先调 LLM 失败时回退到脚本", which is
+			// llm_first semantics — a stale expectation that made the suite
+			// red and therefore ignored.)
+			must: []string{"GitLab", "gl-prod", "$GITLAB_TOKEN", "$GITLAB_HOST", "先执行脚本", "再由你撰写", "printf '%s' \"fix-up\""},
 		},
 		{
 			name: "llm_first + token bound",
@@ -62,7 +66,9 @@ func TestBuildGitProjectBlock_FourModes(t *testing.T) {
 				StyleHint:    "📝 项目提交风格：中英混用",
 				CommitMode:   model.CommitModeLLMFirst,
 			},
-			must: []string{"Gitea", "tea-self", "$GITEA_TOKEN", "由你直接撰写 commit 信息"},
+			// llm_first = the model writes the message, the script is the
+			// fallback. "由你直接撰写 commit 信息" belongs to llm_only.
+			must: []string{"Gitea", "tea-self", "$GITEA_TOKEN", "先由你撰写", "执行下方脚本兜底"},
 		},
 		{
 			name: "llm_only + no token",
@@ -151,7 +157,9 @@ func TestBuildGitProjectBlock_ScriptTooLong(t *testing.T) {
 	if strings.Contains(got, big) {
 		t.Errorf("oversize script must not be inlined")
 	}
-	if !strings.Contains(got, "脚本过长") {
+	// The implementation words this as "超过 N 字节，未内联"; the old assertion
+	// looked for "脚本过长" and had been red since the wording changed.
+	if !strings.Contains(got, "未内联") {
 		t.Errorf("oversize script must surface the cap-out hint; got:\n%s", got)
 	}
 }

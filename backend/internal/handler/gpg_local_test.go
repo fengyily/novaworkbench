@@ -44,6 +44,17 @@ func TestVerifyImportedGPGKey_HappyPath(t *testing.T) {
 	cmd.Env = append(filteredEnv("GNUPGHOME"), "GNUPGHOME="+setupHome)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A failure to even reach a running gpg-agent is an environment
+		// problem, not a regression in verifyImportedGPGKey. The common one
+		// is macOS: gpg's agent socket lives under the (already long) temp
+		// path, and the OS rejects it with "File name too long" before any
+		// of our code runs. Treat that as a skip so the suite stays
+		// meaningful on every host instead of permanently red on macOS.
+		if strings.Contains(string(out), "can't connect to the gpg-agent") ||
+			strings.Contains(string(out), "File name too long") ||
+			strings.Contains(string(out), "未运行代理") {
+			t.Skipf("gpg-agent cannot start in this environment (socket path issue): %v\n%s", err, out)
+		}
 		t.Fatalf("setup --gen-key failed: %v\n%s", err, out)
 	}
 	setupKeyID, setupFPR, setupUID := parseGPGKeyInfoFromScriptOutput(string(out))
