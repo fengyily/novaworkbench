@@ -64,6 +64,7 @@ import {
   IconClose,
   IconFileMarkdown,
   IconChevronDown,
+  IconArchitect,
 } from '../components/icons';
 import MarkdownRender from '../components/MarkdownRender';
 import { rewriteNovaLinks } from '../components/RichDescriptionEditor/rewriteNovaLinks';
@@ -1258,6 +1259,18 @@ export default function RequirementDetail() {
   const [autoCreatePRDev, setAutoCreatePRDev] = useState(true);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
+  // Designer-context toggle for the design stage: whether the architect
+  // role prompt rides along with the plan-mode run.
+  // Default true (checked) = historical behaviour; false = only the
+  // requirement description + attachment manifest are passed and claude
+  // uses its own context. Local and Agent-server runs share this switch.
+  // Page-level state: the design pre-modal / toolbar / regenerate modal
+  // all read it, so the three surfaces always show the same setting.
+  const [useRoleContextDesign, setUseRoleContextDesign] = useState(true);
+  // Separate copy for the regenerate modal — pre-filled from
+  // useRoleContextDesign on open and written back on confirm, so a
+  // cancelled edit never leaks into the page state.
+  const [regenerateUseRoleContext, setRegenerateUseRoleContext] = useState(true);
   const designNeedsTransitionRef = useRef(false);
   // req_11e485759f583db8 — 重新生成 modal: opens when the user clicks
   // 「重新生成方案」. Body explains "old plan will be frozen as a history
@@ -2173,6 +2186,7 @@ export default function RequirementDetail() {
       configId?: string;
       agentServerId?: string;
       syncMode?: '' | 'local';
+      useRoleContext?: boolean;
     } = {},
     regenerate = false,
   ) => {
@@ -2181,6 +2195,11 @@ export default function RequirementDetail() {
     const configId = override.configId ?? architectConfigId;
     const agentServerId = override.agentServerId ?? designAgentServerId;
     const syncMode = override.syncMode ?? designSyncMode;
+    // Designer-context toggle — the checkbox is positive (checked = keep
+    // the persona), the request body carries the inverted value. The
+    // override wins so a pick made inside the regenerate modal can
+    // override whatever the toolbar currently holds.
+    const useRoleContext = override.useRoleContext ?? useRoleContextDesign;
     setDesigning(true);
     setDesignLines([]);
     setDesignError(false);
@@ -2243,6 +2262,11 @@ export default function RequirementDetail() {
           // generation did. Omitted when false so the wire shape stays
           // backward-compatible (older backends ignore the field).
           ...(regenerate ? { regenerate: true } : {}),
+          // Designer-context toggle. Inverted on the wire: a checked box
+          // means "keep the architect persona". Sent unconditionally so the
+          // backend's zero-value default never fights the frontend default.
+          // Local and Agent-server runs share this single switch.
+          skip_role_context: !useRoleContext,
         }),
       });
       const json = await res.json();
@@ -2262,6 +2286,7 @@ export default function RequirementDetail() {
   const requestDesignKnowledge = (needsTransition: boolean) => {
     designNeedsTransitionRef.current = needsTransition;
     setReadKnowledgeDesign(false); // reset to default (unchecked) each time
+    setUseRoleContextDesign(true); // reset to default (checked) each time
     setShowDesignKnowledgeModal(true);
   };
 
@@ -2298,6 +2323,10 @@ export default function RequirementDetail() {
     );
     setRegenerateSyncMode(designSyncMode || '');
     setRegenerateReadKnowledge(false);
+    // Designer-context toggle: pre-fill from the toolbar so the modal
+    // starts from the current page-level setting; the user may change it
+    // here and commitRegenerateConfirm writes it back.
+    setRegenerateUseRoleContext(useRoleContextDesign);
     setShowRegenerateConfirm(true);
   };
   const cancelRegenerateConfirm = () => setShowRegenerateConfirm(false);
@@ -2313,6 +2342,10 @@ export default function RequirementDetail() {
     setArchitectConfigId(regenerateConfigId);
     setDesignAgentServerId(regenerateAgentServerId);
     setDesignSyncMode(regenerateSyncMode);
+    // Write the modal's designer-context pick back into the page state so
+    // the toolbar follows — otherwise the toolbar shows a stale value while
+    // the SSE panel reports a different run's setting.
+    setUseRoleContextDesign(regenerateUseRoleContext);
     await runArchitectDesign(
       regenerateReadKnowledge,
       {
@@ -2320,6 +2353,7 @@ export default function RequirementDetail() {
         configId: regenerateConfigId,
         agentServerId: regenerateAgentServerId,
         syncMode: regenerateSyncMode,
+        useRoleContext: regenerateUseRoleContext,
       },
       /*regenerate*/ true,
     );
@@ -3186,6 +3220,32 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
               <IconBook size={13} className="icon-mr" />{t('requirements.detail2.preflightReadKnowledgeDefault')}
             </label>
+            {/* Designer-context toggle: whether the architect role prompt
+                rides along with this plan-mode run. Default checked
+                (= historical behaviour). Shares the page-level state, so
+                a change here is reflected in the toolbar right away; when
+                unchecked the backend sends no --append-system-prompt and
+                the requirement material (description + attachment
+                manifest) moves into the task prompt instead. */}
+            <label
+              className="merge-check"
+              style={{ margin: '0 0 12px', display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'pointer' }}
+              title={t('requirements.detail2.designRoleContextDefault')}
+            >
+              <input
+                type="checkbox"
+                checked={useRoleContextDesign}
+                onChange={e => setUseRoleContextDesign(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />
+              <IconArchitect size={13} className="icon-mr" />
+              <span>
+                {t('requirements.detail2.designRoleContextLabel')}
+                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                  {t('requirements.detail2.designRoleContextHint')}
+                </span>
+              </span>
+            </label>
             <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmDesignKnowledge}>{t('requirements.detail2.btnConfirm')}</button>
               <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>{t('requirements.detail2.btnCancel')}</button>
@@ -3290,6 +3350,28 @@ export default function RequirementDetail() {
                     </div>
                     <div className="preflight-toggle-desc">
                       {t('requirements.detail2.regenerateReadKnowledgeHint')}
+                    </div>
+                  </div>
+                </label>
+
+                {/* Designer-context toggle — the re-run can pick a different
+                    setting in the same dialog; pre-filled from the toolbar
+                    on open and written back on confirm (see
+                    commitRegenerateConfirm). */}
+                <label className={`preflight-toggle ${regenerateUseRoleContext ? 'is-checked' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={regenerateUseRoleContext}
+                    onChange={e => setRegenerateUseRoleContext(e.target.checked)}
+                    disabled={designing}
+                  />
+                  <div className="preflight-toggle-body">
+                    <div className="preflight-toggle-title">
+                      <IconArchitect size={14} className="icon-mr" />
+                      {t('requirements.detail2.designRoleContextLabel')}
+                    </div>
+                    <div className="preflight-toggle-desc">
+                      {t('requirements.detail2.designRoleContextHint')}
                     </div>
                   </div>
                 </label>
@@ -5211,6 +5293,25 @@ export default function RequirementDetail() {
                 {t('requirements.detail2.designAgentServerNoHint')}
               </div>
             )}
+            {/* Designer-context toggle — always visible so the user can
+                flip it before the next plan-mode run. Shares the page-level
+                state with the pre-modal and the regenerate modal, so all
+                three surfaces show the same setting. */}
+            <label
+              className="design-toolbar-hint"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              title={t('requirements.detail2.designRoleContextHint')}
+            >
+              <input
+                type="checkbox"
+                checked={useRoleContextDesign}
+                onChange={e => setUseRoleContextDesign(e.target.checked)}
+                disabled={architectWorking}
+                style={{ margin: 0 }}
+              />
+              <IconArchitect size={13} className="icon-mr" />
+              {t('requirements.detail2.designRoleContextLabel')}
+            </label>
           </div>
           )}
 

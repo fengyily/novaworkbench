@@ -31,7 +31,7 @@ import { ApiError } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
-import { IconArrowRight, IconBook, IconPin, IconRocket, IconSave } from './icons';
+import { IconArrowRight, IconArchitect, IconBook, IconPin, IconRocket, IconSave } from './icons';
 
 interface Props {
   open: boolean;
@@ -98,6 +98,14 @@ export function DesignCodingImmediateModal({
       : '';
   });
   const [readKnowledge, setReadKnowledge] = useState(false);
+  // Designer-context toggle for the design stage: whether the architect
+  // role prompt rides along with the plan-mode run.
+  // Default true (checked) = historical behaviour; false = only the
+  // requirement description + attachment manifest are passed and claude
+  // uses its own context. Local and Agent-server runs share this switch.
+  // Component-local state (like readKnowledge — reset to the default on
+  // every open).
+  const [useRoleContext, setUseRoleContext] = useState(true);
   // Coding-stage state.
   const [codingModel, setCodingModel] = useState(initialCodingModel || '');
   const [codingConfigId, setCodingConfigId] = useState(initialCodingConfigId || '');
@@ -147,6 +155,11 @@ export function DesignCodingImmediateModal({
     try {
       const body: DesignCodingImmediateReq = {
         read_knowledge: readKnowledge,
+        // Designer-context toggle. Inverted on the wire: a checked box
+        // means "keep the architect persona". Design stage only; sent
+        // unconditionally so the backend's zero-value default never fights
+        // the frontend default.
+        skip_role_context: !useRoleContext,
         design_model: designModel || undefined,
         // Send the carried claude_config id alongside the model so the
         // base URL and the model id are guaranteed to come from the same
@@ -345,6 +358,27 @@ export function DesignCodingImmediateModal({
                 </div>
                 <div className="preflight-toggle-desc">
                   {t('requirements.detail2.preflightReadKnowledgeHint')}
+                </div>
+              </div>
+            </label>
+
+            {/* Designer-context toggle — whether this design run carries
+                the architect role prompt. Local and Agent-server runs
+                share this single switch. */}
+            <label className={`preflight-toggle ${useRoleContext ? 'is-checked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={useRoleContext}
+                onChange={e => setUseRoleContext(e.target.checked)}
+                disabled={submitting}
+              />
+              <div className="preflight-toggle-body">
+                <div className="preflight-toggle-title">
+                  <IconArchitect size={14} className="icon-mr" />
+                  {t('requirements.detail2.designRoleContextLabel')}
+                </div>
+                <div className="preflight-toggle-desc">
+                  {t('requirements.detail2.designRoleContextHint')}
                 </div>
               </div>
             </label>
