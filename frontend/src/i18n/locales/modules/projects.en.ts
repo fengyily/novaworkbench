@@ -123,6 +123,7 @@ export const projects = {
       review: 'Code Review',
       usage: 'Token usage',
       weekly: 'Weekly report',
+      testing: 'Automated testing',
     },
     activeSuffix: ' ●',
     basicTitle: 'Basic info',

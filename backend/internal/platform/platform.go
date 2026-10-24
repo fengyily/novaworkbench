@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -60,6 +61,17 @@ type Client interface {
 	// number the requirement was created from) when monitor.comment_on_pr
 	// is 1 and monitor.comment_posted is 0.
 	PostIssueComment(ctx context.Context, repoURL string, issueNumber int, body string) error
+
+	// CreateIssue opens a NEW Issue on the repository behind repoURL and
+	// returns the created row. The automated-testing module uses it to file
+	// a bug for a failing test case, so the body normally carries the test
+	// title, the failure excerpt and links to the screenshot/trace.
+	//
+	// `labels` is best-effort: GitHub and GitLab take label names, but
+	// Gitea's API only accepts numeric label ids, so its implementation
+	// ignores the names and appends an `[autotest]` marker to the body
+	// instead. Callers must therefore not rely on the labels round-tripping.
+	CreateIssue(ctx context.Context, repoURL, title, body string, labels []string) (*Issue, error)
 }
 
 // readErrBody drains up to 2 KB of an error response body for a richer message
@@ -78,7 +90,11 @@ func readErrBody(resp *http.Response) string {
 func New(platform, baseURL, token string) (Client, error) {
 	switch platform {
 	case "github":
-		return &githubClient{token: token}, nil
+		base := baseURL
+		if base == "" {
+			base = "https://api.github.com"
+		}
+		return &githubClient{baseURL: strings.TrimRight(base, "/"), token: token}, nil
 	case "gitlab":
 		base := baseURL
 		if base == "" {

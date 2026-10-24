@@ -23,6 +23,7 @@ import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
 import ProjectCodeReview from './ProjectCodeReview';
+import ProjectTesting from './ProjectTesting';
 import { IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { pageWindow } from '../utils/pageWindow';
@@ -32,7 +33,7 @@ import './KnowledgePage.css';
 import { errorMessage as errMsg } from '../utils/errMsg';
 import { Breadcrumb } from '../components/Breadcrumb';
 
-type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor';
+type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor' | 'testing';
 
 // Columns the requirements table allows the user to sort by clicking the
 // header. Each value maps to one logical comparator in `compareRequirements`
@@ -1846,6 +1847,9 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'issueMonitor' ? ' active' : ''}`} onClick={() => setTab('issueMonitor')}>
           {t('settings.issueMonitor.title')}
         </button>
+        <button className={`tab-btn${tab === 'testing' ? ' active' : ''}`} onClick={() => setTab('testing')}>
+          {t('projects.detail.tabs.testing')}
+        </button>
       </div>
 
       {/* ── Overview ── */}
@@ -2833,6 +2837,11 @@ export default function ProjectDetail() {
         <div className="tab-content">
           <ProjectIssueMonitor projectId={id} />
         </div>
+      )}
+
+      {/* ── 自动化测试（Playwright Test Agents）── */}
+      {tab === 'testing' && id && (
+        <ProjectTesting projectId={id} project={project} />
       )}
 
       {/* ── Token usage ── */}

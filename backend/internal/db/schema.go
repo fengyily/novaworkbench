@@ -833,6 +833,125 @@ CREATE TABLE IF NOT EXISTS design_revisions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_dr_rev ON design_revisions(requirement_id, rev_no);
 CREATE INDEX IF NOT EXISTS idx_dr_req ON design_revisions(requirement_id, rev_no);
+
+-- ── 自动化测试（Playwright Test Agents）─────────────────────────────────
+-- Four tables, strictly parent→child:
+--   projects → test_environments → {test_plans, test_runs} → test_run_cases
+-- project_id is DELIBERATELY denormalized onto test_plans / test_runs so the
+-- project-scoped list queries and the "does this row belong to the project in
+-- the URL" ownership check never need a JOIN — same rationale as sub_tasks.
+
+-- One Playwright workspace per row. base_url points at the app under test and
+-- is injected at RUN time via NOVA_BASE_URL, so editing it never requires a
+-- re-init. workspace_override is an escape hatch for teams that want the
+-- generated specs inside their own repo, empty = use the default
+-- ~/.novaworkbench/testing/<project_id>/<id>/ directory.
+-- init_status: 'pending' | 'initializing' | 'ready' | 'failed' (no CHECK
+-- constraint — the whitelist lives in service.TestEnvService).
+-- env_vars_enc is an AES-256-GCM blob (internal/secret) — never returned by
+-- the API, only its presence via the env_vars_set bool.
+CREATE TABLE IF NOT EXISTS test_environments (
+	id                 TEXT PRIMARY KEY,
+	project_id         TEXT NOT NULL,
+	name               TEXT NOT NULL,
+	base_url           TEXT NOT NULL DEFAULT '',
+	workspace_override TEXT NOT NULL DEFAULT '',
+	env_vars_enc       TEXT NOT NULL DEFAULT '',
+	seed_test          TEXT NOT NULL DEFAULT '',
+	browsers           TEXT NOT NULL DEFAULT 'chromium',
+	init_status        TEXT NOT NULL DEFAULT 'pending',
+	init_error         TEXT NOT NULL DEFAULT '',
+	playwright_version TEXT NOT NULL DEFAULT '',
+	default_model      TEXT NOT NULL DEFAULT '',
+	retention_runs     INTEGER NOT NULL DEFAULT 20,
+	created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_test_envs_project ON test_environments(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_test_envs_name ON test_environments(project_id, name);
+
+-- One test plan per scenario. plan_md is a COPY of specs/<slug>.md harvested
+-- after the planner agent runs, so the plan stays readable even if the
+-- workspace is wiped. spec_files is a JSON array of workspace-relative .spec.ts
+-- paths harvested after the generator agent runs.
+-- status: 'draft' | 'planning' | 'planned' | 'generating' | 'generated' | 'failed'.
+CREATE TABLE IF NOT EXISTS test_plans (
+	id               TEXT PRIMARY KEY,
+	project_id       TEXT NOT NULL,
+	env_id           TEXT NOT NULL,
+	requirement_id   TEXT NOT NULL DEFAULT '',
+	title            TEXT NOT NULL DEFAULT '',
+	scenario         TEXT NOT NULL DEFAULT '',
+	plan_path        TEXT NOT NULL DEFAULT '',
+	plan_md          TEXT NOT NULL DEFAULT '',
+	spec_files       TEXT NOT NULL DEFAULT '[]',
+	status           TEXT NOT NULL DEFAULT 'draft',
+	claude_session_id TEXT NOT NULL DEFAULT '',
+	last_job_id      TEXT NOT NULL DEFAULT '',
+	error            TEXT NOT NULL DEFAULT '',
+	created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (env_id) REFERENCES test_environments(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_test_plans_env ON test_plans(env_id);
+CREATE INDEX IF NOT EXISTS idx_test_plans_project_env ON test_plans(project_id, env_id);
+CREATE INDEX IF NOT EXISTS idx_test_plans_req ON test_plans(requirement_id);
+
+-- One row per batch execution. scope is a JSON blob replayed on a re-run:
+-- {"all":true} | {"plan_ids":[...]} | {"spec_files":[...]}.
+-- status: 'running' | 'passed' | 'failed' | 'canceled' | 'error' — 'error'
+-- means the PROCESS broke (bad binary, unreadable report), as opposed to
+-- 'failed' which means the process ran fine and cases failed.
+-- healed_from points at the pre-heal run when the healer agent fixed things.
+CREATE TABLE IF NOT EXISTS test_runs (
+	id           TEXT PRIMARY KEY,
+	project_id   TEXT NOT NULL,
+	env_id       TEXT NOT NULL,
+	scope        TEXT NOT NULL DEFAULT '{}',
+	status       TEXT NOT NULL DEFAULT 'running',
+	total        INTEGER NOT NULL DEFAULT 0,
+	passed       INTEGER NOT NULL DEFAULT 0,
+	failed       INTEGER NOT NULL DEFAULT 0,
+	flaky        INTEGER NOT NULL DEFAULT 0,
+	skipped      INTEGER NOT NULL DEFAULT 0,
+	healer_used  INTEGER NOT NULL DEFAULT 0,
+	healed_from  TEXT NOT NULL DEFAULT '',
+	report_path  TEXT NOT NULL DEFAULT '',
+	job_id       TEXT NOT NULL DEFAULT '',
+	started_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+	finished_at  DATETIME,
+	duration_ms  INTEGER NOT NULL DEFAULT 0,
+	error        TEXT NOT NULL DEFAULT '',
+	FOREIGN KEY (env_id) REFERENCES test_environments(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_test_runs_env ON test_runs(env_id);
+CREATE INDEX IF NOT EXISTS idx_test_runs_project_env ON test_runs(project_id, env_id);
+
+-- One row per test case, parsed out of the Playwright JSON report.
+-- title is titlePath joined with " › " so nested describe() blocks stay legible.
+-- status: 'passed' | 'failed' | 'flaky' | 'skipped' | 'timedOut' | 'interrupted'.
+-- attachments is a JSON array of {name, path, content_type} where path is RELATIVE
+-- to runs/<run_id>/ (absolute paths from the report are converted on ingest,
+-- and anything resolving outside the run dir is dropped).
+-- issue_url / requirement_id are the close-loop backfills — non-empty means
+-- the failure has already been escalated, which is what makes the button
+-- idempotent.
+CREATE TABLE IF NOT EXISTS test_run_cases (
+	id              TEXT PRIMARY KEY,
+	run_id          TEXT NOT NULL,
+	file            TEXT NOT NULL DEFAULT '',
+	title           TEXT NOT NULL DEFAULT '',
+	status          TEXT NOT NULL DEFAULT 'passed',
+	error           TEXT NOT NULL DEFAULT '',
+	duration_ms     INTEGER NOT NULL DEFAULT 0,
+	attachments     TEXT NOT NULL DEFAULT '[]',
+	issue_url       TEXT NOT NULL DEFAULT '',
+	issue_number    INTEGER NOT NULL DEFAULT 0,
+	requirement_id  TEXT NOT NULL DEFAULT '',
+	FOREIGN KEY (run_id) REFERENCES test_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_test_run_cases_run ON test_run_cases(run_id);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -1574,7 +1693,10 @@ var (
 	// MySQL cannot index TEXT columns (needs a key length), so every column
 	// that is a PK/UNIQUE/index target becomes a VARCHAR. Column definitions
 	// all start at the beginning of a line in the canonical schema.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
+	// env_id / run_id are here for the automated-testing tables, whose FK
+	// columns are indexed on every dialect; sub_task_id was missing and
+	// made sub_task_thinking's PRIMARY KEY uncreatable on MySQL.
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|env_id|run_id|sub_task_id)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

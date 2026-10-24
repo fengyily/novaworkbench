@@ -466,6 +466,33 @@ func main() {
 	// service simply exposes no /issues endpoint.
 	reviewH.SetRequirementSvc(reqSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
+	// ── 自动化测试（Playwright Test Agents）────────────────────────────────
+	// Jobs live only in memory, so any row still marked in-flight after a
+	// restart is an orphan whose process died with the previous server.
+	// Recover them before serving, otherwise a stale 'initializing' env would
+	// 409 every future init and a 'running' run would look live forever.
+	testEnvSvc := service.NewTestEnvService(database)
+	testPlanSvc := service.NewTestPlanService(database, testEnvSvc)
+	testRunSvc := service.NewTestRunService(database, testEnvSvc, testPlanSvc)
+	if n, err := testEnvSvc.RecoverInterrupted(); err != nil {
+		log.Printf("[main] testing env recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] testing env recovery: reset %d stale initializing envs", n)
+	}
+	if n, err := testPlanSvc.RecoverInterrupted(); err != nil {
+		log.Printf("[main] testing plan recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] testing plan recovery: reset %d stale plans", n)
+	}
+	if n, err := testRunSvc.RecoverInterrupted(); err != nil {
+		log.Printf("[main] testing run recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] testing run recovery: reset %d stale runs", n)
+	}
+	testingH := handler.NewTestingHandler(projectSvc, testEnvSvc, testPlanSvc, testRunSvc,
+		llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
+	testingH.SetPlatformSvc(platformSvc) // 建 Issue close-loop
+	testingH.SetRequirementSvc(reqSvc)   // 转需求 close-loop
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
@@ -591,6 +618,48 @@ func main() {
 	mux.HandleFunc("POST /api/code-reviews/{rid}/issues", reviewH.CreateIssuesFromReview)
 	mux.HandleFunc("PUT /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.UpdateDescription)
 	mux.HandleFunc("DELETE /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.Delete)
+
+	// ── 自动化测试（Playwright Test Agents）────────────────────────────────
+	// Read routes take testing.view, mutating routes testing.manage. The
+	// split matters because creating an environment or launching a run
+	// spawns processes on the host — that is a developer capability, not a
+	// read.
+	mux.HandleFunc("GET /api/projects/{id}/testing/envs", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.ListEnvs)).ServeHTTP)
+	mux.HandleFunc("POST /api/projects/{id}/testing/envs", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CreateEnv)).ServeHTTP)
+	mux.HandleFunc("GET /api/projects/{id}/testing/plans", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.ListPlans)).ServeHTTP)
+	mux.HandleFunc("POST /api/projects/{id}/testing/plans", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CreatePlan)).ServeHTTP)
+	mux.HandleFunc("GET /api/projects/{id}/testing/runs", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.ListRuns)).ServeHTTP)
+	// One SSE route shared by init / planner / generator / run / heal.
+	mux.HandleFunc("GET /api/projects/{id}/testing/stream/{job_id}", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.StreamTestJob)).ServeHTTP)
+
+	// Direct-resource routes carry no project id, so each handler resolves
+	// the row and enforces project ownership itself.
+	mux.HandleFunc("GET /api/testing/envs/{env_id}", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.GetEnv)).ServeHTTP)
+	mux.HandleFunc("PUT /api/testing/envs/{env_id}", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.UpdateEnv)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/testing/envs/{env_id}", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.DeleteEnv)).ServeHTTP)
+	mux.HandleFunc("GET /api/testing/envs/{env_id}/status", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.GetEnvStatus)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/envs/{env_id}/init", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.StartEnvInit)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/envs/{env_id}/init/cancel", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CancelEnvInit)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/envs/{env_id}/runs", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.StartRun)).ServeHTTP)
+
+	mux.HandleFunc("GET /api/testing/plans/{plan_id}", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.GetPlan)).ServeHTTP)
+	mux.HandleFunc("PUT /api/testing/plans/{plan_id}", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.UpdatePlan)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/testing/plans/{plan_id}", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.DeletePlan)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/plans/{plan_id}/generate", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.StartGenerate)).ServeHTTP)
+
+	mux.HandleFunc("GET /api/testing/runs/{run_id}", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.GetRun)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/testing/runs/{run_id}", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.DeleteRun)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/runs/{run_id}/cancel", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CancelRun)).ServeHTTP)
+	// Screenshots and traces. Read-only and scoped to the run directory; the
+	// handler rejects any path that escapes it. The wildcard segment maps
+	// directly onto the run dir, so a stored path of "artifacts/shot.png"
+	// becomes .../files/artifacts/shot.png rather than colliding with a
+	// literal segment name.
+	mux.HandleFunc("GET /api/testing/runs/{run_id}/files/{path...}", middleware.RequirePermission(aclSvc, "testing.view")(http.HandlerFunc(testingH.ServeArtifact)).ServeHTTP)
+
+	// Failure → back into the normal pipeline.
+	mux.HandleFunc("POST /api/testing/cases/{case_id}/issue", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CreateCaseIssue)).ServeHTTP)
+	mux.HandleFunc("POST /api/testing/cases/{case_id}/requirement", middleware.RequirePermission(aclSvc, "testing.manage")(http.HandlerFunc(testingH.CreateCaseRequirement)).ServeHTTP)
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)

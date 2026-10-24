@@ -175,3 +175,59 @@ func (c *gitlabClient) PostIssueComment(ctx context.Context, repoURL string, iss
 	log.Printf("[platform/gitlab] PostIssueComment not yet implemented (v0.5.x GitHub-only); repo=%s issue=%d", repoURL, issueNumber)
 	return errors.New("gitlab PostIssueComment is not implemented in v0.5.x (GitHub-only)")
 }
+
+// CreateIssue opens a new Issue via POST /api/v4/projects/{p}/issues.
+// Unlike ListIssues/PostIssueComment (stubbed above because the monitor
+// polls them continuously), creation is a single user-initiated call, so
+// it ships fully implemented on all three platforms. GitLab takes label
+// NAMES as a comma-separated string — unlike Gitea, no id lookup needed.
+func (c *gitlabClient) CreateIssue(ctx context.Context, repoURL, title, body string, labels []string) (*Issue, error) {
+	project, err := c.parseProjectPath(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]any{"title": title, "description": body}
+	if len(labels) > 0 {
+		payload["labels"] = strings.Join(labels, ",")
+	}
+	raw, _ := json.Marshal(payload)
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/issues", c.baseURL, project)
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("GitLab API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var out struct {
+		IID       int      `json:"iid"`
+		Title     string   `json:"title"`
+		Desc      string   `json:"description"`
+		State     string   `json:"state"`
+		WebURL    string   `json:"web_url"`
+		Author    struct {
+			Username string `json:"username"`
+		} `json:"author"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if out.Labels == nil {
+		out.Labels = []string{}
+	}
+	return &Issue{
+		Number:  out.IID,
+		Title:   out.Title,
+		Body:    out.Desc,
+		Author:  out.Author.Username,
+		Labels:  out.Labels,
+		State:   out.State,
+		HTMLURL: out.WebURL,
+	}, nil
+}
