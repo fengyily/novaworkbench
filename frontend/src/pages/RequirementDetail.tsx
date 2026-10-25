@@ -5597,6 +5597,7 @@ export default function RequirementDetail() {
               {reqKind !== 'idea' && (
                 <StageQAChat
                   requirementId={req.id}
+                  requirementTitle={req.title}
                   stage="design"
                   stageSessionId={req.design_session_id}
                   model={architectModel}
@@ -6333,6 +6334,7 @@ export default function RequirementDetail() {
           {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && (
             <StageQAChat
               requirementId={req.id}
+              requirementTitle={req.title}
               stage="coding"
               stageSessionId={req.coding_session_id}
               model={developerModel}
