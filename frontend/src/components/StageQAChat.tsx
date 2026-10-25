@@ -10,12 +10,14 @@ import {
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
+import { FullscreenButton } from './FullscreenButton';
 import MarkdownRender from './MarkdownRender';
 import ModelSelect from './ModelSelect';
 import { IconChat, IconClose, IconRefresh, IconRobot, IconTrash } from './icons';
 import { errorMessage } from '../utils/errMsg';
 import { fmtDateTime } from '../utils/intl';
 import { appendLogLine, type LogLine } from '../utils/logLines';
+import { useFullscreen } from '../utils/useFullscreen';
 import './StageQAChat.css';
 
 // StageQAChat — a read-only Q&A thread about one production conversation.
@@ -80,10 +82,15 @@ export default function StageQAChat({
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [liveLines, setLiveLines] = useState<LogLine[]>([]);
+  // CSS-only fullscreen (same mechanism as the other SSE panels): the
+  // EventStream, refs and jobs keep running untouched while the panel
+  // becomes viewport-fixed. Esc exits via the hook.
+  const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
 
   const esRef = useRef<EventStream | null>(null);
   // Guards against a late stream callback writing into an unmounted tree.
   const mountedRef = useRef(true);
+  const threadRef = useRef<HTMLDivElement | null>(null);
 
   const closeStream = useCallback(() => {
     esRef.current?.close();
@@ -255,6 +262,15 @@ export default function StageQAChat({
     [asking, requirementId, stage, model, claudeConfigId, subscribe],
   );
 
+  // Keep the newest turn in view when the panel is open. In fullscreen the
+  // thread is the only scrolling region, so without this a new question would
+  // be appended below the fold.
+  useEffect(() => {
+    if (!expanded) return;
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [expanded, turns]);
+
   const removeTurn = useCallback(
     async (turn: RequirementQATurn) => {
       if (!window.confirm(t('requirements.qaChat.deleteConfirm'))) return;
@@ -280,6 +296,13 @@ export default function StageQAChat({
     }
   }, [requirementId, stage, t]);
 
+  // Collapsing must also leave fullscreen: a fixed, empty panel with only its
+  // header on screen would look like a broken overlay.
+  const collapse = useCallback(() => {
+    exitFullscreen();
+    setExpanded(false);
+  }, [exitFullscreen]);
+
   // The stage was re-run: the current stage session no longer matches the
   // one the thread was forked from. Flag it so the panel can say so.
   const drifted =
@@ -289,12 +312,12 @@ export default function StageQAChat({
   const hasContent = turns.length > 0;
 
   return (
-    <div className={`qa-panel${expanded ? ' is-expanded' : ''}`}>
+    <div className={`qa-panel${expanded ? ' is-expanded' : ''}${isFullscreen ? ' is-fullscreen' : ''}`}>
       <div className="qa-header">
         <button
           type="button"
           className="qa-header-toggle"
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => (expanded ? collapse() : setExpanded(true))}
           title={expanded ? t('requirements.qaChat.collapseBtn') : t('requirements.qaChat.expandBtn')}
         >
           <IconChat size={15} className="icon-mr" />
@@ -330,10 +353,13 @@ export default function StageQAChat({
             </button>
           )}
           {expanded && (
+            <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
+          )}
+          {expanded && (
             <button
               type="button"
               className="btn btn-sm"
-              onClick={() => setExpanded(false)}
+              onClick={collapse}
               title={t('requirements.qaChat.collapseBtn')}
             >
               <IconClose size={13} />
@@ -346,7 +372,7 @@ export default function StageQAChat({
         <>
           <p className="qa-hint">{t('requirements.qaChat.hint')}</p>
 
-          <div className="qa-thread">
+          <div className="qa-thread" ref={threadRef}>
             {loading && <p className="qa-empty">{t('requirements.qaChat.loading')}</p>}
             {!loading && turns.length === 0 && (
               <p className="qa-empty">{t('requirements.qaChat.empty')}</p>
