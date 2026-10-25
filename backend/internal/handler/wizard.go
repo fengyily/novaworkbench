@@ -105,6 +105,13 @@ type WizardHandler struct {
 	// working (a deployment that doesn't need regenerating can leave it
 	// nil without affecting any first-run path).
 	designRevSvc *service.DesignRevisionService
+	// qaSvc handles the requirement_qa_turns table — the 阶段答疑 (stage Q&A)
+	// threads hanging off a requirement's design / coding session. Wired
+	// after construction from main.go via SetRequirementQASvc (same pattern
+	// as the design-revision service: the wizard handler sits in a
+	// constructor cycle with the services it consumes). nil disables just
+	// the Q&A endpoints; every other wizard feature keeps working.
+	qaSvc *service.RequirementQAService
 }
 
 func NewWizardHandler(database *db.DB, projectSvc projectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
@@ -177,6 +184,15 @@ func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 // the new handler registers.
 func (h *WizardHandler) SetDesignRevisionSvc(svc *service.DesignRevisionService) {
 	h.designRevSvc = svc
+}
+
+// SetRequirementQASvc injects the RequirementQAService used by the 阶段答疑
+// (stage Q&A) endpoints (wizard_qa.go). Called from main.go AFTER
+// NewWizardHandler because the service participates in the wizard→service
+// dependency cycle. Passing nil is safe: the Q&A endpoints then answer
+// "service not enabled" while every other wizard feature keeps working.
+func (h *WizardHandler) SetRequirementQASvc(svc *service.RequirementQAService) {
+	h.qaSvc = svc
 }
 
 // attachManifestFor returns the attachment manifest markdown for a

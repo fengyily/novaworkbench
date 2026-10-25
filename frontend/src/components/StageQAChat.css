@@ -1,0 +1,270 @@
+/* StageQAChat — the 阶段答疑 (stage Q&A) panel.
+ *
+ * A thread of questions about one production conversation (the 方案设计会话
+ * or the 开发会话). The panel deliberately reads QUIETER than the artifacts
+ * it talks about: it is a side channel, not a second workspace. So the
+ * question bubble is tinted, the answer body uses the shared `.md-prose`
+ * typography, and the only saturated colour in the panel is the error state.
+ */
+
+.qa-panel {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  margin-top: 12px;
+}
+
+.qa-panel.is-expanded {
+  border-color: rgba(79, 70, 229, 0.28);
+}
+
+.qa-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  flex-wrap: wrap;
+}
+
+.qa-header-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.qa-header-toggle:hover {
+  color: var(--color-primary);
+}
+
+.qa-count {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.qa-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The stage was re-run after the thread was forked: the answers below the
+   divider were produced against an older conversation. */
+.qa-drift-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.qa-hint {
+  margin: 0;
+  padding: 0 10px 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.qa-thread {
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qa-empty {
+  margin: 0;
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.qa-rotate-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.qa-rotate-divider::before,
+.qa-rotate-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.qa-turn {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg);
+}
+
+.qa-turn-error {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.qa-turn-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.qa-turn-qtext {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-turn-tag {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.qa-turn-del {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.qa-turn-del:hover {
+  opacity: 1;
+}
+
+.qa-turn-a {
+  margin-top: 8px;
+}
+
+.qa-turn-abody {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.qa-turn-pending {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.qa-turn-errtext {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-error-deep);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* Only worth flagging the degraded case: a resumed answer is the
+   expectation, a fresh one explains why an answer may be shallower than the
+   conversation it talks about. */
+.qa-turn-fresh {
+  color: var(--color-warning-deep);
+}
+
+.qa-live {
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.qa-live-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-live-phase {
+  color: var(--color-text-muted);
+}
+
+.qa-live-tool_call {
+  color: var(--color-accent-cool);
+}
+
+.qa-live-message {
+  color: var(--color-text);
+}
+
+.qa-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 10px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--color-error-soft);
+  color: var(--color-error-deep);
+  font-size: 12px;
+}
+
+.qa-error-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0;
+  display: inline-flex;
+}
+
+.qa-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.qa-textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+}
+
+.qa-refresh {
+  margin: 0 10px 10px;
+}

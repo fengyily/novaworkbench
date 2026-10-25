@@ -153,6 +153,44 @@ CREATE TABLE IF NOT EXISTS coding_chats (
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 
+-- 阶段答疑对话 (Stage Q&A Chat) — 针对「方案设计会话」/「开发会话」的独立答疑线程。
+--
+-- 一行一问一答(turn 表)而不是整段转录表,原因有二:
+--   1. 答疑由后端 job 化执行(goroutine 后台跑),答案必须由后端落库 —— 用户发问后
+--      关掉浏览器,答案不能丢。refinement_chats / coding_chats 那种「前端 PUT 整段
+--      转录」的形态与此冲突。
+--   2. status / job_id(刷新重连句柄) / resumed(降级按轮发生)天然是 per-turn 字段。
+--
+-- 会话元数据记在每一轮行上,不另设线程表:
+--   session_id        —— 本轮实际运行的 QA 会话 id(首问 fork 时预铸)
+--   source_session_id —— fork 时的源会话快照(requirements.design_session_id /
+--                       coding_session_id)。源会话重跑后 id 失配即被检出 → 自动
+--                       重新 fork,旧问答保留展示。
+--   resumed           —— 1=续接了 QA 会话上下文 / 0=降级为全新会话(源会话失效)。
+--
+-- 关键不变式:本表 session_id 是答疑流程唯一写入的会话列 —— requirements 的
+-- design_session_id / coding_session_id 全程只读,答疑零污染。
+CREATE TABLE IF NOT EXISTS requirement_qa_turns (
+	id                TEXT PRIMARY KEY,
+	requirement_id    TEXT NOT NULL,
+	stage             TEXT NOT NULL DEFAULT 'design',
+	question          TEXT NOT NULL DEFAULT '',
+	answer            TEXT NOT NULL DEFAULT '',
+	status            TEXT NOT NULL DEFAULT 'running',
+	job_id            TEXT NOT NULL DEFAULT '',
+	model             TEXT NOT NULL DEFAULT '',
+	session_id        TEXT NOT NULL DEFAULT '',
+	source_session_id TEXT NOT NULL DEFAULT '',
+	resumed           INTEGER NOT NULL DEFAULT 0,
+	created_by        TEXT NOT NULL DEFAULT '',
+	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	finished_at       DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+-- 线程视图恒为「某个需求的某个阶段的全部轮次,按时间正序」。
+CREATE INDEX IF NOT EXISTS idx_qa_req_stage ON requirement_qa_turns(requirement_id, stage, created_at);
+
 CREATE TABLE IF NOT EXISTS project_run_configs (
 	id           TEXT PRIMARY KEY,
 	project_id   TEXT NOT NULL,
@@ -1579,7 +1617,9 @@ var (
 	// bare TEXT column. sub_task_id was missing until 2026-10-24, which made
 	// `CREATE TABLE sub_task_thinking` fail on MySQL (TEXT PRIMARY KEY
 	// without a prefix length), while SQLite/Postgres silently accepted it.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
+	// `stage` joined the list with requirement_qa_turns (indexed as part of
+	// idx_qa_req_stage) — the same trap, one column further down.
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

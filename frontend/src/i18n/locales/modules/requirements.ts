@@ -152,6 +152,35 @@ export const requirements = {
     designStageLabel: '方案模型与执行环境',
     designLaunchError: '需求已创建，但方案生成失败：{{error}}',
   },
+  // qaChat — 阶段答疑面板 (StageQAChat.tsx)：针对「方案设计会话」/「开发会话」
+  // 的独立答疑线程。答疑跑在从原会话 fork 出来的独立会话里，不写回原会话。
+  qaChat: {
+    title: '方案 / 开发答疑',
+    expandBtn: '展开答疑',
+    collapseBtn: '收起',
+    hint: '针对本阶段的方案 / 实现提问。答疑在独立会话中进行，不会影响原会话的上下文。',
+    loading: '加载答疑记录…',
+    empty: '还没有答疑记录。',
+    questionTag: '问',
+    answerTag: '答',
+    running: '正在回答…',
+    failed: '答疑失败',
+    asking: '回答中…',
+    askBtn: '提问',
+    placeholder: '例如：为什么这里用 turn 表而不是转录表？\nEnter 发送  ·  Shift+Enter 换行',
+    deleteTitle: '删除这条答疑',
+    deleteConfirm: '删除这条答疑记录？',
+    resetBtn: '清空',
+    resetTitle: '清空本阶段的答疑记录',
+    resetConfirm: '确定清空本阶段的所有答疑记录吗？',
+    refreshBtn: '刷新',
+    refreshTitle: '重新拉取答疑记录',
+    execError: '答疑执行出错',
+    freshBadge: '未续接原会话（基于方案原文作答）',
+    threadRotated: '上下文已更新',
+    driftBadge: '上下文已更新',
+    driftHint: '该阶段在答疑线程建立之后被重新执行过。下一轮提问会从新的会话重新 fork。',
+  },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.

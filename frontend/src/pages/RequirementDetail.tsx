@@ -7,6 +7,7 @@ import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
+import StageQAChat from '../components/StageQAChat';
 import ModelSelect from '../components/ModelSelect';
 import RequirementEditForm from '../components/RequirementEditForm/RequirementEditForm';
 import SubTaskPanel from '../components/SubTaskPanel';
@@ -5589,6 +5590,22 @@ export default function RequirementDetail() {
                 onUsage={setDesignUsage}
               />
               )}
+              {/* 阶段答疑 — a read-only Q&A thread about the design. It forks a
+                  dedicated session off the design session, so asking a question
+                  never touches the design conversation the refine/apply chat
+                  above resumes. */}
+              {reqKind !== 'idea' && (
+                <StageQAChat
+                  requirementId={req.id}
+                  stage="design"
+                  stageSessionId={req.design_session_id}
+                  model={architectModel}
+                  defaultModel={architectDefaultModel}
+                  onModelChange={setArchitectModel}
+                  claudeConfigId={architectConfigId}
+                  onClaudeConfigChange={setArchitectConfigId}
+                />
+              )}
             </>
           )}
         </div>
@@ -6306,6 +6323,24 @@ export default function RequirementDetail() {
                 </button>
               </div>
             </div>
+          )}
+
+          {/* 阶段答疑 — a read-only Q&A thread about the implementation. It
+              forks a dedicated session off the coding session, so the answers
+              never mix into the coding conversation the 「追加调整」 composer
+              above resumes — that composer DOES overwrite coding_session_id,
+              this one never touches it. */}
+          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && (
+            <StageQAChat
+              requirementId={req.id}
+              stage="coding"
+              stageSessionId={req.coding_session_id}
+              model={developerModel}
+              defaultModel={developerDefaultModel}
+              onModelChange={onDeveloperModelChange}
+              claudeConfigId={developerConfigId}
+              onClaudeConfigChange={onDeveloperConfigChange}
+            />
           )}
 
           {req.status === 'developing' && !coding && (
