@@ -416,6 +416,13 @@ func main() {
 	// the routes register handlers that return 500 "service unavailable".
 	designRevSvc := service.NewDesignRevisionService(database)
 	wizardH.SetDesignRevisionSvc(designRevSvc)
+	// requirement_qa_turns — the 阶段答疑 (stage Q&A) threads. The wizard
+	// handler owns the write path (fork a QA session off the design /
+	// coding session, run the turn, persist the answer); the service owns
+	// the turn rows. Nil-safe: without it the Q&A endpoints answer
+	// "service not enabled".
+	qaSvc := service.NewRequirementQAService(database)
+	wizardH.SetRequirementQASvc(qaSvc)
 	issueMonH := handler.NewIssueMonitorHandler(issueMonSvc, projectSvc)
 	issueMonSemSize := 4
 	if env := os.Getenv("NOVA_ISSUE_MONITOR_CONCURRENCY"); env != "" {
@@ -788,6 +795,14 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)
+	// 阶段答疑 (stage Q&A) — a read-only Q&A thread forked off the
+	// requirement's design / coding session. The POST that asks the
+	// question lives under /api/wizard (it dispatches a background job);
+	// the three read/mutate endpoints live here next to the other
+	// requirement-scoped data.
+	mux.HandleFunc("GET /api/requirements/{id}/qa-chat/{stage}", wizardH.ListStageQA)
+	mux.HandleFunc("DELETE /api/requirements/{id}/qa-chat/{stage}", wizardH.ResetStageQA)
+	mux.HandleFunc("DELETE /api/requirements/{id}/qa-chat/{stage}/turns/{tid}", wizardH.DeleteStageQATurn)
 	mux.HandleFunc("GET /api/requirements/{id}/coding-chat", reqH.GetCodingChat)
 	mux.HandleFunc("PUT /api/requirements/{id}/coding-chat", reqH.SaveCodingChat)
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
@@ -830,6 +845,12 @@ func main() {
 	// Three-role stage-gate: analyst → architect → developer.
 	mux.HandleFunc("POST /api/wizard/analyst-chat", wizardH.AnalystChat)
 	mux.HandleFunc("POST /api/wizard/developer-chat", wizardH.DeveloperChat)
+	// 阶段答疑 (stage Q&A) — asks one question against the requirement's
+	// design / coding session. The handler forks a dedicated QA session
+	// (so the production session stays untouched), dispatches the turn as
+	// a background job and returns {job_id, turn_id}; the answer streams
+	// through the shared GET /api/wizard/jobs/{id}/stream channel.
+	mux.HandleFunc("POST /api/wizard/qa-chat", wizardH.AskStageQA)
 	mux.HandleFunc("POST /api/wizard/architect-design", wizardH.ArchitectDesign)
 	// Design-doc import — bypasses Claude / JobStore / SSE so the user can
 	// paste or upload an externally-generated Markdown plan and land

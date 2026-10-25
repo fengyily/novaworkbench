@@ -80,9 +80,9 @@ handler/  ->  service/  ->  *db.DB (model/ holds structs, no behavior)
 
 Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N` on PostgreSQL (`Exec`/`Query`/`QueryRow`/`Begin`), quotes reserved identifiers via `Ident` (the `key` column is reserved in MySQL), and builds upsert suffixes via `OnConflict` (`ON CONFLICT … DO UPDATE` vs `ON DUPLICATE KEY UPDATE`). **Conventions for new SQL**: write `?` placeholders, go through the wrapper, use `Ident`/`OnConflict` where relevant. New columns still follow the ad-hoc pattern: append an `ALTER TABLE` to `alterColumns` in `schema.go` — no separate migration files.
 
-`db.Migrate(src, dst)` copies the **25 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
+`db.Migrate(src, dst)` copies the **27 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
 
-**36 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743,776`):
+**37 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743,776,829`):
 
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
@@ -97,6 +97,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定 + `claude_session_id` 供追问 `--resume`) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
 | `code_review_followups` | `crf_` | **Review 追问**(一行一问一答,`resumed` 记录是否续接了原 Review 会话;`CodeReviewService.Delete` 显式清理,不依赖 SQLite 不生效的 FK CASCADE) |
 | `code_review_revisions` | `crr_` | **Review 报告版本**(一行一版,`rev_no` 按 review 从 1 递增,`trigger_kind` 区分 `initial`/`regenerate`;`code_reviews` 只存「当前版」,所有既有读路径不变,本表是其身后的历史——这正是「基于对话重新生成」敢点的原因:被替换的那版仍可读、可切回。`trigger_kind` 而非 `trigger`,后者在 MySQL 是保留字) |
+| `requirement_qa_turns` | `qat_` | **阶段答疑轮次**(一行一问一答,`stage` 区分 design/coding;`session_id` 是本轮运行的 QA 会话(首问 fork 时预铸),`source_session_id` 是 fork 来源的阶段会话快照,`resumed` 记录本轮是否真的续接了会话上下文;源会话重跑后 `source_session_id` 失配 → 自动重新 fork,旧轮保留。**本表 `session_id` 是答疑流程唯一写入的会话列**——`requirements.design_session_id`/`coding_session_id` 全程只读,答疑零污染) |
 
 > **`roles` vs `acl_roles`**: 两个"角色"语义独立。`roles` = AI persona(由 wizard/review 注入 system prompt);`acl_roles` = RBAC 角色(由 `middleware/auth.go` `RequirePermission` 消费)。
 
@@ -210,6 +211,23 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 - **一切失败降级为「无父需求」**,绝不阻塞设计(与 `roleConfig` 的「broken config 不阻塞」同构):主需求被删、跨项目、主需求自身也是子需求(防御性复查,仅一层由 schema 保证)都只记日志返回空。`ParentBlock == ""` 时 prompt 与落库行为**逐字不变**,由单测钉住。
 - 存量子需求的旧方案不含该章节,重新设计或 refine 后才产生,**不做批量回填**。主需求后续再改也不会自动同步(自包含的代价),要更新就重跑设计或在 refine 里让模型重新提炼。
 
+#### 阶段答疑对话 (Stage Q&A Chat, `handler/wizard_qa.go` + `service/requirement_qa.go` + `prompt/qa_chat.go`)
+
+需求详情页在两条"生产型"会话旁各挂一个只读答疑面板(`components/StageQAChat.tsx`)：**方案设计会话**(`requirements.design_session_id`)与**开发会话**(`coding_session_id`)。用户问"这里为什么这么设计"时，原有入口都有副作用 —— `refine-doc`/`apply-doc` 是改文档流程，`developer-chat`/`adjust-coding` 会续写甚至覆盖 `coding_session_id`，把答疑混进生产主线。
+
+本功能是**第三条路径**：首问 `--resume <源会话> --fork-session --session-id <预铸uuid>` fork 出一个独立 QA 会话，后续轮次纯 `--resume <QA会话>`。fork 继承原会话全部上下文，但答疑的任何一轮都**不写回原会话** —— `design_session_id`/`coding_session_id` 及其 jsonl 转录零污染。
+
+- **数据模型**：`requirement_qa_turns` 一行一问一答（不是转录表）。答疑由后端 job 化执行，答案必须由后端落库（用户关掉浏览器答案不能丢），且 `status`/`job_id`(刷新重连)/`resumed`(降级按轮发生) 天然是 per-turn 字段。会话元数据记在每轮行上，不设第二张表：当前 QA 会话 = 最新一条非 error 轮的 `session_id`；`source_session_id` 是 fork 来源快照。
+- **`resolveQASession` 三分支**（纯函数，单测钉全分支）：①**resume** —— 线程 QA 会话还在且 `source_session_id` 与当前阶段会话一致（或阶段会话为空/为空快照）→ 续接；②**fork** —— 阶段会话存在但快照失配（用户重跑了阶段）→ 从新会话重新 fork，旧轮保留展示；③**fresh** —— 都没有 → 预铸 id + 全量上下文注入 prompt。`source_session_id == ""` 的降级轮会被当作可 resume（它自己已经带着粘贴的上下文 + 问答历史），否则下一问会重新 fork 并丢掉用户刚建立的问答。
+- **只读保证**：`qaChatDisallowedTools = {"Write","Edit"}` → `--disallowedTools`；prompt 再声明"只答疑、不改文件、不改文档、禁止输出实施计划"。**不用 plan 模式**（plan 模式的 CLI 指令会诱导模型写 plan 文件）。
+- **单终点落库**：`runStageQA` 的每条出口都走 `finishQATurn`（答案过 `service.SanitizeMermaidBlocks`，错误文本存进 `answer` 让气泡不空）。stale `--resume` 与 fork 守卫失败都**降级重跑 fresh**（`resumed=0`、`source_session_id=''`），不硬错 —— QA 只读，降级代价只是回答浅一点。
+- **fork 守卫的求值时机**：`requireAnchoredFork(reqRow, projectPath)` 必须在 `resolveWorkDir` **之前**调用，且第二参数是**项目路径**而非 worktree —— 前者可能 clear + 重建漂移的 `worktree_path`（此时内存副本不再反映源会话的生成环境），后者本身是 git 仓库，传 worktree 会让守卫每次误触发。
+- **超时**：`CLAUDE_TIMEOUT` 不作用于 `StreamCmd` 路径（ctx 由 caller 拥有），实际治理是 `runClaudeStream` 的 stall watchdog → `qaStallTimeout=10m`（fork 后要重读代码，3m 偏紧）+ `qaHardTimeout=30m` 绝对 cap。
+- **孤儿修复**：turn 行在 spawn 前就写 `running`，后端重启 / JobStore 驱逐会留下永不完成的轮。`Ask`/`List` 入口 lazy 修复（job 已不在 → `MarkOrphaned` 翻 `error`），前端不会看到永久 spinner。
+- **v1 仅本地执行**（对「ExecEnv 约定」的显式豁免）：远端 run 的 jsonl 已由 `syncSessionDownWithTimeout` 下行同步到本地 slug 目录，本地 fork 通常可行；副本缺失表现为 stale → 自动降级，闭环成立。
+
+API：`POST /api/wizard/qa-chat`（返回 `{job_id, turn_id}`，流复用 `GET /api/wizard/jobs/{id}/stream`）+ `GET`/`DELETE /api/requirements/{id}/qa-chat/{stage}` + `DELETE .../turns/{tid}`。前端 `qaChatApi`；答案**不从 SSE 重建** —— `job_done` 后重拉线程，流只用于进度反馈。
+
 ### Preflight (`internal/preflight/`)
 
 `preflight.New(CLAUDE_BIN)` builds a registry of runtime deps (`claude`, `node`, `npm`, `git`, `docker`) — `claude`/`node`/`npm` are required, `git`/`docker` are optional (docker enables the runner's compose sessions). `Registry.CheckAll` is network-free (LookPath + `--version`, 5s timeout); runs at startup, never halts the server. Surfaced at `GET /api/preflight` and folded into `/api/health` (`ready` flag = claude installed).
@@ -235,7 +253,7 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 
 ## Frontend
 
-- **API 客户端 (`frontend/src/api/`)** — **单文件 `client.ts`** 集中 28 个 `*Api` 对象 + `api.get/post/put/patch/delete` 包装;`stream.ts` (93 行) 是 `createEventStream()` SSE 替代品。27 个 `*Api`:`projectsApi` / `dashboardApi` / `fsApi` / `memoriesApi` / `knowledgeApi` / `scannerApi` / `subTasksApi` / `subTaskConfigApi`(v0.5.0 新增) / `requirementsApi` / `wizardApi` / `runnerApi` / `mergeApi` / `reviewApi` / `platformApi` / `claudeApi` / `llmApi` / `databaseApi` / **`rolesApi`(AI persona)** / `skillsApi` / `reportsApi` / `usageApi` / `authApi` / **`aclApi`(RBAC, 含义与 `rolesApi` 不同)** / `preflightApi` / `agentServersApi` / `schedulesApi` / `gitSyncConfigApi`(v0.5.0 新增) / **`codeReviewsApi`(分支 Review 会话 + 追问 `listFollowups`/`ask`/`removeFollowup` + 重新生成与版本 `regenerate`/`listRevisions`/`getRevision`/`restoreRevision`,与 `reviewApi` 的 PR 面并存)**.
+- **API 客户端 (`frontend/src/api/`)** — **单文件 `client.ts`** 集中 29 个 `*Api` 对象 + `api.get/post/put/patch/delete` 包装;`stream.ts` (93 行) 是 `createEventStream()` SSE 替代品。28 个 `*Api`:`projectsApi` / `dashboardApi` / `fsApi` / `memoriesApi` / `knowledgeApi` / `scannerApi` / `subTasksApi` / `subTaskConfigApi`(v0.5.0 新增) / `requirementsApi` / `wizardApi` / `runnerApi` / `mergeApi` / `reviewApi` / `platformApi` / `claudeApi` / `llmApi` / `databaseApi` / **`rolesApi`(AI persona)** / `skillsApi` / `reportsApi` / `usageApi` / `authApi` / **`aclApi`(RBAC, 含义与 `rolesApi` 不同)** / `preflightApi` / `agentServersApi` / `schedulesApi` / `gitSyncConfigApi`(v0.5.0 新增) / **`codeReviewsApi`(分支 Review 会话 + 追问 `listFollowups`/`ask`/`removeFollowup` + 重新生成与版本 `regenerate`/`listRevisions`/`getRevision`/`restoreRevision`,与 `reviewApi` 的 PR 面并存)** / **`qaChatApi`(阶段答疑:`list`/`ask`/`reset`/`removeTurn` + `streamJobUrl`,复用 `GET /api/wizard/jobs/{id}/stream`)**.
 - **路由表 (`App.tsx:55-83`, `RequireAuth` + `<Layout>` 包裹)**: `/login` `Login`; `/` `Dashboard`; `/wizard` `WizardPage`; `/projects/add` `AddProject`; `/projects` `ProjectsList`; `/projects/:id` `ProjectDetail`(内嵌 `/projects/:id/reports` 由 `ProjectWeeklyReport` 渲染); `/requirements` `RequirementsList`; `/requirements/calendar` `RequirementsCalendar`; `/requirements/:id` `RequirementDetail`; `/schedules` `SchedulesPage`; `/knowledge` `KnowledgePage`; `/chat` `Chat`(占位); `/reports` `Reports`(占位); `/settings` `Settings`(嵌套 `index=SettingsTokens` / `users=SettingsUsers` / `acl=SettingsACLRoles` / `roles=SettingsRoles` / `agent-servers=SettingsAgentServers` / `skills=SettingsSkills` / `claude=SettingsClaude` / `llm=SettingsLLM` / `subtask=SettingsSubTask` / `git-sync=SettingsGitSync` / `database=SettingsDatabase` / `preflight=SettingsPreflight`)。
 
 - **i18n (`frontend/src/i18n/`)** — `i18next ^26` + `react-i18next ^17`,顶层 init 在 `i18n/index.ts`(模块顶层自调用 `initI18n()`,先于 App 挂载)。支持 `zh-CN` / `en-US`(`i18n/constants.ts`),18 对模块(`chat`/`common`/`components`/`dashboard`/`errors`/`knowledge`/`login`/`nav`/`projects`/`reports`/`requirements`/`schedules`/`settings`/`status`/`time`/`wizard` 等)。`LanguageSwitcher` 嵌在 `Layout` 与 `Login`。`utils/lang.ts` 持久化到 localStorage + `users.locale`。`utils/intl.ts` 提供 `fmtDate`/`fmtDateTime`。

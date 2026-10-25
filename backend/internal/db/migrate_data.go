@@ -29,6 +29,13 @@ var copyOrder = []string{
 	"knowledge",
 	"conversations",
 	"refinement_chats",
+	// coding_chats was missing from the copy list even though the table has
+	// existed since the analyst/developer chat transcript was introduced — a
+	// database migration therefore silently dropped every requirement's
+	// developer transcript. Added here alongside the QA turn table so the two
+	// requirement-scoped chat tables move together.
+	"coding_chats",
+	"requirement_qa_turns",
 	"project_run_configs",
 	"platform_tokens",
 	"roles",

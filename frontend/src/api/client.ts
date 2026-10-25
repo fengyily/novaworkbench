@@ -1999,6 +1999,53 @@ export function parseReviewFindings(review: Pick<CodeReview, 'findings_json'> | 
   }
 }
 
+// ── 阶段答疑 (Stage Q&A Chat) ──────────────────────────────────────────────
+
+/**
+ * Which production conversation a Q&A thread asks about: the 方案设计会话
+ * (design) or the 开发会话 (coding).
+ */
+export type QAStage = 'design' | 'coding';
+
+export type QATurnStatus = 'running' | 'done' | 'error';
+
+/**
+ * One question-and-answer turn of a stage Q&A thread.
+ *
+ * The thread is persisted server-side (one row per turn), so it survives a
+ * page refresh and a backend restart — the live SSE stream is memory-only
+ * and is used just for progress feedback.
+ *
+ * `answer` doubles as the failure message when status is 'error', so the
+ * thread shows what went wrong instead of an empty bubble.
+ */
+export interface RequirementQATurn {
+  id: string;
+  requirement_id: string;
+  stage: QAStage;
+  question: string;
+  answer: string;
+  status: QATurnStatus;
+  /** JobStore id of this turn's run — lets the UI re-attach to the SSE
+   *  stream after a refresh while the turn is still running. */
+  job_id: string;
+  model: string;
+  /** The Q&A session this turn ran in. */
+  session_id: string;
+  /** The stage session this thread was forked from. A mismatch against the
+   *  requirement's current stage session means the stage was re-run and the
+   *  next question forks again — the UI renders a divider there. */
+  source_session_id: string;
+  /** true when the turn continued a session that held the forked context.
+   *  false means the answer came from a degraded run seeded with the plan
+   *  document — still useful, but shallower. */
+  resumed: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
 /**
  * Decodes CodeReview.goal_checks_json. Empty is the normal case for reports
  * written before the evidence table was part of the contract, and for models
@@ -2127,6 +2174,39 @@ export const codeReviewsApi = {
     severities?: ('P0' | 'P1' | 'P3')[];
     priority?: string;
   }) => api.post<Requirement[]>(`/api/code-reviews/${reviewId}/issues`, body),
+};
+
+// ── 阶段答疑 (Stage Q&A Chat) ──────────────────────────────────────────────
+//
+// A read-only Q&A thread forked off the requirement's design / coding
+// session. Asking returns a JobStore id streamed through the SAME channel
+// every other wizard job uses (GET /api/wizard/jobs/{id}/stream) — the Q&A
+// never opens a second SSE protocol.
+//
+// The answer is NOT reconstructed from the stream: the backend persists every
+// turn, so the UI re-reads the thread on job_done and the live stream is
+// only progress feedback.
+export const qaChatApi = {
+  /** The thread of one stage, oldest first. */
+  list: (requirementId: string, stage: QAStage) =>
+    api.get<RequirementQATurn[]>(`/api/requirements/${requirementId}/qa-chat/${stage}`),
+  /** Asks one question. Returns the job id to stream and the turn id. */
+  ask: (requirementId: string, stage: QAStage, question: string, body?: { model?: string; claude_config_id?: string }) =>
+    api.post<{ job_id: string; turn_id: string }>('/api/wizard/qa-chat', {
+      requirement_id: requirementId,
+      stage,
+      question,
+      ...(body?.model ? { model: body.model } : {}),
+      ...(body?.claude_config_id ? { claude_config_id: body.claude_config_id } : {}),
+    }),
+  /** Clears the whole thread of one stage. */
+  reset: (requirementId: string, stage: QAStage) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/qa-chat/${stage}`),
+  /** Removes one turn. */
+  removeTurn: (requirementId: string, stage: QAStage, turnId: string) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/qa-chat/${stage}/turns/${turnId}`),
+  /** SSE channel for a Q&A job — shared with every other wizard job. */
+  streamJobUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
 };
 
 // Platform tokens

@@ -62,6 +62,9 @@ build-frontend:
 	rm -rf backend/web/dist
 	mkdir -p backend/web/dist
 	cp -r frontend/dist/. backend/web/dist/
+	@# Restore the tracked placeholder deleted by the rm above: //go:embed
+	@# all:dist fails to compile when web/dist has no files at all.
+	@touch backend/web/dist/.gitkeep
 
 build-backend:
 	cd backend && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../dist/nova ./cmd/server
@@ -72,6 +75,9 @@ run:
 
 clean:
 	rm -rf backend/web/dist dist/nova $(SENTINEL)
+	@# A clean tree must stay compilable for backend-only work, so restore
+	@# the embed placeholder rather than leaving web/dist absent.
+	@mkdir -p backend/web/dist && touch backend/web/dist/.gitkeep
 
 doctor:
 	@scripts/check-build-deps.sh --with-frontend

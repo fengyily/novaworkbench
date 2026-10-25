@@ -1807,7 +1807,7 @@ func (s *ProjectService) Purge(id string) error {
 
 	// Grandchildren keyed off the project's requirements — delete before the
 	// requirements rows they reference.
-	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats"}
+	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns"}
 	for _, tbl := range reqScoped {
 		q := `DELETE FROM ` + tbl + ` WHERE requirement_id IN (SELECT id FROM requirements WHERE project_id = ?)`
 		if _, err := tx.Exec(q, id); err != nil {

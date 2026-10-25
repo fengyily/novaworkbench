@@ -155,6 +155,36 @@ export const requirements = {
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.
+  // qaChat — the stage Q&A panel (StageQAChat.tsx): a read-only thread that
+  // asks the design / coding session "why did you do it this way". The
+  // answers live in a forked session; the production session is untouched.
+  qaChat: {
+    title: 'Design / dev Q&A',
+    expandBtn: 'Expand Q&A',
+    collapseBtn: 'Collapse',
+    hint: 'Ask about this stage’s design or implementation. Answers run in a separate session, so the original conversation stays untouched.',
+    loading: 'Loading Q&A…',
+    empty: 'No questions yet.',
+    questionTag: 'Q',
+    answerTag: 'A',
+    running: 'Answering…',
+    failed: 'Q&A failed',
+    asking: 'Answering…',
+    askBtn: 'Ask',
+    placeholder: 'e.g. why a turn table instead of a transcript table?\nEnter to send  ·  Shift+Enter for a new line',
+    deleteTitle: 'Delete this Q&A turn',
+    deleteConfirm: 'Delete this Q&A turn?',
+    resetBtn: 'Clear',
+    resetTitle: 'Clear this stage’s Q&A thread',
+    resetConfirm: 'Clear every Q&A turn of this stage?',
+    refreshBtn: 'Refresh',
+    refreshTitle: 'Re-read the Q&A thread',
+    execError: 'Q&A run failed',
+    freshBadge: 'Not resumed from the original session (answered from the plan document)',
+    threadRotated: 'Context updated',
+    driftBadge: 'Context updated',
+    driftHint: 'This stage was re-run after the Q&A thread was created. The next question forks from the new session.',
+  },
   detail2: {
     // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge
     // in the design section; the full SHA is in the title. Hidden when empty.
