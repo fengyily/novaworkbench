@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# backend/web/dist is build output, but //go:embed all:dist needs at least
+# one file at compile time. Keep the .gitkeep placeholder tracked so a fresh
+# checkout can run `go vet ./...` / `go test ./...` before any frontend build.
+!backend/web/dist/
+!backend/web/dist/.gitkeep
 .env
 *.log
 .nova/
