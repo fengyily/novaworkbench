@@ -184,6 +184,26 @@ export const requirements = {
     threadRotated: 'Context updated',
     driftBadge: 'Context updated',
     driftHint: 'This stage was re-run after the Q&A thread was created. The next question forks from the new session.',
+    // Export — the thread as a standalone document. The label is used both as
+    // the H1 suffix and as the filename suffix so the .md and .pdf of one
+    // thread sort together.
+    exportBtn: 'Export',
+    exportTitleAttr: 'Export this stage’s answered Q&A as a document',
+    exportDisabledTitle: 'No answered Q&A yet — nothing to export',
+    exportMd: 'Export Markdown (.md)',
+    exportPdf: 'Export PDF',
+    exportBusy: 'Generating PDF…',
+    exportFailed: 'Export failed: ',
+    exportTitleDesign: 'Design Q&A',
+    exportTitleCoding: 'Dev Q&A',
+    exportStageDesign: 'Design',
+    exportStageCoding: 'Development',
+    exportMetaRequirement: 'Requirement',
+    exportMetaStage: 'Stage',
+    exportMetaTurns: 'Turns',
+    exportMetaTime: 'Exported at',
+    exportFreshNote: 'Not resumed from the original session (answered from the plan document)',
+    exportRotated: 'Context updated',
   },
   detail2: {
     // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge

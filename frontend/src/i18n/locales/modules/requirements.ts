@@ -180,6 +180,26 @@ export const requirements = {
     threadRotated: '上下文已更新',
     driftBadge: '上下文已更新',
     driftHint: '该阶段在答疑线程建立之后被重新执行过。下一轮提问会从新的会话重新 fork。',
+    // Export — the thread as a standalone document. The label is used both as
+    // the H1 suffix and as the filename suffix so the .md and .pdf of one
+    // thread sort together.
+    exportBtn: '导出',
+    exportTitleAttr: '把本阶段已完成的答疑导出为文档',
+    exportDisabledTitle: '还没有已完成的答疑，暂无可导出内容',
+    exportMd: '导出 Markdown (.md)',
+    exportPdf: '导出 PDF',
+    exportBusy: '生成 PDF…',
+    exportFailed: '导出失败：',
+    exportTitleDesign: '方案设计答疑',
+    exportTitleCoding: '开发实现答疑',
+    exportStageDesign: '方案设计',
+    exportStageCoding: '开发实现',
+    exportMetaRequirement: '需求',
+    exportMetaStage: '阶段',
+    exportMetaTurns: '问答轮次',
+    exportMetaTime: '导出时间',
+    exportFreshNote: '未续接原会话（基于方案原文作答）',
+    exportRotated: '上下文已更新',
   },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).

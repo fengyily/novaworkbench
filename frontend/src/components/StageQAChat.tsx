@@ -15,8 +15,16 @@ import MarkdownRender from './MarkdownRender';
 import ModelSelect from './ModelSelect';
 import { IconChat, IconClose, IconRefresh, IconRobot, IconTrash } from './icons';
 import { errorMessage } from '../utils/errMsg';
+import { exportDesignPdf } from '../utils/exportDesignPdf';
 import { fmtDateTime } from '../utils/intl';
 import { appendLogLine, type LogLine } from '../utils/logLines';
+import {
+  buildQAChatMarkdown,
+  downloadQAChatMarkdown,
+  exportableTurns,
+  qaExportLabel,
+  qaExportTitle,
+} from '../utils/qaExport';
 import { useFullscreen } from '../utils/useFullscreen';
 import './StageQAChat.css';
 
@@ -44,6 +52,9 @@ import './StageQAChat.css';
 
 interface Props {
   requirementId: string;
+  /** Requirement title, used as the exported document's heading and
+   *  filename stem — the thread itself never displays it. */
+  requirementTitle?: string;
   /** Which production conversation this thread asks about. */
   stage: QAStage;
   /** The requirement's CURRENT stage session id. A turn whose
@@ -66,6 +77,7 @@ const MODEL_STAGE: Record<QAStage, 'architect' | 'developer'> = {
 
 export default function StageQAChat({
   requirementId,
+  requirementTitle = '',
   stage,
   stageSessionId,
   model,
@@ -82,6 +94,8 @@ export default function StageQAChat({
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [liveLines, setLiveLines] = useState<LogLine[]>([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   // CSS-only fullscreen (same mechanism as the other SSE panels): the
   // EventStream, refs and jobs keep running untouched while the panel
   // becomes viewport-fixed. Esc exits via the hook.
@@ -296,6 +310,40 @@ export default function StageQAChat({
     }
   }, [requirementId, stage, t]);
 
+  // ── Export ───────────────────────────────────────────────────────────────
+  //
+  // Both formats come from the SAME Markdown string: the `.md` is the thread
+  // as-is, and the PDF goes through exportDesignPdf, which pre-bakes mermaid
+  // so a diagram inside an answer survives into the file.
+  const canExport = exportableTurns(turns).length > 0;
+
+  const handleExportMd = useCallback(() => {
+    downloadQAChatMarkdown({ requirementTitle, requirementId, stage, turns });
+  }, [requirementTitle, requirementId, stage, turns]);
+
+  const handleExportPdf = useCallback(async () => {
+    if (exportingPdf) return;
+    setExportingPdf(true);
+    setError('');
+    try {
+      await exportDesignPdf({
+        title: qaExportTitle({ requirementTitle, requirementId, stage }),
+        meta: requirementId,
+        markdown: buildQAChatMarkdown({ requirementTitle, requirementId, stage, turns }),
+        filename: requirementTitle.trim() || requirementId,
+        pdfLabel: qaExportLabel(stage),
+      });
+    } catch (err) {
+      // Surface inline, in the same panel the user is looking at — a failed
+      // export must not look like a dead button.
+      if (mountedRef.current) {
+        setError(`${t('requirements.qaChat.exportFailed')}${errorMessage(err)}`);
+      }
+    } finally {
+      if (mountedRef.current) setExportingPdf(false);
+    }
+  }, [exportingPdf, requirementTitle, requirementId, stage, turns, t]);
+
   // Collapsing must also leave fullscreen: a fixed, empty panel with only its
   // header on screen would look like a broken overlay.
   const collapse = useCallback(() => {
@@ -341,6 +389,51 @@ export default function StageQAChat({
             onConfigChange={(id) => onClaudeConfigChange?.(id)}
             style={{ minWidth: 150 }}
           />
+          {hasContent && (
+            <div className="qa-export">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setExportOpen((v) => !v)}
+                disabled={!canExport || exportingPdf}
+                aria-expanded={exportOpen}
+                title={
+                  canExport
+                    ? t('requirements.qaChat.exportTitleAttr')
+                    : t('requirements.qaChat.exportDisabledTitle')
+                }
+              >
+                {exportingPdf ? t('requirements.qaChat.exportBusy') : `${t('requirements.qaChat.exportBtn')} ▾`}
+              </button>
+              {exportOpen && (
+                <>
+                  <div className="qa-export-backdrop" onClick={() => setExportOpen(false)} />
+                  <div className="qa-export-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setExportOpen(false);
+                        handleExportMd();
+                      }}
+                    >
+                      {t('requirements.qaChat.exportMd')}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setExportOpen(false);
+                        void handleExportPdf();
+                      }}
+                    >
+                      {t('requirements.qaChat.exportPdf')}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {hasContent && !asking && (
             <button
               type="button"

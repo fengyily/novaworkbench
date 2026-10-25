@@ -27,6 +27,9 @@
 import i18next from 'i18next';
 import { marked } from 'marked';
 import mermaid from 'mermaid';
+// Shared with the other exporters so a thread's `.md` and `.pdf` downloads
+// land on the same stem instead of drifting apart.
+import { sanitizeFilename } from './exportFilename';
 import { removeMermaidLeftovers } from './mermaidCleanup';
 
 export interface DesignExportInput {
@@ -96,9 +99,6 @@ const STYLES = `
   }
 `;
 
-function sanitizeFilename(name: string, fallback: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || fallback;
-}
 
 // mermaidReady — single-init flag mirroring MarkdownRender.tsx. The PDF path
 // can be entered before any on-screen MarkdownRender has mounted, so this
