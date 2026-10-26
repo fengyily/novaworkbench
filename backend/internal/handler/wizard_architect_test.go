@@ -1830,3 +1830,214 @@ func TestArchitectRemoteCallSiteForwardsSystemPrompt(t *testing.T) {
 		}
 	}
 }
+
+// ── 继续设计 (POST /api/wizard/continue-design) ─────────────────────────────
+//
+// The continuation path exists for the state the pipeline otherwise cannot
+// leave: an interrupted design run (backend restart, killed claude, 504,
+// stall watchdog) whose partial plan / session survived. These tests pin the
+// three properties the recovery depends on:
+//  1. only status=designing + a non-empty design session may continue;
+//  2. the run resumes that SAME session (no fork, no new id);
+//  3. no design_revisions row is written (continue is not regenerate).
+
+func TestPrepareContinueDesign_RejectsInvalidState(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     string
+		kind       string
+		designSID  string
+		wantStatus int
+		wantCode   string
+	}{
+		{"draft has no run to resume", "draft", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"analyzing has no design run", "analyzing", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"designed uses regenerate instead", "designed", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"developing uses regenerate instead", "developing", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"done is terminal", "done", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"archived is terminal", "archived", "requirement", "sid", 409, "INVALID_STATUS"},
+		{"designing without a session", "designing", "requirement", "", 409, "NO_SESSION"},
+		{"wiki uses its own pipeline", "designing", "wiki", "sid", 400, "KIND_NOT_SUPPORTED"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+			if _, err := d.Exec(`UPDATE requirements SET status=?, kind=? WHERE id=?`, c.status, c.kind, reqID); err != nil {
+				t.Fatalf("seed status/kind: %v", err)
+			}
+			if c.designSID != "" {
+				if err := reqSvc.UpdateDesignSession(reqID, c.designSID); err != nil {
+					t.Fatalf("seed design_session_id: %v", err)
+				}
+			}
+
+			_, _, af := h.prepareContinueDesign(context.Background(), reqID, false)
+			if af == nil {
+				t.Fatalf("expected %d %s, got success", c.wantStatus, c.wantCode)
+			}
+			if af.Status != c.wantStatus || af.Code != c.wantCode {
+				t.Fatalf("got %d %s (%s), want %d %s", af.Status, af.Code, af.Msg, c.wantStatus, c.wantCode)
+			}
+		})
+	}
+}
+
+func TestPrepareContinueDesign_ResumesSessionWithoutSnapshot(t *testing.T) {
+	d, reqID, h, reqSvc := newRegenerateTestEnv(t)
+	if err := reqSvc.UpdateDesignSession(reqID, "sid-design-interrupted"); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+	if err := reqSvc.UpdateAnalysisSession(reqID, "sid-analyst"); err != nil {
+		t.Fatalf("seed analysis_session_id: %v", err)
+	}
+	if _, err := d.Exec(
+		`UPDATE requirements SET status='designing', design_docs=? WHERE id=?`,
+		"## 方案草稿\n\n已经探明的部分。", reqID,
+	); err != nil {
+		t.Fatalf("seed status/design_docs: %v", err)
+	}
+
+	p, job, af := h.prepareContinueDesign(context.Background(), reqID, false)
+	if af != nil {
+		t.Fatalf("prepareContinueDesign failed: %d %s %s", af.Status, af.Code, af.Msg)
+	}
+	if job == nil {
+		t.Fatal("expected a JobStore job")
+	}
+	if !p.Continue {
+		t.Fatal("p.Continue must be true — that is what selects the continuation prompt")
+	}
+	if p.SourceSID != "sid-design-interrupted" {
+		t.Fatalf("SourceSID = %q, want the persisted design session", p.SourceSID)
+	}
+	if p.Fork {
+		t.Fatal("continuation must resume, not fork")
+	}
+	if p.NewDesignSID != "" {
+		t.Fatalf("NewDesignSID = %q, want empty (no new session minted)", p.NewDesignSID)
+	}
+
+	var nRev int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM design_revisions WHERE requirement_id = ?`, reqID,
+	).Scan(&nRev); err != nil {
+		t.Fatalf("count revisions: %v", err)
+	}
+	if nRev != 0 {
+		t.Fatalf("design_revisions count = %d, want 0 (continue is not regenerate)", nRev)
+	}
+
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.DesignSessionID != "sid-design-interrupted" {
+		t.Fatalf("design_session_id = %q, want it untouched", got.DesignSessionID)
+	}
+	if got.DesignJobID == "" {
+		t.Fatal("design_job_id must be persisted so a refresh reconnects to the run")
+	}
+}
+
+// TestPrepareDesignWorkspace_ContinueUsesContinuationPrompt pins the prompt
+// branch wiring: p.Continue must REPLACE the standard "switch to the architect
+// role" prompt, and the replacement must be the bare "继续" instruction — no
+// requirement title, no plan contract, no partial design_docs. Re-feeding any
+// of that makes the resumed model rewrite the plan instead of continuing.
+func TestPrepareDesignWorkspace_ContinueUsesContinuationPrompt(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "prep-design-continue-")
+	defer os.RemoveAll(dir)
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer d.Close()
+
+	reqID := seedRequirementForSchedule(t, d)
+	const projID = "proj_seed_sched"
+	const baseBranch = "main"
+
+	upstreamDir := filepath.Join(t.TempDir(), "origin.git")
+	mustGit(t, "", "git", "init", "--bare", "--initial-branch="+baseBranch, upstreamDir)
+	seed := filepath.Join(t.TempDir(), "seed")
+	mustGit(t, "", "git", "clone", upstreamDir, seed)
+	mustGit(t, seed, "git", "config", "user.email", "test@nova")
+	mustGit(t, seed, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("init"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustGit(t, seed, "git", "add", "README.md")
+	mustGit(t, seed, "git", "commit", "-m", "init")
+	mustGit(t, seed, "git", "push", "origin", "HEAD:"+baseBranch)
+
+	work := filepath.Join(t.TempDir(), "work")
+	mustGit(t, "", "git", "clone", upstreamDir, work)
+	mustGit(t, work, "git", "config", "user.email", "test@nova")
+	mustGit(t, work, "git", "config", "user.name", "Test")
+
+	if _, err := d.Exec(
+		`UPDATE projects SET local_path = ?, remote_url = ? WHERE id = ?`,
+		work, upstreamDir, projID); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+
+	const partial = "## 方案草稿\n\n已经完成的探索结论：先改 A，再改 B。"
+	if _, err := d.Exec(
+		`UPDATE requirements SET status='designing', design_docs=? WHERE id=?`, partial, reqID,
+	); err != nil {
+		t.Fatalf("seed design_docs: %v", err)
+	}
+
+	reqSvc := service.NewRequirementService(d, nil)
+	projSvc := service.NewProjectService(d, nil, nil)
+	settingSvc := service.NewSettingService(d)
+	jobs := store.NewJobStore(8)
+
+	req, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	job := jobs.Create(reqID)
+	h := &WizardHandler{
+		db:         d,
+		projectSvc: projSvc,
+		reqSvc:     reqSvc,
+		settingSvc: settingSvc,
+		jobs:       jobs,
+	}
+
+	p := &designRunParams{
+		Req:         req,
+		ProjectPath: work,
+		BaseBranch:  baseBranch,
+		SourceSID:   "sid-design-interrupted",
+		Continue:    true,
+	}
+
+	if ok := h.prepareDesignWorkspace(p, job); !ok {
+		lines, status, _ := job.Snapshot()
+		t.Fatalf("prepareDesignWorkspace failed (status=%s, lines=%+v)", status, lines)
+	}
+	// The whole point of the continuation is a bare --resume: the session
+	// already holds the requirement, the analysis and the partial plan. Any
+	// re-fed material turns into a rewrite, so the prompt must START with the
+	// short constant (the kind-specific output block — e.g. the Mermaid
+	// directive — is still appended after it; that is an output contract, not
+	// a task re-feed). SkipRoleContext=false here, so no description /
+	// manifest prefixes either.
+	if !strings.HasPrefix(p.Prompt, continueDesignPrompt) {
+		t.Fatalf("continuation prompt = %q, want it to start with %q", p.Prompt, continueDesignPrompt)
+	}
+	for _, unwanted := range []string{
+		"现在切换到「架构师」角色",
+		"基于我们刚才完成的需求分析对话",
+		partial,
+		"## 需求标题",
+		"上次运行保存的方案草稿",
+	} {
+		if strings.Contains(p.Prompt, unwanted) {
+			t.Errorf("continuation prompt must not re-feed %q\n---\n%s", unwanted, p.Prompt)
+		}
+	}
+}

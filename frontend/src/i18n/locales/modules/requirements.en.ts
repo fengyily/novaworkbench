@@ -516,6 +516,12 @@ export const requirements = {
     processToggleShow: '▶ Show thinking process',
     regenerateBtn: 'Regenerate plan',
     regenerateBtnTitle: 'Regenerate the design plan on a brand-new session; earlier refinement turns are not inherited',
+    // 继续设计 — recovery entry for an interrupted run (backend restart,
+    // killed process, 504, dropped stream). Sits next to "Regenerate plan":
+    // this one resumes the same session, that one starts a brand-new one and
+    // freezes the old plan as a history version.
+    continueDesignBtn: 'Continue design',
+    continueDesignTitle: 'Resume the interrupted design session (--resume) and let Claude pick up where it left off instead of starting over; reuses the saved model and execution environment (role defaults when none were saved)',
     // 重新生成 confirm dialog (req_11e485759f583db8): shown after the
     // user clicks "Regenerate plan". The body explains that the
     // current plan will be FROZEN as a history version (not destroyed)
