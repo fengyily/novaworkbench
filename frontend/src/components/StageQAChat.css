@@ -131,10 +131,329 @@
   color: var(--color-text-secondary);
 }
 
+/* ── Toolbar ───────────────────────────────────────────────────────────────
+   The hint line grew a row of controls: the question index toggle and the
+   view switch (全局 / 分栏). The header is already crowded — model picker,
+   export menu, clear, fullscreen, close — so the view controls live here,
+   right next to the thing they change. */
+.qa-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  flex-wrap: wrap;
+}
+
+.qa-toolbar .qa-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 0;
+}
+
+.qa-toolbar-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qa-index-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The chevron rotates when the drawer is open. */
+.qa-caret {
+  transition: transform 0.15s ease;
+}
+
+.qa-caret.is-open {
+  transform: rotate(180deg);
+}
+
+/* Segmented view switch — two exclusive options, so one grouped control
+   reads better than two loose buttons. */
+.qa-mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.qa-mode-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.qa-mode-btn:hover {
+  color: var(--color-primary);
+}
+
+.qa-mode-btn.is-active {
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+/* ── Question index ────────────────────────────────────────────────────────
+   ONE component, two placements: `drawer` sits above the thread in 全局
+   mode, `rail` is the permanent left column in 分栏 mode. Same markup, so
+   the two can never drift apart. */
+.qa-index {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+}
+
+.qa-index--drawer {
+  margin: 0 10px 8px;
+  max-height: 220px;
+  flex-shrink: 0;
+}
+
+.qa-index--rail {
+  flex: 0 0 clamp(200px, 26%, 300px);
+  min-width: 0;
+}
+
+.qa-index-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px 5px;
+}
+
+.qa-index-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.qa-index-count {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.qa-index-filter-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 6px;
+  color: var(--color-text-muted);
+}
+
+.qa-index-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.qa-index-filter:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.qa-index-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 6px;
+}
+
+.qa-index-empty {
+  margin: 0;
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* "Context updated" — the stage was re-run between this turn and the one
+   before it, so the answers below were produced against a different
+   conversation. The thread draws the same marker; without it here the
+   split view would hide the fact entirely. */
+.qa-index-rotated {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 4px 4px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.qa-index-rotated::before,
+.qa-index-rotated::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.qa-index-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.qa-index-row:hover {
+  background: var(--color-hover);
+}
+
+.qa-index-row.is-selected {
+  background: var(--color-active);
+}
+
+.qa-index-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  padding: 5px 4px 5px 6px;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.qa-index-num {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+
+.qa-index-row.is-selected .qa-index-num {
+  color: var(--color-primary);
+}
+
+.qa-index-q {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Status dots: a running turn, a failed turn, and the degraded "not
+   resumed from the original session" answer. Dots rather than icons — a
+   column of twenty rows reads as noise otherwise. */
+.qa-index-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  margin-top: 6px;
+  background: var(--color-text-muted);
+}
+
+.qa-index-dot.is-running {
+  background: var(--color-accent-cool);
+  animation: qa-index-pulse 1.2s ease-in-out infinite;
+}
+
+.qa-index-dot.is-error {
+  background: var(--color-error);
+}
+
+.qa-index-dot.is-fresh {
+  background: var(--color-warning);
+}
+
+@keyframes qa-index-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.qa-index-del {
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.qa-index-row:hover .qa-index-del,
+.qa-index-del:focus-visible {
+  opacity: 0.55;
+}
+
+.qa-index-del:hover {
+  opacity: 1;
+}
+
+/* ── Body: index rail (分栏) + thread (both modes) ───────────────────────── */
+.qa-body {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-height: 0;
+  padding: 0 10px;
+}
+
+.qa-panel.qa-mode-split .qa-body {
+  height: 420px;
+}
+
+/* Sticky header of the split pane: step through the questions without
+   scrolling back to the rail. */
+.qa-split-nav {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 4px 0 6px;
+  background: var(--color-surface);
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.qa-split-counter {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The turn an index click landed on — a brief flash so the eye finds it
+   in a long column. Only a ring, so a failed turn keeps its red border. */
+.qa-turn.is-highlight {
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.35);
+}
+
 .qa-thread {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   max-height: 420px;
   overflow-y: auto;
-  padding: 0 10px;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -351,16 +670,37 @@
   border-bottom: 1px solid var(--color-border);
 }
 
-.qa-panel.is-fullscreen .qa-hint {
+.qa-panel.is-fullscreen .qa-toolbar {
   flex-shrink: 0;
   padding: 8px 0;
+}
+
+.qa-panel.is-fullscreen .qa-toolbar .qa-hint {
+  padding: 0;
+}
+
+/* The body is the flex child that grows now — the thread is inside it. */
+.qa-panel.is-fullscreen .qa-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  padding: 8px 2px;
 }
 
 .qa-panel.is-fullscreen .qa-thread {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
-  padding: 8px 2px;
+  padding: 0;
+}
+
+.qa-panel.is-fullscreen .qa-index--rail {
+  flex: 0 0 300px;
+}
+
+.qa-panel.is-fullscreen .qa-index--drawer {
+  margin: 0 2px 8px;
+  max-height: 260px;
 }
 
 /* Comfort reading scale once the panel owns the viewport (same step-up the
@@ -406,5 +746,23 @@
   .qa-panel.is-fullscreen .qa-header-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  /* Too narrow for two columns: stack the index above the answer instead
+     of hiding it — a hidden index would leave no way to switch questions. */
+  .qa-body {
+    flex-direction: column;
+  }
+  .qa-index--rail {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 150px;
+  }
+  .qa-thread {
+    max-height: none;
+    flex: 1 1 auto;
+  }
+  .qa-panel.qa-mode-split .qa-body {
+    height: 420px;
   }
 }
