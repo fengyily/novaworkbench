@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { RequirementQATurn } from '../api/client';
+import { questionHeadline } from '../utils/qaQuestion';
 import { IconMagnifier, IconTrash } from './icons';
 
 // QAIndex — the question index of one stage Q&A thread.
@@ -52,19 +53,6 @@ interface Props {
   onFilterChange: (value: string) => void;
   /** Which presentation to render. */
   variant: 'drawer' | 'rail';
-}
-
-/**
- * The headline of a question: its first non-empty line. A question can be
- * several lines long (the composer allows them), and a table of contents
- * wants a label, not the whole paragraph.
- */
-function questionPreview(question: string): string {
-  for (const line of question.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed) return trimmed;
-  }
-  return question.trim();
 }
 
 export default function QAIndex({
@@ -120,12 +108,12 @@ export default function QAIndex({
                   type="button"
                   className="qa-index-item"
                   onClick={() => onSelect(turn)}
-                  title={questionPreview(turn.question)}
+                  title={questionHeadline(turn.question)}
                 >
                   <span className="qa-index-num">
                     {t('requirements.qaChat.indexNum', { n: no })}
                   </span>
-                  <span className="qa-index-q">{questionPreview(turn.question)}</span>
+                  <span className="qa-index-q">{questionHeadline(turn.question)}</span>
                   {turn.status === 'running' && (
                     <span
                       className="qa-index-dot is-running"

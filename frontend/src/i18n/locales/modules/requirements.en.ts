@@ -202,6 +202,7 @@ export const requirements = {
     exportMetaStage: 'Stage',
     exportMetaTurns: 'Turns',
     exportMetaTime: 'Exported at',
+    exportToc: 'Contents',
     exportFreshNote: 'Not resumed from the original session (answered from the plan document)',
     exportRotated: 'Context updated',
     // 目录 / 视图切换 — the question index. One component, two presentations:

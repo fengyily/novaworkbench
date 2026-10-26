@@ -13,6 +13,7 @@
 // in a document the user keeps would read like the assistant said them.
 import i18next from 'i18next';
 import { sanitizeFilename } from './exportFilename';
+import { questionHeadline, questionOneline } from './qaQuestion';
 import type { QAStage, RequirementQATurn } from '../api/client';
 
 export interface QAChatExportInput {
@@ -61,6 +62,13 @@ export function exportableTurns(turns: RequirementQATurn[]): RequirementQATurn[]
  * Reassemble the whole thread as plain Markdown — no CSS classes — so the
  * same string works as a `.md` file, as exportDesignPdf's input, and pasted
  * into an issue or a chat.
+ *
+ * The exported document gets a table of contents, because that is what makes
+ * a long thread readable once it has left the app: the questions are the
+ * only landmarks it has. Each entry links to an explicit `<a id>` anchor
+ * rather than to a renderer-generated heading slug — GitHub, GitLab and
+ * Typora each slugify a heading differently, so a computed `#slug` link
+ * would break in at least one of them. A raw anchor is boring and portable.
  */
 export function buildQAChatMarkdown(input: QAChatExportInput): string {
   const { requirementTitle, requirementId, stage } = input;
@@ -79,6 +87,21 @@ export function buildQAChatMarkdown(input: QAChatExportInput): string {
   meta.push(`- ${i18next.t('requirements.qaChat.exportMetaTime')}: ${formatStamp(new Date().toISOString())}`);
   parts.push(meta.join('\n'));
 
+  // Table of contents. One entry per answered turn, in the same order as
+  // the sections below, so the numbering matches what the reader sees.
+  if (answered.length > 0) {
+    parts.push(`## ${i18next.t('requirements.qaChat.exportToc')}`);
+    parts.push(
+      answered
+        .map((turn, i) => {
+          const no = i + 1;
+          return `${no}. [${escapeLinkText(questionHeadline(turn.question))}](#${tocAnchor(no)})`;
+        })
+        .join('\n'),
+    );
+    parts.push('---');
+  }
+
   answered.forEach((turn, i) => {
     const prev = i > 0 ? answered[i - 1] : null;
     // The stage was re-run between two answers: the turns below the divider
@@ -89,7 +112,18 @@ export function buildQAChatMarkdown(input: QAChatExportInput): string {
       parts.push(`> **${i18next.t('requirements.qaChat.exportRotated')}**`);
     }
 
-    const body: string[] = [`## ${i + 1}. ${turn.question.trim()}`];
+    const no = i + 1;
+    // The anchor sits INSIDE the heading, not on a line of its own: a
+    // standalone HTML block would swallow the heading that follows it in
+    // some Markdown parsers, and an empty paragraph before every heading
+    // would leave a visible gap in the PDF.
+    //
+    // The heading carries the WHOLE question (on one line), while the
+    // table of contents above carries only its headline — a table of
+    // contents wants a label, a section wants the full text.
+    const body: string[] = [
+      `## <a id="${tocAnchor(no)}"></a>${no}. ${questionOneline(turn.question)}`,
+    ];
     if (!turn.resumed) {
       body.push('', `> ${i18next.t('requirements.qaChat.exportFreshNote')}`);
     }
@@ -100,6 +134,20 @@ export function buildQAChatMarkdown(input: QAChatExportInput): string {
   });
 
   return parts.join('\n\n') + '\n';
+}
+
+/** The anchor id of one exported section. Stable across renders. */
+function tocAnchor(no: number): string {
+  return `qa-${no}`;
+}
+
+/**
+ * Escape the characters that would break a Markdown link label. A question
+ * can contain brackets (e.g. "why `map[key]`?") and an unescaped `]`
+ * would end the label early.
+ */
+function escapeLinkText(text: string): string {
+  return text.replace(/[\\[\]]/g, (m) => `\\${m}`);
 }
 
 /**

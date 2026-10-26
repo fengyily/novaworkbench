@@ -198,6 +198,7 @@ export const requirements = {
     exportMetaStage: '阶段',
     exportMetaTurns: '问答轮次',
     exportMetaTime: '导出时间',
+    exportToc: '目录',
     exportFreshNote: '未续接原会话（基于方案原文作答）',
     exportRotated: '上下文已更新',
     // 目录 / 视图切换 — the question index. One component, two presentations:
