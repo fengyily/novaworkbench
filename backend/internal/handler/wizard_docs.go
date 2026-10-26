@@ -424,6 +424,9 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		ClaudeConfigID: claudeConfigID,
 		SessionID:      sourceSID,
 		Resume:         !freshSession,
+		// Authorized directories (--add-dir grants) — the refine chat is
+		// where the user most often points Claude at a reference directory.
+		AddDirs: h.addDirsFor(req.RequirementID),
 	})
 
 	// Reuse runClaudeStream so this path gets live content_block_delta text
@@ -828,6 +831,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 					// default --dangerously-skip-permissions on the
 					// worker side.
 					PermissionMode: "",
+					AddDirs:        h.addDirsFor(reqID),
 				},
 			})
 		} else {
@@ -839,6 +843,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				ClaudeConfigID: claudeConfigID,
 				SessionID:      sourceSID,
 				Resume:         true,
+				AddDirs:        h.addDirsFor(reqID),
 			})
 			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, nil, 0, codingStallTimeout)
 		}

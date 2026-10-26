@@ -1,0 +1,169 @@
+/* DirectoryPanel — per-requirement authorized read directories.
+   Mirrors AttachmentPanel's visual hierarchy (header → add row → list) so the
+   two panels read as one "materials" block on the requirement detail page.
+   Colors stay within the design-system variables (Indigo / Slate / Emerald). */
+
+.dir-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.dir-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dir-panel__title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-strong, #1e293b);
+}
+
+.dir-panel__hint {
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  margin-top: 2px;
+}
+
+.dir-panel__error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* add row — path input + optional note + submit */
+
+.dir-panel__add {
+  display: grid;
+  grid-template-columns: 2fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.dir-panel__input,
+.dir-panel__label-input {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft, #cbd5e1);
+  border-radius: 4px;
+  background: white;
+  min-width: 0;
+}
+
+.dir-panel__input:focus,
+.dir-panel__label-input:focus {
+  outline: none;
+  border-color: var(--color-primary, #4f46e5);
+}
+
+.dir-panel__add-btn {
+  background: var(--color-primary, #4f46e5);
+  color: white;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.dir-panel__add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dir-panel__note {
+  font-size: 11px;
+  color: var(--text-muted, #94a3b8);
+  margin-top: -6px;
+}
+
+/* list */
+
+.dir-panel__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dir-panel__empty {
+  color: var(--text-muted, #94a3b8);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px 0;
+}
+
+.dir-panel__row {
+  position: relative;
+  border: 1px solid var(--border-soft, #e2e8f0);
+  border-radius: 6px;
+  padding: 8px 36px 8px 12px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dir-panel__row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dir-panel__path {
+  font-size: 13px;
+  color: var(--text-strong, #334155);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dir-panel__missing {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.dir-panel__label {
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dir-panel__delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.dir-panel__delete:hover {
+  background: #fee2e2;
+}
+
+/* narrow viewports — the three-column add row doesn't fit */
+
+@media (max-width: 640px) {
+  .dir-panel__add {
+    grid-template-columns: 1fr;
+  }
+}

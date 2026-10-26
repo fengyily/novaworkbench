@@ -104,6 +104,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_attach_req_sha
 	ON requirement_attachments(requirement_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_ra_req ON requirement_attachments(requirement_id);
 
+-- Directories the user authorized Claude to read for a requirement. Unlike
+-- requirement_attachments (which copies file bytes into NovaWorkbench's own
+-- store), a row here points at a directory that stays where it is on disk and
+-- is granted to the claude session via the CLI's --add-dir flag. The
+-- plan-mode architect stage needs this: without the grant, a read of a path
+-- outside the session's working directory needs a permission decision that
+-- nobody is there to make in a non-interactive run.
+--
+-- path holds the NORMALIZED absolute path (see service.NormalizeDirPath):
+-- a leading tilde is expanded, the path is made absolute and cleaned.
+-- Symlinks are not resolved. The unique pair is on (requirement_id, path)
+-- so granting the same directory twice is a no-op rather than a second row.
+CREATE TABLE IF NOT EXISTS requirement_dirs (
+	id              TEXT PRIMARY KEY,
+	requirement_id  TEXT NOT NULL,
+	path            TEXT NOT NULL,
+	label           TEXT NOT NULL DEFAULT '',
+	added_by        TEXT NOT NULL DEFAULT '',
+	added_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_reqdir_req_path
+	ON requirement_dirs(requirement_id, path);
+CREATE INDEX IF NOT EXISTS idx_rd_req ON requirement_dirs(requirement_id);
+
 CREATE TABLE IF NOT EXISTS knowledge (
 	id TEXT PRIMARY KEY,
 	project_id TEXT NOT NULL,

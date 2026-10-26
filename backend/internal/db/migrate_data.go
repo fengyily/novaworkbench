@@ -20,6 +20,9 @@ var copyOrder = []string{
 	"memories",
 	"requirements",
 	"requirement_attachments",
+	// Authorized directories (--add-dir grants) are requirement-scoped like
+	// the attachments above, so they travel with the requirement.
+	"requirement_dirs",
 	"design_revisions",
 	// Review sessions own their attachments — parent before child.
 	"code_reviews",

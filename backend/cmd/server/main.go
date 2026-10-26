@@ -262,6 +262,13 @@ func main() {
 	// /api/code-reviews/{id}/attachments is all that's needed.
 	reviewAttachmentSvc := service.NewCodeReviewAttachmentService(database)
 	reviewAttachmentH := handler.NewAttachmentHandler(reviewAttachmentSvc)
+	// Authorized directories: the directories the user granted Claude read
+	// access to for a requirement. Handed to the claude CLI as --add-dir,
+	// which is what keeps a plan-mode stage from stalling on a path outside
+	// its working directory. Metadata in requirement_dirs; the directories
+	// themselves stay where they are on disk.
+	requirementDirSvc := service.NewRequirementDirService(database)
+	requirementDirH := handler.NewRequirementDirHandler(requirementDirSvc)
 	// Persisted Review sessions — owner of the attachments above, carrier of
 	// the user-written 改动目标 description, landing spot for the graded
 	// (P0/P1/P3) report.
@@ -328,6 +335,7 @@ func main() {
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
+	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
 	// its Create handler can dispatch the optional 启动计划 (immediate wizard
 	// run / scheduled task) atomically. See requirement_launch.go and
@@ -407,6 +415,11 @@ func main() {
 	// attachment handler below — wiring order: handler builds first,
 	// wizard then SetAttachmentSvc.
 	wizardH.SetAttachmentSvc(attachmentSvc)
+	// Authorized-directory service: the directories the user granted Claude
+	// read access to for a requirement. The wizard passes them to the claude
+	// CLI as --add-dir (and names them in the prompt) so a plan-mode stage
+	// can read them without a permission decision nobody is there to make.
+	wizardH.SetRequirementDirSvc(requirementDirSvc)
 	// Design revision service: persistence for the 「重新生成技术方案」 flow
 	// (see req_11e485759f583db8). The wizard freezes the current plan into
 	// design_revisions BEFORE a regenerate run starts, and the
@@ -817,6 +830,11 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/attachments/{att_id}/content", attachmentH.Content)
 	mux.HandleFunc("PUT /api/requirements/{id}/attachments/{att_id}", attachmentH.UpdateDescription)
 	mux.HandleFunc("DELETE /api/requirements/{id}/attachments/{att_id}", attachmentH.Delete)
+	// Authorized directories — the directories Claude may read for this
+	// requirement (handed to the CLI as --add-dir).
+	mux.HandleFunc("POST /api/requirements/{id}/dirs", requirementDirH.Add)
+	mux.HandleFunc("GET /api/requirements/{id}/dirs", requirementDirH.List)
+	mux.HandleFunc("DELETE /api/requirements/{id}/dirs/{dir_id}", requirementDirH.Delete)
 	// Wiki archive / unarchive — distinct from the regular archive above
 	// (which is bound to status='done' + design_docs). WikiArchive
 	// accepts status ∈ {designed, done} and writes source_type='wiki_doc'

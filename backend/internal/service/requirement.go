@@ -1756,7 +1756,7 @@ func (s *RequirementService) Delete(id string) error {
 	for _, tbl := range []string{
 		"sub_tasks", "orchestration_batches", "scheduled_tasks",
 		"refinement_chats", "coding_chats", "requirement_attachments",
-		"requirement_qa_turns",
+		"requirement_qa_turns", "requirement_dirs",
 	} {
 		if _, err := tx.Exec("DELETE FROM "+tbl+" WHERE requirement_id=?", id); err != nil {
 			return fmt.Errorf("cleanup %s: %w", tbl, err)

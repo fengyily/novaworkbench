@@ -74,6 +74,11 @@ type remoteCodingInput struct {
 	// codingRunParams.SyncMode; see remoteRunInput.SyncMode for the
 	// architect-stage equivalent.
 	SyncMode string
+	// AddDirs lists directories the remote claude session is granted read
+	// access to via the CLI's --add-dir flag — the directories the user
+	// authorized for this requirement. The paths resolve on the AGENT HOST.
+	// See remoteRunInput.AddDirs for the full semantics.
+	AddDirs []string
 	// worktreeRoot is the resolved per-server work root (see
 	// agentWorktreeRootFor) — set once the server row is loaded and used for
 	// every scratch-clone / worktree / bundle path in this run.
@@ -126,6 +131,18 @@ type remoteRunInput struct {
 	// Empty = worker uses --dangerously-skip-permissions (dev default).
 	// "plan" = worker uses --permission-mode plan (architect default).
 	PermissionMode string
+	// AddDirs lists directories the remote claude session is granted read
+	// access to via the CLI's --add-dir flag. These are the directories the
+	// user authorized for the requirement (see
+	// service.RequirementDirService) — the same list the local path hands
+	// to llm.StreamOpts.AddDirs.
+	//
+	// The paths are interpreted on the AGENT HOST, not on the NovaWorkbench
+	// host: a grant made for a local run means nothing remotely unless the
+	// same absolute path exists there. The CLI ignores unknown --add-dir
+	// paths, so a stale grant degrades to "no access" instead of failing
+	// the run.
+	AddDirs []string
 	// SyncMode is the code-transport mode for the run. "" (default) = origin
 	// clone/push (the agent host has to be able to reach the project's git
 	// remote); "local" = git bundle over SFTP (for self-hosted repos with no
@@ -585,6 +602,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		Fork:                   fork,
 		ForkSessionID:          in.forkSessionID,
 		PermissionMode:         "",
+		AddDirs:                in.AddDirs,
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
 	}
 	// Use BuildRemoteEnvPairs (NOT a plain env inheritance): the remote worker
@@ -1007,6 +1025,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		ForkSessionID:          in.forkSessionID,
 		PermissionMode:         in.PermissionMode,
 		DisallowedTools:        in.DisallowedTools,
+		AddDirs:                in.AddDirs,
 		OverrideSettingSources: &ignoreLocal,
 	}
 	// Per-project git platform env — same wiring as the runRemoteCoding step-4
@@ -1818,6 +1837,14 @@ type workerRunBody struct {
 	Fork            bool              `json:"fork,omitempty"`
 	ForkSessionID   string            `json:"forkSessionId,omitempty"`
 	PermissionMode  string            `json:"permissionMode,omitempty"`
+	// AddDirs are the directories the remote claude session is granted read
+	// access to — the worker turns them into the CLI's variadic
+	// `--add-dir <dir>...` flag (always last in argv). omitempty keeps the
+	// field off the wire for callers that grant nothing, so their request
+	// bodies stay byte-identical to the pre-field shape.
+	//
+	// The paths resolve on the agent host. See remoteRunInput.AddDirs.
+	AddDirs []string `json:"addDirs,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	AllowedTools    []string          `json:"allowedTools,omitempty"`
 	DisallowedTools []string          `json:"disallowedTools,omitempty"`
@@ -2083,6 +2110,7 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, srv *model.AgentSe
 		// this reaching the worker — see remoteRunInput.DisallowedTools.
 		DisallowedTools: opts.DisallowedTools,
 		PermissionMode:  opts.PermissionMode,
+		AddDirs:         opts.AddDirs,
 		Env:             envMap,
 		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
 		// the inline --settings JSON (the worker's buildSettingsArg already

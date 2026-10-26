@@ -514,6 +514,12 @@ func (h *WizardHandler) runQATurn(
 			ClaudeConfigID:  claudeConfigID,
 			DisallowedTools: qaChatDisallowedTools,
 		}
+		// Authorized directories (--add-dir grants) — the Q&A session answers
+		// "why is it designed this way", so it needs the same read access to
+		// the granted reference material the other stages had.
+		if reqRow != nil {
+			opts.AddDirs = h.addDirsFor(reqRow.ID)
+		}
 		switch p.Mode {
 		case qaModeResume:
 			opts.Resume = true

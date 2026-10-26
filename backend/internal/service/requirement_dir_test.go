@@ -1,0 +1,264 @@
+package service
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/novaworkbench/backend/internal/db"
+)
+
+// reqDirTestDB opens a fresh SQLite db (migrations applied by db.Init) with
+// one project + one requirement to hang the directory grants off.
+func reqDirTestDB(t *testing.T) *db.DB {
+	t.Helper()
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: t.TempDir() + "/test.db"})
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	if _, err := d.Exec("INSERT INTO projects (id, name, local_path, description) VALUES ('proj_1', 'Test', '/tmp/proj1', '')"); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := d.Exec("INSERT INTO requirements (id, project_id, title, description) VALUES ('req_1', 'proj_1', '目录授权', '')"); err != nil {
+		t.Fatalf("seed requirement: %v", err)
+	}
+	return d
+}
+
+// TestNormalizeDirPath pins the path normalization rules. The stored path is
+// what the claude CLI receives as --add-dir AND what the UI shows, so a
+// surprise here (a relative path, an unexpanded tilde) would mean the model
+// reads a different directory than the user authorized.
+func TestNormalizeDirPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	abs, err := filepath.Abs("/tmp")
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr error
+	}{
+		{name: "absolute", in: abs, want: abs},
+		{name: "trailing slash", in: abs + "/", want: abs},
+		{name: "dot segments", in: abs + "/foo/../bar", want: abs + "/bar"},
+		{name: "tilde", in: "~/", want: home},
+		{name: "tilde subdir", in: "~/sub", want: filepath.Join(home, "sub")},
+		{name: "tilde alone", in: "~", want: home},
+		{name: "relative becomes absolute", in: "relative/dir", want: filepath.Join(mustCwd(t), "relative/dir")},
+		{name: "empty", in: "   ", wantErr: nil}, // error, but not a sentinel
+		{name: "root rejected", in: "/", wantErr: ErrRootPath},
+		{name: "control char rejected", in: "/tmp/a\x00b", wantErr: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeDirPath(tc.in)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("NormalizeDirPath(%q) error = %v, want %v", tc.in, err, tc.wantErr)
+				}
+				return
+			}
+			if tc.name == "empty" || tc.name == "control char rejected" {
+				if err == nil {
+					t.Fatalf("NormalizeDirPath(%q) = %q, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeDirPath(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("NormalizeDirPath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func mustCwd(t *testing.T) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	return cwd
+}
+
+// TestRequirementDirAddListDelete walks the whole lifecycle against a real
+// SQLite db: grant → list → paths → re-grant (dedupe) → revoke.
+func TestRequirementDirAddListDelete(t *testing.T) {
+	d := reqDirTestDB(t)
+	svc := NewRequirementDirService(d)
+
+	dir := t.TempDir()
+	other := t.TempDir()
+
+	got, err := svc.Add("req_1", dir, "参考日志", "usr_1")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if got.Path != dir {
+		t.Fatalf("Add path = %q, want %q", got.Path, dir)
+	}
+	if got.Label != "参考日志" || got.AddedBy != "usr_1" {
+		t.Fatalf("Add label/by = %q/%q, want 参考日志/usr_1", got.Label, got.AddedBy)
+	}
+	if got.ID == "" {
+		t.Fatal("Add returned an empty id")
+	}
+
+	list, err := svc.List("req_1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].Path != dir {
+		t.Fatalf("List = %+v, want one row for %q", list, dir)
+	}
+
+	paths, err := svc.Paths("req_1")
+	if err != nil {
+		t.Fatalf("Paths: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != dir {
+		t.Fatalf("Paths = %v, want [%q]", paths, dir)
+	}
+
+	// Second grant of the same directory is a no-op that refreshes the label.
+	again, err := svc.Add("req_1", dir, "改过的备注", "usr_1")
+	if err != nil {
+		t.Fatalf("Add (dup): %v", err)
+	}
+	if again.ID != got.ID {
+		t.Fatalf("Add (dup) id = %q, want the existing %q", again.ID, got.ID)
+	}
+	if again.Label != "改过的备注" {
+		t.Fatalf("Add (dup) label = %q, want the refreshed 改过的备注", again.Label)
+	}
+	list, _ = svc.List("req_1")
+	if len(list) != 1 {
+		t.Fatalf("List after dup = %d rows, want 1", len(list))
+	}
+
+	// A second, different directory stacks on top of the first.
+	if _, err := svc.Add("req_1", other, "", "usr_1"); err != nil {
+		t.Fatalf("Add (second): %v", err)
+	}
+	paths, _ = svc.Paths("req_1")
+	if len(paths) != 2 {
+		t.Fatalf("Paths = %v, want 2 entries", paths)
+	}
+
+	// Deleting is scoped to the requirement: a grant owned by another
+	// requirement must not be revocable through this one.
+	if err := svc.Delete("req_1", got.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := svc.Delete("req_1", got.ID); err == nil {
+		t.Fatal("Delete on an already-deleted row should report not-found")
+	}
+	list, _ = svc.List("req_1")
+	if len(list) != 1 || list[0].Path != other {
+		t.Fatalf("List after delete = %+v, want only %q", list, other)
+	}
+}
+
+// TestRequirementDirAddRejects covers the validation gates: the directory
+// must exist, must be a directory, and must not be the filesystem root.
+func TestRequirementDirAddRejects(t *testing.T) {
+	d := reqDirTestDB(t)
+	svc := NewRequirementDirService(d)
+
+	file := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	if _, err := svc.Add("req_1", filepath.Join(t.TempDir(), "nope"), "", ""); !errors.Is(err, ErrPathNotFound) {
+		t.Fatalf("Add(missing) error = %v, want ErrPathNotFound", err)
+	}
+	if _, err := svc.Add("req_1", file, "", ""); !errors.Is(err, ErrNotADirectory) {
+		t.Fatalf("Add(file) error = %v, want ErrNotADirectory", err)
+	}
+	if _, err := svc.Add("req_1", "/", "", ""); !errors.Is(err, ErrRootPath) {
+		t.Fatalf("Add(root) error = %v, want ErrRootPath", err)
+	}
+	if _, err := svc.Add("", t.TempDir(), "", ""); err == nil {
+		t.Fatal("Add with an empty requirement id should fail")
+	}
+
+	list, _ := svc.List("req_1")
+	if len(list) != 0 {
+		t.Fatalf("rejected grants leaked rows: %+v", list)
+	}
+}
+
+// TestRequirementDirPathsEmpty pins the "nothing granted" contract: the CLI
+// args helper must return an empty result (not an error) so callers can pass
+// it through unconditionally.
+func TestRequirementDirPathsEmpty(t *testing.T) {
+	d := reqDirTestDB(t)
+	svc := NewRequirementDirService(d)
+
+	paths, err := svc.Paths("req_1")
+	if err != nil {
+		t.Fatalf("Paths: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("Paths = %v, want empty", paths)
+	}
+	paths, err = svc.Paths("")
+	if err != nil {
+		t.Fatalf("Paths(\"\"): %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("Paths(\"\") = %v, want empty", paths)
+	}
+}
+
+// TestRequirementDirDeleteIsScoped makes sure a grant owned by requirement A
+// cannot be revoked through requirement B's endpoint.
+func TestRequirementDirDeleteIsScoped(t *testing.T) {
+	d := reqDirTestDB(t)
+	if _, err := d.Exec("INSERT INTO requirements (id, project_id, title, description) VALUES ('req_2', 'proj_1', '另一个', '')"); err != nil {
+		t.Fatalf("seed req_2: %v", err)
+	}
+	svc := NewRequirementDirService(d)
+
+	got, err := svc.Add("req_1", t.TempDir(), "", "")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := svc.Delete("req_2", got.ID); err == nil {
+		t.Fatal("Delete across requirements should report not-found")
+	}
+	// The row must survive the cross-requirement delete attempt.
+	list, _ := svc.List("req_1")
+	if len(list) != 1 {
+		t.Fatalf("List = %d rows, want 1 — the cross-requirement delete removed it", len(list))
+	}
+}
+
+// TestRequirementDirLabelTruncation pins the label cap: an over-long note is
+// trimmed rather than rejected (the path is the part that matters).
+func TestRequirementDirLabelTruncation(t *testing.T) {
+	d := reqDirTestDB(t)
+	svc := NewRequirementDirService(d)
+
+	long := strings.Repeat("x", MaxRequirementDirLabel+50)
+	got, err := svc.Add("req_1", t.TempDir(), long, "")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if len(got.Label) != MaxRequirementDirLabel {
+		t.Fatalf("label len = %d, want %d", len(got.Label), MaxRequirementDirLabel)
+	}
+}

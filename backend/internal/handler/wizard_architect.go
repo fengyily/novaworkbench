@@ -149,6 +149,16 @@ type designRunParams struct {
 	// 远端执行时清单里是远端目录（resolveAttachDir 传了 agentServerID），
 	// 与文件实际同步到的位置一致。
 	AttachManifest string
+	// DirsManifest — 已授权读取目录清单（## 📂 已授权读取目录）。
+	// 与 AttachManifest 同构：勾选态拼在 persona 之后进 system prompt，
+	// 关闭态 system prompt 槽空置时改挂任务提示词。
+	DirsManifest string
+	// AddDirs — the granted directories themselves, handed to the claude
+	// CLI as `--add-dir <dir>...`. Empty when the user granted nothing.
+	// The plan-mode stage is the reason this exists: a read of a path
+	// outside the session's working directory needs a permission decision,
+	// and a non-interactive run has nobody to make it.
+	AddDirs        []string
 	Model          string // 已经应用请求体覆盖
 	ClaudeConfigID string
 	ReadKnowledge  bool
@@ -801,6 +811,12 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// silently falls back to local paths.
 	attachDir := h.resolveAttachDir(context.Background(), requirementID, agentServerID)
 	manifest := h.attachManifestFor(requirementID, attachDir)
+	// 已授权读取目录（--add-dir grants）。plan 模式下 claude 读工作目录
+	// 之外的路径需要一个「谁来批准」的判断，而 -p 非交互运行里没有人能批准
+	// —— 这正是方案设计阶段会卡住的原因。授权后目录直接可读，Glob/Grep 的
+	// 搜索范围也随之扩大。
+	dirsManifest := h.dirsManifestFor(requirementID)
+	addDirs := h.addDirsFor(requirementID)
 
 	// SystemPrompt 的组装：
 	//   skipRoleContext=false（默认）→ persona + 清单，与今天逐字节一致
@@ -813,6 +829,9 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	systemPrompt := rolePrompt
 	if manifest != "" {
 		systemPrompt = systemPrompt + "\n\n" + manifest
+	}
+	if dirsManifest != "" {
+		systemPrompt = systemPrompt + "\n\n" + dirsManifest
 	}
 	if skipRoleContext {
 		systemPrompt = ""
@@ -832,30 +851,32 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	parent, parentBlock := h.buildParentBlock(context.Background(), req, agentServerID)
 
 	return &designRunParams{
-		Req:           req,
-		ProjectPath:   projectPath,
-		BaseBranch:    effectiveBase,
-		SourceSID:     sourceSID,
-		Fork:          fork,
-		SkipAnalysis:  skipAnalysis,
-		Regenerate:    regenerate,
-		NewDesignSID:  newDesignSID,
-		Parent:        parent,
-		ParentBlock:   parentBlock,
+		Req:          req,
+		ProjectPath:  projectPath,
+		BaseBranch:   effectiveBase,
+		SourceSID:    sourceSID,
+		Fork:         fork,
+		SkipAnalysis: skipAnalysis,
+		Regenerate:   regenerate,
+		NewDesignSID: newDesignSID,
+		Parent:       parent,
+		ParentBlock:  parentBlock,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
 		// thread so the SSE panel can surface the hard-sync phase events
 		// (see prepareDesignWorkspace for the full rationale).
-		WorkDir:        "",
-		Prompt:         "",
-		SystemPrompt:   systemPrompt,
+		WorkDir:         "",
+		Prompt:          "",
+		SystemPrompt:    systemPrompt,
 		SkipRoleContext: skipRoleContext,
 		AttachManifest:  manifest,
-		Model:          model,
-		ClaudeConfigID: claudeConfigID,
-		ReadKnowledge:  readKnowledge,
-		AgentServerID:  agentServerID,
-		SyncMode:       syncMode,
+		DirsManifest:    dirsManifest,
+		AddDirs:         addDirs,
+		Model:           model,
+		ClaudeConfigID:  claudeConfigID,
+		ReadKnowledge:   readKnowledge,
+		AgentServerID:   agentServerID,
+		SyncMode:        syncMode,
 	}, job, nil
 }
 
@@ -1073,6 +1094,11 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	if p.SkipRoleContext && p.AttachManifest != "" {
 		prompt = p.AttachManifest + "\n\n" + prompt
 	}
+	// 已授权读取目录清单前缀 —— 与附件清单同构，只在关闭态出现（勾选态它在
+	// system prompt 里）。
+	if p.SkipRoleContext && p.DirsManifest != "" {
+		prompt = p.DirsManifest + "\n\n" + prompt
+	}
 	// Context-compression handoff (fresh-session path only): when the
 	// design stage was previously compressed, the requirement carries a
 	// Chinese summary we want the architect to see as scene-setting
@@ -1227,6 +1253,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				claudeConfigID: claudeConfigID,
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
+				AddDirs:        p.AddDirs,
 				SyncMode:       p.SyncMode,
 				// 「设计者上下文」：把架构师 persona（+ 附件清单）透传给远端
 				// claude，与本地路径对齐。此前远端分支不设这个字段 ⇒ 远端既
@@ -1258,6 +1285,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			Fork:           fork,
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
+			AddDirs:        p.AddDirs,
 		})
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),

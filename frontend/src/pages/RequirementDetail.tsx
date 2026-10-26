@@ -12,6 +12,7 @@ import ModelSelect from '../components/ModelSelect';
 import RequirementEditForm from '../components/RequirementEditForm/RequirementEditForm';
 import SubTaskPanel from '../components/SubTaskPanel';
 import AttachmentPanel from '../components/AttachmentPanel';
+import DirectoryPanel from '../components/DirectoryPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
@@ -4642,6 +4643,15 @@ export default function RequirementDetail() {
           data fetch / upload / edit-description / delete state and only
           needs the requirement id. */}
       <AttachmentPanel ownerId={req.id} />
+
+      {/* Authorized read directories — the directory-shaped sibling of the
+          attachment panel above. Files get copied into NovaWorkbench's store;
+          a directory stays where it is and the backend hands the path to the
+          claude CLI as --add-dir. That's what keeps the plan-mode architect
+          stage from stalling on a path outside its working directory (a
+          non-interactive run has nobody to approve the permission request).
+          Same lifetime as the attachments: every stage reads the same set. */}
+      <DirectoryPanel requirementId={req.id} />
 
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),

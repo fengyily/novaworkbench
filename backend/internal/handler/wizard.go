@@ -95,6 +95,12 @@ type WizardHandler struct {
 	// stages simply skip the manifest block when nil (no behavior change
 	// vs pre-feature).
 	attachSvc *service.AttachmentService
+	// dirSvc handles the directories the user authorized Claude to read for
+	// a requirement (the --add-dir grants). Wired from main.go via
+	// SetRequirementDirSvc. nil before the wire up — the wizard stages
+	// simply skip the grant (and the prompt block) when nil, which keeps
+	// pre-feature behavior byte-identical.
+	dirSvc *service.RequirementDirService
 	// designRevSvc handles the design_revisions table — the versioned
 	// history of each requirement's design plan. Wired after construction
 	// from main.go via SetDesignRevisionSvc because the wizard handler
@@ -173,6 +179,31 @@ func (h *WizardHandler) SetIssueMonSvc(svc *service.IssueMonitorService) {
 // path if/when sync lands).
 func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 	h.attachSvc = svc
+}
+
+// SetRequirementDirSvc injects the service holding the directories the user
+// authorized Claude to read for a requirement. The wizard's stages hand
+// those paths to the claude CLI as `--add-dir` so a plan-mode run can read
+// them without a permission decision nobody is there to make.
+//
+// Passing nil disables the grant (the stages then spawn claude exactly as
+// they did before the feature existed).
+func (h *WizardHandler) SetRequirementDirSvc(svc *service.RequirementDirService) {
+	h.dirSvc = svc
+}
+
+// addDirsFor returns the directories granted to a requirement, ready to be
+// passed to the claude CLI as `--add-dir`. Nil when nothing is granted or
+// the service isn't wired — callers pass the result through unconditionally.
+func (h *WizardHandler) addDirsFor(reqID string) []string {
+	return resolveAddDirs(h.dirSvc, reqID)
+}
+
+// dirsManifestFor renders the granted directories as a prompt block so
+// Claude knows they exist and were authorized for this requirement.
+// Empty string when nothing is granted.
+func (h *WizardHandler) dirsManifestFor(reqID string) string {
+	return dirsManifestFor(h.dirSvc, reqID)
 }
 
 // SetDesignRevisionSvc injects the DesignRevisionService used by the

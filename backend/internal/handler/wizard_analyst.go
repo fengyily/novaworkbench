@@ -100,6 +100,11 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	if m := h.attachManifestFor(req.RequirementID, ""); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m
 	}
+	// Same for the authorized directories (--add-dir grants): the analyst
+	// often needs to look at raw logs / specs that live outside the project.
+	if m := h.dirsManifestFor(req.RequirementID); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -234,6 +239,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 					stageLabel:     "analyst-chat",
 					SystemPrompt:   systemPrompt,
 					baseBranch:     defaultBranch,
+					AddDirs:        h.addDirsFor(req.RequirementID),
 				},
 				kind:            requirement.Kind,
 				firstTurnPrompt: firstTurnPrompt,
@@ -242,7 +248,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				resume:          !isFirstRound,
 			})
 		} else {
-			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
+			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.addDirsFor(req.RequirementID))
 		}
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -406,6 +412,11 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	if m := h.attachManifestFor(req.RequirementID, ""); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m
 	}
+	// Authorized directories (--add-dir grants) — the developer reads the same
+	// directories the analyst and architect did.
+	if m := h.dirsManifestFor(req.RequirementID); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -469,7 +480,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxForConfig("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage, claudeConfigID)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.addDirsFor(req.RequirementID))
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -537,7 +548,7 @@ func analystFirstTurnDisallowedToolsForKind(kind string) []string {
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -563,6 +574,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 		SessionID:       sessionID,
 		Resume:          resume,
 		DisallowedTools: disallowed,
+		AddDirs:         addDirs,
 	})
 	var stallOverride []time.Duration
 	if kind == "idea" {
@@ -587,6 +599,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
+			AddDirs:         addDirs,
 		})
 		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, stallOverride...)
 		sessionID = freshID
@@ -617,7 +630,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // (--session-id); it is "" on a plain resume. Returns the final result text and
 // the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -648,6 +661,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		Fork:            fork,
 		ForkSessionID:   forkSessionID,
 		DisallowedTools: developerChatDisallowedTools,
+		AddDirs:         addDirs,
 	})
 	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil, nil, 0)
 
@@ -668,6 +682,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
+			AddDirs:         addDirs,
 		})
 		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil, nil, 0)
 		sessionID = freshID

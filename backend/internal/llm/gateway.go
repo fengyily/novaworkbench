@@ -589,7 +589,7 @@ func RedactSettings(jsonStr string) string {
 // the unexported streamArgs above; both go through settingSources so a custom
 // base URL stays in sync with the local execution.
 func (g *Gateway) BuildStreamArgs(opts StreamOpts) []string {
-	return g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.ClaudeConfigID, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode, opts.OverrideSettingSources)
+	return g.streamArgs(opts)
 }
 
 // BuildRemoteEnvPairs returns ONLY the platform-pinned env entries for a claude
@@ -663,12 +663,16 @@ func (g *Gateway) BuildRemoteEnvPairsWithConfig(model, configID string, extras .
 // rather than having to read it back from the stream's init event after the
 // fact — this is what lets us persist the session id before the run even starts.
 // All flags combine with --system-prompt/--dangerously-skip-permissions.
-func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID string, resume, fork bool, forkSessionID string, disallowedTools []string, permissionMode string, overrideSettingSources *bool) []string {
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	if ss := g.settingSources(configID, overrideSettingSources); ss != "" {
+//
+// Directory grants: opts.AddDirs is emitted as the CLI's variadic
+// `--add-dir <dir>...` flag, always LAST in argv (a variadic option would
+// otherwise swallow the flags that follow it).
+func (g *Gateway) streamArgs(opts StreamOpts) []string {
+	args := []string{"-p", opts.Prompt, "--output-format", "stream-json", "--verbose"}
+	if ss := g.settingSources(opts.ClaudeConfigID, opts.OverrideSettingSources); ss != "" {
 		args = append(args, "--setting-sources", ss)
 	}
-	if permissionMode == "plan" {
+	if opts.PermissionMode == "plan" {
 		args = append(args, "--permission-mode", "plan")
 	} else {
 		args = append(args, "--dangerously-skip-permissions")
@@ -677,11 +681,12 @@ func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID st
 	// model / tier pins) at the top of the CLI's settings stack. Prepended so
 	// it lands before the -p block, mirroring the worker's buildClaudeArgs
 	// ordering. Empty model AND no configured auth → omitted entirely.
-	if sa := g.settingsArg(model, configID); sa != "" {
+	if sa := g.settingsArg(opts.Model, opts.ClaudeConfigID); sa != "" {
 		args = append([]string{"--settings", sa}, args...)
 	}
-	if systemPrompt != "" {
-		if permissionMode == "plan" {
+	if opts.SystemPrompt != "" {
+		systemPrompt := opts.SystemPrompt
+		if opts.PermissionMode == "plan" {
 			// In plan mode the CLI's default system prompt carries the plan-mode
 			// instructions (explore read-only, write plan to ~/.claude/plans/,
 			// call ExitPlanMode). --system-prompt would REPLACE those and break the
@@ -691,17 +696,17 @@ func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID st
 			args = append(args, "--system-prompt", systemPrompt)
 		}
 	}
-	if sessionID != "" {
-		if resume {
-			args = append(args, "--resume", sessionID)
-			if fork {
+	if opts.SessionID != "" {
+		if opts.Resume {
+			args = append(args, "--resume", opts.SessionID)
+			if opts.Fork {
 				args = append(args, "--fork-session")
-				if forkSessionID != "" {
-					args = append(args, "--session-id", forkSessionID)
+				if opts.ForkSessionID != "" {
+					args = append(args, "--session-id", opts.ForkSessionID)
 				}
 			}
 		} else {
-			args = append(args, "--session-id", sessionID)
+			args = append(args, "--session-id", opts.SessionID)
 		}
 	}
 	// --disallowedTools denies specific tools (comma/space-separated list, per
@@ -709,8 +714,24 @@ func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID st
 	// tool-less answer from pre-read context — some proxies mangle multi-turn
 	// tool-use streaming ("Content block not found"), and the first turn
 	// doesn't need tools anyway.
-	if len(disallowedTools) > 0 {
-		args = append(args, "--disallowedTools", strings.Join(disallowedTools, " "))
+	if len(opts.DisallowedTools) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(opts.DisallowedTools, " "))
+	}
+	// --add-dir grants the session read access to directories outside its
+	// working directory. It is a VARIADIC option (the CLI takes
+	// `--add-dir <dir>...`), so it has to be the LAST flag in argv — anything
+	// after it would be swallowed as another directory value.
+	//
+	// This is what unblocks the plan-mode stages: in plan mode a read of a
+	// path outside the working directory needs a permission decision, and a
+	// non-interactive (`-p`) run has nobody to make it. The grant also widens
+	// the session's search scope, so Glob/Grep cover the granted trees.
+	//
+	// A directory that does not exist on the executing host is harmless — the
+	// CLI ignores unknown --add-dir paths — so we forward the list as-is.
+	if len(opts.AddDirs) > 0 {
+		args = append(args, "--add-dir")
+		args = append(args, opts.AddDirs...)
 	}
 	return args
 }
@@ -738,6 +759,20 @@ type StreamOpts struct {
 	ForkSessionID   string // pre-assigned id for a forked session (--session-id on --fork-session); empty = let the CLI generate one
 	DisallowedTools []string
 	PermissionMode  string // "plan" to use --permission-mode plan, empty for --dangerously-skip-permissions
+	// AddDirs lists directories the session is granted read access to via
+	// the CLI's `--add-dir` flag. They are the directories the user
+	// authorized for this requirement (see service.RequirementDirService).
+	//
+	// Why this matters most in plan mode: a read of a path outside the
+	// session's working directory needs a permission decision, and a
+	// non-interactive (`-p`) run has nobody to make one — the run stalls.
+	// The grant also widens the session's search scope so Glob / Grep cover
+	// the granted trees.
+	//
+	// Paths are absolute and normalized by the service before they get
+	// here. A path that does not exist on the executing host is ignored by
+	// the CLI, so the list is forwarded verbatim.
+	AddDirs []string
 	// ExtraEnv is layered onto the spawned claude CLI's environment as
 	// KEY=VALUE entries — used to inject GIT_AUTHOR_* / GIT_COMMITTER_*
 	// when the merge step asks Claude to commit on a Docker host without
@@ -813,7 +848,7 @@ func (g *Gateway) runClaudeStreamJSON(prompt, workDir, systemPrompt, model strin
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, g.resolveBin(),
-		sanitizeExecStrings("args", g.streamArgs(prompt, systemPrompt, model, "", "", false, false, "", nil, "", nil))...)
+		sanitizeExecStrings("args", g.streamArgs(StreamOpts{Prompt: prompt, SystemPrompt: systemPrompt, Model: model}))...)
 	cmd.Env = sanitizeExecStrings("env", g.localEnv(model, ""))
 	if workDir != "" {
 		cmd.Dir = workDir

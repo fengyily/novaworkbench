@@ -1161,6 +1161,13 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if m := h.attachManifestFor(p.RequirementID, attachDir); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m
 	}
+	// Authorized directories (--add-dir grants) — the developer reads the same
+	// directories the analyst and architect did.
+	if m := h.dirsManifestFor(p.RequirementID); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
+	// The granted paths, handed to claude as --add-dir.
+	addDirs := h.addDirsFor(p.RequirementID)
 	// Per-request model override (highest precedence); empty means role default.
 	if p.Model != "" {
 		model = p.Model
@@ -1474,6 +1481,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		Fork:           fork,
 		ForkSessionID:  forkSessionID,
 		ExtraEnv:       codingExtraEnv,
+		AddDirs:        addDirs,
 	})
 	// Release the 30-minute context timer the moment runClaudeStream
 	// finishes (cmd.Wait returns) — the goroutine may then stay alive
@@ -1517,6 +1525,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			claudeConfigID: claudeConfigID,
 			usage:          codingUsage,
 			SyncMode:       p.SyncMode,
+			AddDirs:        addDirs,
 		})
 		if out.staleSession {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
@@ -2061,6 +2070,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:         true,
 			Fork:           false,
 			ExtraEnv:       adjustCredEnv,
+			AddDirs:        h.addDirsFor(body.RequirementID),
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
@@ -2341,6 +2351,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:         true,
 			Fork:           false,
 			ExtraEnv:       continueCredEnv,
+			AddDirs:        h.addDirsFor(req.ID),
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)

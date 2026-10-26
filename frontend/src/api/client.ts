@@ -524,6 +524,47 @@ export const attachmentsApi = {
     api.delete<{ status: string }>(`/api/${resource}/${ownerId}/attachments/${attId}`),
 };
 
+// A directory the user authorized Claude to read for one requirement. The
+// server normalizes the path (tilde expansion, absolute + clean) and rejects
+// anything that isn't an existing directory, so `path` here is always the
+// resolved absolute path — the same string the claude CLI receives as
+// `--add-dir` and the prompt shows.
+export interface RequirementDir {
+  id: string;
+  requirement_id: string;
+  path: string;
+  label: string;
+  added_by: string;
+  added_at: string;           // ISO 8601
+}
+
+// Granted directories for a requirement. Unlike attachments these are NOT
+// uploaded — the directory stays where it is on disk and the backend hands
+// the path to the claude CLI as `--add-dir`, which is what lets a plan-mode
+// stage read it without a permission decision nobody is there to make.
+//
+// The path is interpreted on the machine that runs claude: for a local run
+// that's this host; for an Agent-server run it's the agent host.
+export const requirementDirsApi = {
+  // Returns [] when the requirement has no grants (never null).
+  list: (requirementId: string) =>
+    api.get<RequirementDir[]>(`/api/requirements/${requirementId}/dirs`),
+
+  // Grant a directory. `path` may be absolute or start with "~/" — the
+  // server expands and normalizes it. Throws with a server-provided message
+  // when the path doesn't exist, isn't a directory, or is the filesystem root.
+  add: (requirementId: string, path: string, label?: string) =>
+    api.post<RequirementDir>(`/api/requirements/${requirementId}/dirs`, {
+      path,
+      label: label ?? '',
+    }),
+
+  // Revoke a grant. 204 on success, 404 if the row doesn't belong to this
+  // requirement.
+  delete: (requirementId: string, dirId: string) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/dirs/${dirId}`),
+};
+
 // Sub-tasks: manually-triggered child agents that fork a requirement's main
 // session (coding_session_id). Shown in the developer stage's SubTaskPanel.
 // The status field mirrors JobStore job status (pending/running/done/error);
