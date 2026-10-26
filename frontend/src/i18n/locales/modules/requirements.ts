@@ -198,8 +198,30 @@ export const requirements = {
     exportMetaStage: '阶段',
     exportMetaTurns: '问答轮次',
     exportMetaTime: '导出时间',
+    exportToc: '目录',
     exportFreshNote: '未续接原会话（基于方案原文作答）',
     exportRotated: '上下文已更新',
+    // 目录 / 视图切换 — the question index. One component, two presentations:
+    // a drawer above the thread in 全局 mode, a permanent left rail in 分栏
+    // mode. The index is built from the question text the backend already
+    // stores, so nothing here needs a new field.
+    viewModeLabel: '视图',
+    viewModeGlobal: '全局',
+    viewModeSplit: '分栏',
+    viewModeTitle: '切换视图：全局浏览 / 分栏浏览',
+    indexTitle: '目录',
+    indexToggle: '目录',
+    indexCollapse: '收起目录',
+    indexCount: '共 {{count}} 问',
+    indexFilterPlaceholder: '筛选问题…',
+    indexFilterEmpty: '没有匹配的问题',
+    indexEmpty: '还没有提问',
+    indexNum: 'Q{{n}}',
+    indexRunning: '回答中',
+    indexError: '失败',
+    prevTurn: '上一个问题',
+    nextTurn: '下一个问题',
+    turnCounter: '问题 {{current}} / {{total}}',
   },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).

@@ -202,8 +202,30 @@ export const requirements = {
     exportMetaStage: 'Stage',
     exportMetaTurns: 'Turns',
     exportMetaTime: 'Exported at',
+    exportToc: 'Contents',
     exportFreshNote: 'Not resumed from the original session (answered from the plan document)',
     exportRotated: 'Context updated',
+    // 目录 / 视图切换 — the question index. One component, two presentations:
+    // a drawer above the thread in 全局 mode, a permanent left rail in 分栏
+    // mode. The index is built from the question text the backend already
+    // stores, so nothing here needs a new field.
+    viewModeLabel: 'View',
+    viewModeGlobal: 'All',
+    viewModeSplit: 'Split',
+    viewModeTitle: 'Switch view: scroll through everything / split list and detail',
+    indexTitle: 'Contents',
+    indexToggle: 'Contents',
+    indexCollapse: 'Hide contents',
+    indexCount: '{{count}} questions',
+    indexFilterPlaceholder: 'Filter questions…',
+    indexFilterEmpty: 'No matching question',
+    indexEmpty: 'No question yet',
+    indexNum: 'Q{{n}}',
+    indexRunning: 'Answering',
+    indexError: 'Failed',
+    prevTurn: 'Previous question',
+    nextTurn: 'Next question',
+    turnCounter: 'Question {{current}} / {{total}}',
   },
   detail2: {
     // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge

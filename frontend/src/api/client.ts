@@ -118,6 +118,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   // + redirecting) on 401.
   const res = await authedFetch(url, { ...options, headers });
 
+  // 204 carries no body. `res.json()` would throw a SyntaxError on the empty
+  // payload, and the caller would report a failure for a request that
+  // actually succeeded — the DELETE handlers that answer 204 (QA turn/thread,
+  // attachments, reviews, agent servers, issue monitors) all fell into that
+  // trap. Treat it as a successful empty result instead.
+  if (res.status === 204) return undefined as T;
+
   const json: APIResponse<T> = await res.json();
 
   if (!json.success || json.error) {

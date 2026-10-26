@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   API_BASE,
@@ -13,7 +13,18 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import MarkdownRender from './MarkdownRender';
 import ModelSelect from './ModelSelect';
-import { IconChat, IconClose, IconRefresh, IconRobot, IconTrash } from './icons';
+import QAIndex, { type QAIndexEntry } from './QAIndex';
+import {
+  IconArrowLeft,
+  IconArrowRight,
+  IconChat,
+  IconChevronDown,
+  IconClose,
+  IconListOrdered,
+  IconRefresh,
+  IconRobot,
+  IconTrash,
+} from './icons';
 import { errorMessage } from '../utils/errMsg';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
 import { fmtDateTime } from '../utils/intl';
@@ -75,6 +86,43 @@ const MODEL_STAGE: Record<QAStage, 'architect' | 'developer'> = {
   coding: 'developer',
 };
 
+/**
+ * How the thread is laid out.
+ *
+ *   `global` — every turn stacked in one scroll column (the original layout).
+ *               The question index is a drawer above the thread.
+ *   `split`  — the question index is a permanent left rail, the selected
+ *               turn's Q&A fills the right pane.
+ *
+ * The choice is a reading preference, not per-requirement state, so it is
+ * remembered across requirements and stages.
+ */
+type QAViewMode = 'global' | 'split';
+
+const VIEW_MODE_KEY = 'nova.qa.viewMode';
+
+function loadViewMode(): QAViewMode {
+  try {
+    return window.localStorage.getItem(VIEW_MODE_KEY) === 'split' ? 'split' : 'global';
+  } catch {
+    // Private-mode browsers can throw on localStorage access.
+    return 'global';
+  }
+}
+
+function saveViewMode(mode: QAViewMode): void {
+  try {
+    window.localStorage.setItem(VIEW_MODE_KEY, mode);
+  } catch {
+    /* preference is not worth failing the render over */
+  }
+}
+
+/** Anchor id of one turn — the target of an index click. */
+function turnAnchorId(turnId: string): string {
+  return `qa-turn-${turnId}`;
+}
+
 export default function StageQAChat({
   requirementId,
   requirementTitle = '',
@@ -96,6 +144,15 @@ export default function StageQAChat({
   const [liveLines, setLiveLines] = useState<LogLine[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  // View mode + the question index. `global` (the original single-column
+  // layout) stays the default so nothing changes for existing users; `split`
+  // puts the index in a permanent left rail.
+  const [viewMode, setViewModeState] = useState<QAViewMode>(() => loadViewMode());
+  const [selectedId, setSelectedId] = useState('');
+  const [indexOpen, setIndexOpen] = useState(false);
+  const [indexFilter, setIndexFilter] = useState('');
+  // The turn currently flashing after an index jump.
+  const [highlightId, setHighlightId] = useState('');
   // CSS-only fullscreen (same mechanism as the other SSE panels): the
   // EventStream, refs and jobs keep running untouched while the panel
   // becomes viewport-fixed. Esc exits via the hook.
@@ -105,6 +162,22 @@ export default function StageQAChat({
   // Guards against a late stream callback writing into an unmounted tree.
   const mountedRef = useRef(true);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  // Turn the thread should scroll to (global mode). State, not a ref: the
+  // scroll effect below has to RE-RUN when this changes, and a ref would
+  // not wake it up.
+  const [pendingScrollId, setPendingScrollId] = useState('');
+  // Whether the thread is parked at its bottom. The old behaviour force-
+  // scrolled to the bottom on every reload, which yanked the reader away
+  // from the turn they had just navigated to.
+  const stickRef = useRef(true);
+  const turnCountRef = useRef(0);
+  const wasExpandedRef = useRef(false);
+  const highlightTimerRef = useRef(0);
+
+  const setViewMode = useCallback((mode: QAViewMode) => {
+    setViewModeState(mode);
+    saveViewMode(mode);
+  }, []);
 
   const closeStream = useCallback(() => {
     esRef.current?.close();
@@ -266,6 +339,10 @@ export default function StageQAChat({
             updated_at: new Date().toISOString(),
           },
         ]);
+        // Follow the new question: split swaps the right pane to it, global
+        // scrolls the thread to it and flashes it.
+        setSelectedId(res.turn_id);
+        if (viewMode === 'global') setPendingScrollId(res.turn_id);
         subscribe(res.job_id);
       } catch (err) {
         if (!mountedRef.current) return;
@@ -273,23 +350,78 @@ export default function StageQAChat({
         setError(errorMessage(err));
       }
     },
-    [asking, requirementId, stage, model, claudeConfigId, subscribe],
+    [asking, requirementId, stage, model, claudeConfigId, subscribe, viewMode],
   );
 
-  // Keep the newest turn in view when the panel is open. In fullscreen the
-  // thread is the only scrolling region, so without this a new question would
-  // be appended below the fold.
+  // Keep the newest turn in view — but only when the reader is actually
+  // parked at the bottom (or a turn was just added / the panel was just
+  // opened). The old behaviour force-scrolled on every `turns` change, and
+  // `turns` changes identity on every reload, so any background refresh
+  // yanked the reader away from the turn they had just navigated to.
   useEffect(() => {
-    if (!expanded) return;
+    if (!expanded) {
+      wasExpandedRef.current = false;
+      return;
+    }
     const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const justOpened = !wasExpandedRef.current;
+    wasExpandedRef.current = true;
+    const grew = turns.length > turnCountRef.current;
+    turnCountRef.current = turns.length;
+    if (justOpened || grew || stickRef.current) el.scrollTop = el.scrollHeight;
   }, [expanded, turns]);
+
+  // Track whether the thread is still at its bottom. Passive listener on the
+  // scroll container; the 40px slack keeps "at the bottom" true while the
+  // reader is a line or two up.
+  useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [expanded]);
+
+  // Scroll to the turn an index click asked for, and flash it. The request
+  // is consumed only once the target exists in the DOM — the panel may be
+  // collapsed, or the turn may not be rendered yet.
+  useEffect(() => {
+    if (viewMode !== 'global') return;
+    const id = pendingScrollId;
+    if (!id) return;
+    const el = document.getElementById(turnAnchorId(id));
+    if (!el) return;
+    setPendingScrollId('');
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({
+      behavior: reduceMotion ? 'auto' : 'smooth',
+      block: 'center',
+    });
+    setHighlightId(id);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightId(''), 1200);
+  }, [expanded, turns, viewMode, pendingScrollId]);
+
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    },
+    [],
+  );
 
   const removeTurn = useCallback(
     async (turn: RequirementQATurn) => {
       if (!window.confirm(t('requirements.qaChat.deleteConfirm'))) return;
       try {
         await qaChatApi.removeTurn(requirementId, stage, turn.id);
+        // The deleted turn was the one on screen — drop the selection so the
+        // split pane falls back to the newest turn instead of a stale one.
+        setSelectedId((cur) => (cur === turn.id ? '' : cur));
         await reload();
       } catch (err) {
         if (mountedRef.current) setError(errorMessage(err));
@@ -303,6 +435,8 @@ export default function StageQAChat({
     try {
       await qaChatApi.reset(requirementId, stage);
       setTurns([]);
+      setSelectedId('');
+      setIndexFilter('');
       setLiveLines([]);
       setError('');
     } catch (err) {
@@ -359,8 +493,67 @@ export default function StageQAChat({
 
   const hasContent = turns.length > 0;
 
+  // ── Question index ───────────────────────────────────────────────────────
+  //
+  // Position of every turn in the FULL thread. The index numbers entries by
+  // this position, so filtering the index never renumbers it — "Q3" is the
+  // same question no matter what the filter says.
+  const turnIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    turns.forEach((turn, i) => map.set(turn.id, i));
+    return map;
+  }, [turns]);
+
+  // The index rows, filtered by the search box. The rotation flag is computed
+  // against the FULL list (not the filtered one) so a "context updated"
+  // marker stays attached to the turn it belongs to.
+  const indexEntries = useMemo<QAIndexEntry[]>(() => {
+    const q = indexFilter.trim().toLowerCase();
+    const out: QAIndexEntry[] = [];
+    turns.forEach((turn, i) => {
+      if (q && !turn.question.toLowerCase().includes(q)) return;
+      const prev = i > 0 ? turns[i - 1] : null;
+      out.push({
+        turn,
+        no: i + 1,
+        rotated: !!prev && prev.source_session_id !== turn.source_session_id,
+      });
+    });
+    return out;
+  }, [turns, indexFilter]);
+
+  // The turn the split pane shows. Falls back to the newest one so the pane
+  // is never empty while the thread has content.
+  const selectedTurn = useMemo(
+    () => turns.find((x) => x.id === selectedId) ?? turns[turns.length - 1] ?? null,
+    [turns, selectedId],
+  );
+  const selectedPos = selectedTurn ? (turnIndexById.get(selectedTurn.id) ?? -1) : -1;
+  const prevTurn = selectedPos > 0 ? turns[selectedPos - 1] : null;
+  const nextTurn = selectedPos >= 0 && selectedPos < turns.length - 1 ? turns[selectedPos + 1] : null;
+
+  // What the thread column shows: every turn in global mode, the selected one
+  // in split mode.
+  const threadTurns = viewMode === 'split' ? (selectedTurn ? [selectedTurn] : []) : turns;
+
+  // Clicking an index entry: split swaps the pane, global scrolls the thread.
+  const selectFromIndex = useCallback(
+    (turn: RequirementQATurn) => {
+      if (viewMode === 'split') {
+        setSelectedId(turn.id);
+        return;
+      }
+      setPendingScrollId(turn.id);
+      setHighlightId('');
+    },
+    [viewMode],
+  );
   return (
-    <div className={`qa-panel${expanded ? ' is-expanded' : ''}${isFullscreen ? ' is-fullscreen' : ''}`}>
+    <div
+      className={`qa-panel${expanded ? ' is-expanded' : ''}${isFullscreen ? ' is-fullscreen' : ''}${
+        viewMode === 'split' ? ' qa-mode-split' : ''
+      }`}
+    >
       <div className="qa-header">
         <button
           type="button"
@@ -463,27 +656,136 @@ export default function StageQAChat({
 
       {expanded && (
         <>
-          <p className="qa-hint">{t('requirements.qaChat.hint')}</p>
+          <div className="qa-toolbar">
+            <p className="qa-hint">{t('requirements.qaChat.hint')}</p>
+            <div className="qa-toolbar-actions">
+              {viewMode === 'global' && hasContent && (
+                <button
+                  type="button"
+                  className="btn btn-sm qa-index-toggle"
+                  onClick={() => setIndexOpen((v) => !v)}
+                  aria-expanded={indexOpen}
+                  title={
+                    indexOpen
+                      ? t('requirements.qaChat.indexCollapse')
+                      : t('requirements.qaChat.indexToggle')
+                  }
+                >
+                  <IconListOrdered size={13} className="icon-mr" />
+                  {t('requirements.qaChat.indexToggle')}
+                  <span className="qa-count">{turns.length}</span>
+                  <IconChevronDown size={12} className={indexOpen ? 'qa-caret is-open' : 'qa-caret'} />
+                </button>
+              )}
+              <div
+                className="qa-mode-switch"
+                role="group"
+                aria-label={t('requirements.qaChat.viewModeLabel')}
+              >
+                <button
+                  type="button"
+                  className={`qa-mode-btn${viewMode === 'global' ? ' is-active' : ''}`}
+                  onClick={() => setViewMode('global')}
+                  title={t('requirements.qaChat.viewModeGlobal')}
+                >
+                  {t('requirements.qaChat.viewModeGlobal')}
+                </button>
+                <button
+                  type="button"
+                  className={`qa-mode-btn${viewMode === 'split' ? ' is-active' : ''}`}
+                  onClick={() => setViewMode('split')}
+                  title={t('requirements.qaChat.viewModeSplit')}
+                >
+                  {t('requirements.qaChat.viewModeSplit')}
+                </button>
+              </div>
+            </div>
+          </div>
 
-          <div className="qa-thread" ref={threadRef}>
-            {loading && <p className="qa-empty">{t('requirements.qaChat.loading')}</p>}
-            {!loading && turns.length === 0 && (
-              <p className="qa-empty">{t('requirements.qaChat.empty')}</p>
+          {viewMode === 'global' && indexOpen && (
+            <QAIndex
+              variant="drawer"
+              entries={indexEntries}
+              total={turns.length}
+              selectedId={selectedId}
+              onSelect={selectFromIndex}
+              onDelete={removeTurn}
+              filter={indexFilter}
+              onFilterChange={setIndexFilter}
+            />
+          )}
+
+          <div className="qa-body">
+            {viewMode === 'split' && (
+              <QAIndex
+                variant="rail"
+                entries={indexEntries}
+                total={turns.length}
+                selectedId={selectedTurn?.id}
+                onSelect={selectFromIndex}
+                onDelete={removeTurn}
+                filter={indexFilter}
+                onFilterChange={setIndexFilter}
+              />
             )}
-            {turns.map((turn, i) => {
-              const prev = i > 0 ? turns[i - 1] : null;
-              // A change of the fork source between two turns means the
-              // stage was re-run in between: the answers below the divider
-              // were produced against a different (older) conversation.
-              const rotated = !!prev && prev.source_session_id !== turn.source_session_id;
-              return (
-                <div key={turn.id}>
+
+            <div className="qa-thread" ref={threadRef}>
+              {viewMode === 'split' && selectedTurn && (
+                <div className="qa-split-nav">
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={!prevTurn}
+                    onClick={() => prevTurn && setSelectedId(prevTurn.id)}
+                    title={t('requirements.qaChat.prevTurn')}
+                  >
+                    <IconArrowLeft size={12} />
+                  </button>
+                  <span className="qa-split-counter">
+                    {t('requirements.qaChat.turnCounter', {
+                      current: selectedPos + 1,
+                      total: turns.length,
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={!nextTurn}
+                    onClick={() => nextTurn && setSelectedId(nextTurn.id)}
+                    title={t('requirements.qaChat.nextTurn')}
+                  >
+                    <IconArrowRight size={12} />
+                  </button>
+                </div>
+              )}
+              {loading && <p className="qa-empty">{t('requirements.qaChat.loading')}</p>}
+              {!loading && turns.length === 0 && (
+                <p className="qa-empty">{t('requirements.qaChat.empty')}</p>
+              )}
+              {threadTurns.map((turn) => {
+                // The predecessor is looked up in the FULL thread, not in
+                // `threadTurns`: in split mode the pane holds a single turn,
+                // and the "context updated" divider must still know whether
+                // the stage was re-run before it.
+                const pos = turnIndexById.get(turn.id) ?? 0;
+                const prev = pos > 0 ? turns[pos - 1] : null;
+                // A change of the fork source between two turns means the
+                // stage was re-run in between: the answers below the divider
+                // were produced against a different (older) conversation.
+                const rotated = !!prev && prev.source_session_id !== turn.source_session_id;
+                return (
+                  <div key={turn.id}>
                   {rotated && (
                     <div className="qa-rotate-divider">
                       <span>{t('requirements.qaChat.threadRotated')}</span>
                     </div>
                   )}
-                  <article className={`qa-turn qa-turn-${turn.status}`}>
+                  <article
+                    id={turnAnchorId(turn.id)}
+                    className={`qa-turn qa-turn-${turn.status}${
+                      turn.id === highlightId ? ' is-highlight' : ''
+                    }`}
+                  >
                     <div className="qa-turn-q">
                       <span className="qa-turn-tag">{t('requirements.qaChat.questionTag')}</span>
                       <span className="qa-turn-qtext">{turn.question}</span>
@@ -526,6 +828,7 @@ export default function StageQAChat({
                 </div>
               );
             })}
+            </div>
           </div>
 
           {liveLines.length > 0 && (
