@@ -559,6 +559,10 @@ export const requirements = {
     processToggleShow: '▶ 思考过程',
     regenerateBtn: '重新生成方案',
     regenerateBtnTitle: '以全新会话重新生成技术方案，此前的微调对话不会被继承',
+    // 继续设计 — 中断后的恢复入口(后端重启/进程被杀/504/流中断)。与「重新生成
+    // 方案」并列:前者续接同一会话继续做,后者另起一个全新会话并冻结旧方案。
+    continueDesignBtn: '继续设计',
+    continueDesignTitle: '续接上次中断的方案设计会话（--resume），让 Claude 接着上次的进度继续，不从头重来；沿用上次保存的模型与执行环境（未保存时使用角色默认）',
     // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新生成方案" 后
     // 看到的对话框,清楚说明旧方案会被冻结成历史版本而不是丢掉,避免「以
     // 为旧方案没了」的误操作。Cancel + Confirm 两个按钮,文案比浏览器原生
@@ -566,6 +570,9 @@ export const requirements = {
     // 流程中移除,提了反而让人以为按钮属于已被下线的分析功能。
     regenerateConfirmTitle: '确认重新生成技术方案?',
     regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
+    // 中断后尚未产出方案时点「重新生成方案」——没有可冻结的东西,文案不能承诺
+    // 会多出一个历史版本。
+    regenerateConfirmBodyEmpty: '当前还没有可冻结的方案,将以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
     regenerateConfirmYes: '确认重新生成',
     regenerateConfirmCancel: '取消',
     // 「重新生成」preflight 弹窗 — 沿用 DesignCodingImmediateModal 的

@@ -2280,6 +2280,39 @@ export default function RequirementDetail() {
     }
   };
 
+  // 继续设计 — recovery for an INTERRUPTED design run (backend restart, killed
+  // claude process, upstream 504, stalled stream). Mirrors ContinueCoding:
+  // resume the SAME design session (--resume) instead of regenerate, which
+  // would fork a brand-new conversation and freeze the partial plan as a
+  // history version.
+  //
+  // The backend owns the execution environment (model / Claude config / Agent
+  // server / base branch), so the toolbar pickers do NOT travel with this
+  // request: resuming is defined as "keep running the round that was
+  // interrupted", and switching hosts mid-conversation can leave the session
+  // file behind on the other machine. Only the designer-context toggle is
+  // forwarded — it shapes the system prompt and cannot affect whether
+  // --resume finds the conversation.
+  const runContinueDesign = async () => {
+    if (!id || designing) return;
+    // Same immediate-feedback prologue as runArchitectDesign: flip the working
+    // state before the round-trip so the button cannot be double-submitted
+    // while the request is in flight.
+    setDesigning(true);
+    setDesignLines([]);
+    setDesignError(false);
+    setKnowledgeItems([]);
+    setKnowledgeEmpty(false);
+    try {
+      const { job_id } = await wizardApi.continueDesign(id, !useRoleContextDesign);
+      streamDesignJob(job_id);
+    } catch (err: any) {
+      setDesignLines([{ type: 'error', content: err.message }]);
+      setDesigning(false);
+      setDesignError(true);
+    }
+  };
+
   // Design-entry gates first show a "read project knowledge?" checkbox modal
   // (default unchecked) — per feedback "make it optional, default unchecked". needsTransition
   // covers the draft/analyzing entries that must move status to designing
@@ -3110,6 +3143,12 @@ export default function RequirementDetail() {
   // Design (architect) stream state. While the job runs the panel stays open;
   // once finished it collapses behind the "Thinking process" toggle.
   const designProcessActive = designing || !!req.design_job_id;
+  // 继续设计 is offered only when a previous design run left a resumable
+  // session behind AND no run is live. status=designing IS the interruption
+  // signal: a successful run auto-promotes to designed, and every terminal
+  // failure path clears design_job_id while keeping design_session_id.
+  const canContinueDesign =
+    req.status === 'designing' && !!req.design_session_id && !designing && !req.design_job_id;
   // Keep the panel open while the job runs OR when the last run errored, so
   // the error line stays visible instead of collapsing behind the toggle.
   const designPanelOpen = designProcessActive || designError || showDesignProcess;
@@ -3282,7 +3321,13 @@ export default function RequirementDetail() {
             <div className="preflight-header">
               <div className="preflight-eyebrow">{t('requirements.detail2.regenerateEyebrow')}</div>
               <h3 className="preflight-title">{t('requirements.detail2.regenerateConfirmTitle')}</h3>
-              <p className="preflight-subtitle">{t('requirements.detail2.regenerateConfirmBody')}</p>
+              {/* When the interrupted run produced no plan there is nothing to
+                  freeze, so the default "current plan will be kept as a
+                  history version" copy would promise a version that will never
+                  appear. Use the empty-state wording instead. */}
+              <p className="preflight-subtitle">{t(hasDesign
+                ? 'requirements.detail2.regenerateConfirmBody'
+                : 'requirements.detail2.regenerateConfirmBodyEmpty')}</p>
             </div>
 
             {/* Flight strip — single DESIGN leg + GIT base mirror. Keeps
@@ -5166,6 +5211,21 @@ export default function RequirementDetail() {
                   {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
                 </button>
               )}
+              {/* 「继续设计」 — recovery for an interrupted run. Rendered next to
+                  「重新生成方案」 so the two run-level recoveries read as one
+                  pair: continue the interrupted thread vs. start a brand-new
+                  one. Only appears while the stage is still `designing` with a
+                  resumable session and no live job (see canContinueDesign). */}
+              {hasDesign && canContinueDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={runContinueDesign}
+                  disabled={!!busy || designing}
+                  title={t('requirements.detail2.continueDesignTitle')}
+                >
+                  <IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.continueDesignBtn')}
+                </button>
+              )}
               {/* 「重新生成方案」 — available from the moment a plan exists.
                   designing = a partial in-flight plan the user wants to throw
                   away; designed = the finished plan they want a second take
@@ -5371,12 +5431,47 @@ export default function RequirementDetail() {
                 {/* Wizard-stage CTA — unified to `btn btn-sm` per the
                     page-wide button unification (one visual family
                     everywhere). Visual primacy comes from being the
-                    leftmost action, not from a btn-primary treatment. */}
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
-                  {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
-                    ? <><IconHourglass size={13} className="btn-icon" />...</>
-                    : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
-                </button>
+                    leftmost action, not from a btn-primary treatment.
+                    A non-empty design_session_id means a previous run was
+                    started and interrupted, so the label flips to
+                    「继续设计」 and the click resumes that thread instead of
+                    starting a fresh one (the backend would resume it either
+                    way, but the continuation prompt tells Claude to finish
+                    what it started rather than redo the exploration). */}
+                {req.design_session_id ? (
+                  <button
+                    className="btn btn-sm"
+                    onClick={runContinueDesign}
+                    disabled={!!busy || designing}
+                    title={t('requirements.detail2.continueDesignTitle')}
+                  >
+                    <IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.continueDesignBtn')}
+                  </button>
+                ) : (
+                  <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
+                    {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
+                      ? <><IconHourglass size={13} className="btn-icon" />...</>
+                      : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
+                  </button>
+                )}
+                {/* 重新生成方案 — the "start over" option stays available even
+                    when the interrupted run produced NO plan. The backend
+                    accepts regenerate for status=designing, and with an empty
+                    design_docs the revision snapshot is a no-op, so this
+                    re-forks the analyst session cleanly instead of resuming
+                    the interrupted one. Gated on design_session_id: with no
+                    prior run, 生成技术方案 above is already the fresh-start
+                    path and two identical-looking buttons would confuse. */}
+                {req.design_session_id && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => requestRegenerateDesign()}
+                    disabled={!!busy || designing}
+                    title={t('requirements.detail2.regenerateBtnTitle')}
+                  >
+                    <IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}
+                  </button>
+                )}
                 {/* Roll back to the analyst stage. The backend allows
                     designing → analyzing; this is the recovery path when the
                     user advanced with a failed/incomplete analysis.

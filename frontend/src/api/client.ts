@@ -1710,6 +1710,24 @@ export const wizardApi = {
     fd.append('file', file);
     return api.upload<{ content: string }>('/api/wizard/import-design-file', fd);
   },
+  /**
+   * 继续设计 — resume an INTERRUPTED architect-design run (--resume
+   * requirements.design_session_id) and ask Claude to finish the plan instead
+   * of regenerating from scratch. The backend takes the execution environment
+   * from the requirement row (model / Claude config / Agent server / base
+   * branch), so only the designer-context toggle travels in the body. Returns
+   * a job id; the caller streams it through the shared
+   * GET /api/wizard/jobs/{id}/stream channel (same as architect-design).
+   *
+   * 409 INVALID_STATUS when the requirement is not in `designing` (designed /
+   * developing must use 重新生成方案), 409 NO_SESSION when there is no design
+   * session to resume, 400 KIND_NOT_SUPPORTED for wiki rows.
+   */
+  continueDesign: (requirementId: string, skipRoleContext: boolean) =>
+    api.post<{ job_id: string }>('/api/wizard/continue-design', {
+      requirement_id: requirementId,
+      skip_role_context: skipRoleContext,
+    }),
   // ── 重新生成 + 版本历史 ──────────────────────────────────────────────────
   // Parallel to codeReviewsApi.regenerate / listRevisions / getRevision /
   // restoreRevision. The list endpoint also returns the requirement's
