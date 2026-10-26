@@ -3321,7 +3321,13 @@ export default function RequirementDetail() {
             <div className="preflight-header">
               <div className="preflight-eyebrow">{t('requirements.detail2.regenerateEyebrow')}</div>
               <h3 className="preflight-title">{t('requirements.detail2.regenerateConfirmTitle')}</h3>
-              <p className="preflight-subtitle">{t('requirements.detail2.regenerateConfirmBody')}</p>
+              {/* When the interrupted run produced no plan there is nothing to
+                  freeze, so the default "current plan will be kept as a
+                  history version" copy would promise a version that will never
+                  appear. Use the empty-state wording instead. */}
+              <p className="preflight-subtitle">{t(hasDesign
+                ? 'requirements.detail2.regenerateConfirmBody'
+                : 'requirements.detail2.regenerateConfirmBodyEmpty')}</p>
             </div>
 
             {/* Flight strip — single DESIGN leg + GIT base mirror. Keeps
@@ -5446,6 +5452,24 @@ export default function RequirementDetail() {
                     {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
                       ? <><IconHourglass size={13} className="btn-icon" />...</>
                       : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
+                  </button>
+                )}
+                {/* 重新生成方案 — the "start over" option stays available even
+                    when the interrupted run produced NO plan. The backend
+                    accepts regenerate for status=designing, and with an empty
+                    design_docs the revision snapshot is a no-op, so this
+                    re-forks the analyst session cleanly instead of resuming
+                    the interrupted one. Gated on design_session_id: with no
+                    prior run, 生成技术方案 above is already the fresh-start
+                    path and two identical-looking buttons would confuse. */}
+                {req.design_session_id && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => requestRegenerateDesign()}
+                    disabled={!!busy || designing}
+                    title={t('requirements.detail2.regenerateBtnTitle')}
+                  >
+                    <IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}
                   </button>
                 )}
                 {/* Roll back to the analyst stage. The backend allows

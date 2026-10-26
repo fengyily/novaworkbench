@@ -548,6 +548,9 @@ export const requirements = {
     // 流程中移除,提了反而让人以为按钮属于已被下线的分析功能。
     regenerateConfirmTitle: '确认重新生成技术方案?',
     regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
+    // 中断后尚未产出方案时点「重新生成方案」——没有可冻结的东西,文案不能承诺
+    // 会多出一个历史版本。
+    regenerateConfirmBodyEmpty: '当前还没有可冻结的方案,将以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
     regenerateConfirmYes: '确认重新生成',
     regenerateConfirmCancel: '取消',
     // 「重新生成」preflight 弹窗 — 沿用 DesignCodingImmediateModal 的

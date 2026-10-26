@@ -530,6 +530,9 @@ export const requirements = {
     // avoids the analysis stage — it has been removed from the flow.
     regenerateConfirmTitle: 'Regenerate the design plan?',
     regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). A brand-new session will generate a new plan; the existing design session + refinement turns will not be inherited.',
+    // Interrupted run with no plan yet: nothing can be frozen, so the default
+    // copy must not promise a history version that will never appear.
+    regenerateConfirmBodyEmpty: 'There is no plan to freeze yet; a brand-new session will generate one. The existing design session + refinement turns will not be inherited.',
     regenerateConfirmYes: 'Regenerate',
     regenerateConfirmCancel: 'Cancel',
     // 「重新生成」 preflight dialog — borrows the DesignCodingImmediateModal
