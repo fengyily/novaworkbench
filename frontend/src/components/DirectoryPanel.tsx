@@ -12,13 +12,12 @@
 //
 // The path is a SERVER-side path (the browser can't hand us a folder), so the
 // input accepts an absolute path or a "~/" prefix and the server normalizes
-// and validates it (must exist, must be a directory, must not be the
-// filesystem root).
+// it (absolute + clean; only the filesystem root is rejected).
 //
-// Which machine the path belongs to depends on where claude runs: a local
-// run resolves it on this host; an Agent-server run resolves it on the agent
-// host. The hint line says so, because a local path silently does nothing
-// on a remote host.
+// The path is NOT checked for existence when it is authorized, because the
+// machine that runs claude is not necessarily this one: a local run
+// resolves it here, an Agent-server run resolves it there. The hint line
+// says so, because a local path silently does nothing on a remote host.
 
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -33,9 +32,14 @@ interface Props {
   compact?: boolean;
 }
 
-/** The list payload adds an `exists` flag the backend computes per row. */
+/**
+ * The list payload adds an `exists_locally` flag the backend computes per
+ * row — whether the directory is present on THIS host. It says nothing
+ * about the agent host, so the badge reads "not on this host" rather than
+ * "unreadable".
+ */
 interface RequirementDirRow extends RequirementDir {
-  exists: boolean;
+  exists_locally: boolean;
 }
 
 export default function DirectoryPanel({ requirementId, compact = false }: Props) {
@@ -149,7 +153,7 @@ export default function DirectoryPanel({ requirementId, compact = false }: Props
             <div className="dir-panel__row" key={d.id}>
               <div className="dir-panel__row-main">
                 <span className="dir-panel__path" title={d.path}>{d.path}</span>
-                {!d.exists && (
+                {!d.exists_locally && (
                   <span className="dir-panel__missing" title={t('requirements.dirs.missingHint')}>
                     {t('requirements.dirs.missing')}
                   </span>

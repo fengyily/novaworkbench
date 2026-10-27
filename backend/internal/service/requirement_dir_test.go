@@ -171,9 +171,15 @@ func TestRequirementDirAddListDelete(t *testing.T) {
 	}
 }
 
-// TestRequirementDirAddRejects covers the validation gates: the directory
-// must exist, must be a directory, and must not be the filesystem root.
-func TestRequirementDirAddRejects(t *testing.T) {
+// TestRequirementDirAddSkipsFilesystemChecks pins the add-time contract:
+// the path is normalized but NOT checked against the local filesystem.
+//
+// The grant is consumed by a claude session that may run on an Agent
+// server, so a path that resolves nowhere on this host may be exactly the
+// directory the agent host needs. Rejecting it here would make the remote
+// execution case unusable, so the only path-shape rules that survive are
+// the filesystem-root rejection and the requirement-id requirement.
+func TestRequirementDirAddSkipsFilesystemChecks(t *testing.T) {
 	d := reqDirTestDB(t)
 	svc := NewRequirementDirService(d)
 
@@ -182,12 +188,30 @@ func TestRequirementDirAddRejects(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	if _, err := svc.Add("req_1", filepath.Join(t.TempDir(), "nope"), "", ""); !errors.Is(err, ErrPathNotFound) {
-		t.Fatalf("Add(missing) error = %v, want ErrPathNotFound", err)
+	// A path that does not exist here is accepted — it may exist on the
+	// agent host that actually runs claude.
+	missing := filepath.Join(t.TempDir(), "nope")
+	got, err := svc.Add("req_1", missing, "", "")
+	if err != nil {
+		t.Fatalf("Add(missing dir) = %v, want it accepted", err)
 	}
-	if _, err := svc.Add("req_1", file, "", ""); !errors.Is(err, ErrNotADirectory) {
-		t.Fatalf("Add(file) error = %v, want ErrNotADirectory", err)
+	if got.Path != missing {
+		t.Fatalf("Add(missing dir) path = %q, want %q", got.Path, missing)
 	}
+
+	// A path that points at a FILE is accepted too: this host cannot say
+	// what the agent host has, and the CLI ignores a --add-dir path it
+	// cannot use.
+	gotFile, err := svc.Add("req_1", file, "", "")
+	if err != nil {
+		t.Fatalf("Add(file) = %v, want it accepted", err)
+	}
+	if gotFile.Path != file {
+		t.Fatalf("Add(file) path = %q, want %q", gotFile.Path, file)
+	}
+
+	// The root is still rejected: that rule is about the shape of the
+	// path, not about whether it resolves on this host.
 	if _, err := svc.Add("req_1", "/", "", ""); !errors.Is(err, ErrRootPath) {
 		t.Fatalf("Add(root) error = %v, want ErrRootPath", err)
 	}
@@ -195,9 +219,30 @@ func TestRequirementDirAddRejects(t *testing.T) {
 		t.Fatal("Add with an empty requirement id should fail")
 	}
 
+	// The rejected grants left no rows behind; the accepted ones did.
 	list, _ := svc.List("req_1")
-	if len(list) != 0 {
-		t.Fatalf("rejected grants leaked rows: %+v", list)
+	if len(list) != 2 {
+		t.Fatalf("List = %+v, want the 2 accepted grants and no more", list)
+	}
+}
+
+// TestExistsLocally pins the scope of the existence helper: it reports on
+// THIS host only. The UI's badge is built on it, and it must not be read
+// as "the claude host cannot read this".
+func TestExistsLocally(t *testing.T) {
+	dir := t.TempDir()
+	if !ExistsLocally(dir) {
+		t.Fatalf("ExistsLocally(%q) = false, want true", dir)
+	}
+	if ExistsLocally(filepath.Join(dir, "nope")) {
+		t.Fatal("ExistsLocally on a missing path = true, want false")
+	}
+	file := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if ExistsLocally(file) {
+		t.Fatal("ExistsLocally on a file = true, want false")
 	}
 }
 

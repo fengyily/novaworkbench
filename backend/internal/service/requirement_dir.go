@@ -49,17 +49,13 @@ func NewRequirementDirService(d *db.DB) *RequirementDirService {
 	return &RequirementDirService{db: d}
 }
 
-// ErrNotADirectory is returned when the granted path exists but is not a
-// directory (a file, a device, a socket). The handler maps it to a 400 with
-// a message that says what to do instead.
-var ErrNotADirectory = errors.New("path is not a directory")
-
-// ErrPathNotFound is returned when the granted path does not exist.
-var ErrPathNotFound = errors.New("path does not exist")
-
 // ErrRootPath is returned when the granted path is the filesystem root.
 // Granting "/" is never what the user meant (they are usually typing "/" as
 // a prefix), and it would hand the session the entire filesystem.
+//
+// This is the one grant-level rule that survives the absence of a
+// filesystem check: it is about the SHAPE of the path, not about whether the
+// path resolves on this host.
 var ErrRootPath = errors.New("refusing to grant the filesystem root")
 
 // NormalizeDirPath turns user input into the canonical absolute path that
@@ -77,8 +73,6 @@ var ErrRootPath = errors.New("refusing to grant the filesystem root")
 // Symlinks are deliberately NOT resolved: the stored path stays the one the
 // user recognizes (so the UI shows something they typed), and repointing a
 // symlink later moves the grant with it instead of pinning a stale target.
-// The existence / directory checks below DO follow symlinks, so a symlink to
-// a directory is a valid grant.
 func NormalizeDirPath(raw string) (string, error) {
 	p := strings.TrimSpace(raw)
 	if p == "" {
@@ -107,26 +101,6 @@ func NormalizeDirPath(raw string) (string, error) {
 	abs = filepath.Clean(abs)
 	if abs == string(filepath.Separator) {
 		return "", ErrRootPath
-	}
-	return abs, nil
-}
-
-// validateDirPath normalizes the path and checks that it is an existing
-// directory. Returns the normalized path on success.
-func validateDirPath(raw string) (string, error) {
-	abs, err := NormalizeDirPath(raw)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return abs, ErrPathNotFound
-		}
-		return abs, err
-	}
-	if !info.IsDir() {
-		return abs, ErrNotADirectory
 	}
 	return abs, nil
 }
@@ -182,15 +156,25 @@ func (s *RequirementDirService) Paths(reqID string) ([]string, error) {
 
 // Add grants a directory to a requirement.
 //
-// The path is normalized and validated (must exist, must be a directory)
-// before anything is written. Granting the same directory twice returns the
-// existing row — the (requirement_id, path) unique index backs this, and the
-// label is refreshed so "just update my note" goes through the same call.
+// The path is normalized (~ expansion, absolute + clean, no control
+// characters, not the filesystem root) before anything is written — but it
+// is NOT checked against the local filesystem.
+//
+// Why no existence check: the grant is consumed by a claude session that
+// may run on an Agent server, so "does this path exist" is not a question
+// this host can answer. A path that resolves nowhere here may be exactly
+// the directory the agent host needs; a path that resolves here may not
+// exist over there. The CLI ignores an unknown --add-dir path, so a grant
+// that resolves nowhere simply grants nothing — it never fails the run.
+//
+// Granting the same directory twice returns the existing row — the
+// (requirement_id, path) unique index backs this, and the label is
+// refreshed so "just update my note" goes through the same call.
 func (s *RequirementDirService) Add(reqID, rawPath, label, addedBy string) (*model.RequirementDir, error) {
 	if strings.TrimSpace(reqID) == "" {
 		return nil, errors.New("requirement id required")
 	}
-	abs, err := validateDirPath(rawPath)
+	abs, err := NormalizeDirPath(rawPath)
 	if err != nil {
 		return nil, err
 	}
@@ -255,11 +239,13 @@ func (s *RequirementDirService) Delete(reqID, dirID string) error {
 	return nil
 }
 
-// Exists reports whether a directory that was granted earlier is still
-// present on disk. The UI uses it to warn about a grant that went stale
-// (the directory was moved or unmounted); the claude run itself simply
-// fails to read it, which the CLI tolerates.
-func Exists(absPath string) bool {
+// ExistsLocally reports whether a granted directory is present on THIS
+// host. It says nothing about the agent host: a grant that is missing here
+// may still be the directory an Agent-server run needs.
+//
+// The UI uses it to flag a grant that looks stale from here, and the
+// claude run itself simply fails to read it, which the CLI tolerates.
+func ExistsLocally(absPath string) bool {
 	info, err := os.Stat(absPath)
 	return err == nil && info.IsDir()
 }

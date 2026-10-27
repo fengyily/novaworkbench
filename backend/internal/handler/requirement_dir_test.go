@@ -93,10 +93,11 @@ func TestRequirementDirAddListDelete(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte(dir)) {
 		t.Fatalf("List body = %s, want it to mention %q", w.Body.String(), dir)
 	}
-	// The list projection carries an `exists` flag so the UI can flag a
-	// grant whose directory has since gone away.
-	if !bytes.Contains(w.Body.Bytes(), []byte(`"exists":true`)) {
-		t.Fatalf("List body = %s, want an exists flag", w.Body.String())
+	// The list projection carries an `exists_locally` flag so the UI can
+	// flag a grant whose directory is missing from THIS host. It says
+	// nothing about the agent host, which is where the grant may resolve.
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"exists_locally":true`)) {
+		t.Fatalf("List body = %s, want an exists_locally flag", w.Body.String())
 	}
 
 	// --- delete ---
@@ -120,7 +121,11 @@ func TestRequirementDirAddListDelete(t *testing.T) {
 	}
 }
 
-func TestRequirementDirAddRejectsBadPaths(t *testing.T) {
+// TestRequirementDirAddAcceptsUnresolvablePaths pins the add-time contract
+// at the HTTP boundary: a path this host cannot resolve is still granted,
+// because the claude session that consumes the grant may run on an Agent
+// server where the path resolves. Only the filesystem root is rejected.
+func TestRequirementDirAddAcceptsUnresolvablePaths(t *testing.T) {
 	h, _ := newReqDirTestHandler(t)
 
 	file := filepath.Join(t.TempDir(), "a.txt")
@@ -128,30 +133,40 @@ func TestRequirementDirAddRejectsBadPaths(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	cases := []struct {
-		name     string
-		path     string
-		wantCode string
+	accepted := []struct {
+		name string
+		path string
 	}{
-		{name: "missing directory", path: filepath.Join(t.TempDir(), "nope"), wantCode: "PATH_NOT_FOUND"},
-		{name: "file not directory", path: file, wantCode: "NOT_A_DIRECTORY"},
-		{name: "filesystem root", path: "/", wantCode: "ROOT_PATH_REJECTED"},
+		{name: "missing directory", path: filepath.Join(t.TempDir(), "nope")},
+		{name: "file not directory", path: file},
+		{name: "agent-server-only path", path: "/srv/agent/workspace/specs"},
 	}
-	for _, tc := range cases {
+	for _, tc := range accepted {
 		t.Run(tc.name, func(t *testing.T) {
 			body, _ := json.Marshal(map[string]string{"path": tc.path})
 			req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_1/dirs", bytes.NewReader(body))
 			req.SetPathValue("id", "req_1")
 			w := httptest.NewRecorder()
 			h.Add(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
-			}
-			_, code, _ := decodeDirEnvelope(t, w.Body.Bytes())
-			if code != tc.wantCode {
-				t.Fatalf("error code = %q, want %q", code, tc.wantCode)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201, body=%s", w.Code, w.Body.String())
 			}
 		})
+	}
+
+	// The filesystem root is still rejected — that rule is about the shape
+	// of the path, not about whether it resolves on this host.
+	body, _ := json.Marshal(map[string]string{"path": "/"})
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_1/dirs", bytes.NewReader(body))
+	req.SetPathValue("id", "req_1")
+	w := httptest.NewRecorder()
+	h.Add(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+	_, code, _ := decodeDirEnvelope(t, w.Body.Bytes())
+	if code != "ROOT_PATH_REJECTED" {
+		t.Fatalf("error code = %q, want ROOT_PATH_REJECTED", code)
 	}
 }
 

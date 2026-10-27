@@ -40,10 +40,12 @@ func NewRequirementDirHandler(svc *service.RequirementDirService) *RequirementDi
 //
 // JSON body: {"path": "<absolute path or ~/...>", "label": "<optional note>"}.
 //
-// The path is normalized (~ expansion, absolute + clean) and validated
-// (must exist, must be a directory, must not be the filesystem root)
-// before anything is written. Granting the same directory twice returns the
-// existing row rather than creating a duplicate.
+// The path is normalized (~ expansion, absolute + clean, no control
+// characters, not the filesystem root) before anything is written, but it is
+// NOT checked against the local filesystem: the claude session that consumes
+// the grant may run on an Agent server, where the path resolves differently.
+// Granting the same directory twice returns the existing row rather than
+// creating a duplicate.
 func (h *RequirementDirHandler) Add(w http.ResponseWriter, r *http.Request) {
 	reqID := r.PathValue("id")
 	if strings.TrimSpace(reqID) == "" {
@@ -81,12 +83,6 @@ func (h *RequirementDirHandler) Add(w http.ResponseWriter, r *http.Request) {
 	d, err := h.svc.Add(reqID, body.Path, body.Label, addedBy)
 	if err != nil {
 		switch {
-		case errors.Is(err, service.ErrPathNotFound):
-			writeError(w, http.StatusBadRequest, "PATH_NOT_FOUND",
-				"目录不存在:"+err.Error())
-		case errors.Is(err, service.ErrNotADirectory):
-			writeError(w, http.StatusBadRequest, "NOT_A_DIRECTORY",
-				"该路径不是目录 —— 请指定一个目录（文件请用附件上传）")
 		case errors.Is(err, service.ErrRootPath):
 			writeError(w, http.StatusBadRequest, "ROOT_PATH_REJECTED",
 				"不能授权文件系统根目录 / —— 请指定更具体的子目录")
@@ -99,15 +95,22 @@ func (h *RequirementDirHandler) Add(w http.ResponseWriter, r *http.Request) {
 }
 
 // requirementDirView is the list-time projection of a grant: the row plus
-// whether the directory is still on disk. The grant is a path, so it can go
-// stale (the directory was moved / unmounted) without the row changing —
-// the UI shows a "missing" badge instead of silently offering a dead path.
+// whether the directory is still on disk ON THIS HOST.
+//
+// The grant is a path, so it can go stale (the directory was moved /
+// unmounted) without the row changing — the UI shows a "missing" badge
+// instead of silently offering a dead path.
+//
+// The field is named exists_locally because the grant is consumed wherever
+// claude runs: a path missing here may still be exactly what an Agent-server
+// run needs. The badge therefore means "not found on this host", not "the
+// model will not be able to read it".
 //
 // The CLI tolerates a missing --add-dir path (it ignores it), so a stale
 // grant degrades to "no access", never to a failed run.
 type requirementDirView struct {
 	model.RequirementDir
-	Exists bool `json:"exists"`
+	ExistsLocally bool `json:"exists_locally"`
 }
 
 // List — GET /api/requirements/{id}/dirs. Returns every granted directory;
@@ -125,7 +128,7 @@ func (h *RequirementDirHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]requirementDirView, 0, len(dirs))
 	for _, d := range dirs {
-		views = append(views, requirementDirView{RequirementDir: d, Exists: service.Exists(d.Path)})
+		views = append(views, requirementDirView{RequirementDir: d, ExistsLocally: service.ExistsLocally(d.Path)})
 	}
 	writeJSON(w, http.StatusOK, views)
 }

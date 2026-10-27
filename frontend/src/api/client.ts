@@ -525,10 +525,11 @@ export const attachmentsApi = {
 };
 
 // A directory the user authorized Claude to read for one requirement. The
-// server normalizes the path (tilde expansion, absolute + clean) and rejects
-// anything that isn't an existing directory, so `path` here is always the
-// resolved absolute path — the same string the claude CLI receives as
-// `--add-dir` and the prompt shows.
+// server normalizes the path (tilde expansion, absolute + clean), so `path`
+// here is always the resolved absolute path — the same string the claude
+// CLI receives as `--add-dir` and the prompt shows. The server does NOT
+// check that the path exists: the claude session may run on an Agent
+// server, where the path resolves differently (see below).
 export interface RequirementDir {
   id: string;
   requirement_id: string;
@@ -546,13 +547,17 @@ export interface RequirementDir {
 // The path is interpreted on the machine that runs claude: for a local run
 // that's this host; for an Agent-server run it's the agent host.
 export const requirementDirsApi = {
-  // Returns [] when the requirement has no grants (never null).
+  // Returns [] when the requirement has no grants (never null). Each row
+  // carries `exists_locally`: whether the directory is present on THIS
+  // host. It says nothing about the agent host — a grant missing here may
+  // still be exactly what a remote run needs.
   list: (requirementId: string) =>
     api.get<RequirementDir[]>(`/api/requirements/${requirementId}/dirs`),
 
   // Grant a directory. `path` may be absolute or start with "~/" — the
-  // server expands and normalizes it. Throws with a server-provided message
-  // when the path doesn't exist, isn't a directory, or is the filesystem root.
+  // server expands and normalizes it. The path is NOT validated against
+  // the local filesystem (the claude session may run elsewhere); only the
+  // filesystem root is rejected.
   add: (requirementId: string, path: string, label?: string) =>
     api.post<RequirementDir>(`/api/requirements/${requirementId}/dirs`, {
       path,
