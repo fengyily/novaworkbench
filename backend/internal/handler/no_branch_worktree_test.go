@@ -298,7 +298,7 @@ func TestDetachedPushToBase_CreatesNoRemoteBranch(t *testing.T) {
 	}
 
 	// Push exactly the way the production path does.
-	r.gitIn(t, wtPath, pushBaseRefspecArgs(true, "main")...)
+	r.gitIn(t, wtPath, pushBaseRefspecArgs("main")...)
 
 	// The remote must carry the base branch and nothing else.
 	refs, err := gitRun(r.originBare, "for-each-ref", "--format=%(refname)", "refs/heads")

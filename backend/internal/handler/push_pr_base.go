@@ -188,22 +188,35 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送 base 流程启动（no-branch 模式, base=" + base + "）"})
 
-	// ── Sanity: refuse to run if the working dir isn't actually on the base
-	// branch anymore (an AdjustCoding round-trip could leave the row with
-	// NoBranch=true but the working dir on some other branch). A DETACHED
-	// HEAD is the normal shape of the no-branch mode now — the isolated
-	// worktree sits on the base line with no branch checked out — so it is
-	// allowed through.
+	// ── Sanity: the no-branch mode's whole point is "this requirement's work
+	// lands on the base branch, and no branch is created anywhere". The
+	// working dir is normally a DETACHED HEAD worktree parked on the base
+	// line, but the coding agent can leave a branch checked out instead —
+	// a detached HEAD looks broken, so the agent runs `git checkout -b` and
+	// carries on (req_1a42496198026380, 2026-10-27: the agent created
+	// feat/1a42496198026380, pushed it and opened a PR, and this guard then
+	// refused the platform's own push with "cur != base").
+	//
+	// So the guard does NOT refuse. The branch name is irrelevant here — the
+	// isolated worktree belongs to THIS requirement, and git itself still
+	// enforces the only rule that matters (a non-fast-forward push is
+	// rejected; we never force-push). We push the current HEAD straight onto
+	// the base branch and clean the stray branch up afterwards.
 	cur := currentBranch(dir)
-	if cur != "" && cur != "HEAD" && cur != base {
-		job.Append(store.LogLine{Type: "error", Content: "❌ 当前 HEAD 在分支 " + cur + ",cur != base=" + base + ",拒绝推送。请先切回 base 分支后重试。"})
-		job.Finish(1, store.JobError)
-		return
-	}
-	detached := cur == "HEAD"
-	if detached {
+	detached := cur == "" || cur == "HEAD"
+	strayBranch := ""
+	switch {
+	case detached:
 		job.Append(store.LogLine{Type: "message",
 			Content: "🌿 从隔离 worktree 的 detached HEAD 直推 base: " + base + "（不新建分支）"})
+	case cur == base:
+		job.Append(store.LogLine{Type: "message",
+			Content: "🌿 隔离 worktree 已在 base 分支 " + base + " 上，直接推送（不新建分支）"})
+	default:
+		strayBranch = cur
+		job.Append(store.LogLine{Type: "warning",
+			Content: "⚠️ 隔离 worktree 的 HEAD 在分支 " + cur + "（不是 base=" + base + "）—— 这通常是开发代理自行创建了分支。" +
+				"不创建分支模式下不新建任何分支，将把当前 HEAD 直接推送到 base 分支 " + base + "。"})
 	}
 
 	credEnv, credCleanup := r.assembleShellJobCredEnv(reqRow, dir, projectPath, job)
@@ -264,36 +277,30 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 	}
 	// ── Step 4 (conditional): push the current HEAD onto the base branch.
 	//
-	// A detached HEAD cannot carry an upstream, so the refspec form
-	// (HEAD:refs/heads/<base>) is used and `-u` is omitted. No branch is
-	// created on either side — only refs/heads/<base> moves forward.
-	pushArgs := pushBaseRefspecArgs(detached, base)
+	// The refspec form (HEAD:refs/heads/<base>) is used unconditionally and
+	// `-u` is never added: it pushes whatever HEAD points at — the detached
+	// HEAD of the isolated worktree, or the branch the coding agent left
+	// checked out — straight onto the base branch. No branch is created on
+	// either side; only refs/heads/<base> moves forward.
+	pushArgs := pushBaseRefspecArgs(base)
 	if _, perr := git(pushArgs...); perr != nil {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 首次 push base 失败，尝试 rebase 后重推: " + perr.Error()})
-		if detached {
-			// `git pull --rebase` has no clear meaning on a detached HEAD, so
-			// fetch + rebase explicitly (git supports rebase on a detached
-			// HEAD). Never force-push — a rejected push is the user's cue to
-			// resolve the conflict themselves.
-			if _, ferr := git("fetch", "origin", base); ferr != nil {
-				job.Append(store.LogLine{Type: "error", Content: "❌ git fetch origin " + base + " 失败: " + ferr.Error()})
-				job.Finish(1, store.JobError)
-				return
-			}
-			if _, rerr := git("rebase", "origin/"+base); rerr != nil {
-				// Abort so the worktree stays usable and the user can resolve
-				// the conflict by hand.
-				_, _ = git("rebase", "--abort")
-				job.Append(store.LogLine{Type: "error", Content: "❌ git rebase origin/" + base + " 失败（可能与 base 上的新提交冲突）: " + rerr.Error()})
-				job.Finish(1, store.JobError)
-				return
-			}
-		} else {
-			if _, rerr := git("pull", "--rebase", "origin", base); rerr != nil {
-				job.Append(store.LogLine{Type: "error", Content: "❌ git pull --rebase 失败: " + rerr.Error()})
-				job.Finish(1, store.JobError)
-				return
-			}
+		// `git pull --rebase` has no clear meaning on a detached HEAD, so
+		// fetch + rebase explicitly (git supports rebase on a detached
+		// HEAD, and on a branch just as well). Never force-push — a rejected
+		// push is the user's cue to resolve the conflict themselves.
+		if _, ferr := git("fetch", "origin", base); ferr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ git fetch origin " + base + " 失败: " + ferr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if _, rerr := git("rebase", "origin/"+base); rerr != nil {
+			// Abort so the worktree stays usable and the user can resolve
+			// the conflict by hand.
+			_, _ = git("rebase", "--abort")
+			job.Append(store.LogLine{Type: "error", Content: "❌ git rebase origin/" + base + " 失败（可能与 base 上的新提交冲突）: " + rerr.Error()})
+			job.Finish(1, store.JobError)
+			return
 		}
 		if out2, perr2 := git(pushArgs...); perr2 != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ git push base 失败: " + out2 + " " + perr2.Error()})
@@ -304,6 +311,18 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		job.Append(store.LogLine{Type: "message", Content: "⬆️ 已推送 base (rebase 后)"})
 	} else {
 		job.Append(store.LogLine{Type: "message", Content: "⬆️ 已推送 base → origin"})
+	}
+
+	// ── Step 5: restore the no-branch shape when the coding agent left a
+	// branch of its own checked out in the isolated worktree.
+	//
+	// The work is on the base branch now, so the stray branch is a leftover
+	// artifact of the no-branch mode: detach HEAD again (the commits stay
+	// reachable — they are on base now) and drop the LOCAL branch. The
+	// remote branch is NOT deleted — the agent may have pushed it and opened
+	// a PR, and closing that out is the user's call. We only report it.
+	if strayBranch != "" {
+		cleanupStrayBranchAfterPush(job, dir, strayBranch, git)
 	}
 
 	// The push advanced refs/heads/<base> on the remote and origin/<base>
@@ -320,6 +339,57 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 	job.Append(store.LogLine{Type: "done", Content: "✅ 推送 base 流程完成"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[push-base-shell] job %s finished for %s", job.ID, reqRow.ID)
+}
+
+// cleanupStrayBranchAfterPush restores the no-branch shape after the base
+// push succeeded while the working dir sat on a branch the coding agent had
+// created for itself.
+//
+// What it does, in order:
+//
+//  1. Reports whether the stray branch also exists on the remote (the agent
+//     may have pushed it and opened a PR — req_1a42496198026380 did exactly
+//     that). The remote branch is NOT deleted: a PR may be waiting for
+//     review, and closing it out is the user's call. The log line carries
+//     the exact command so the cleanup is one copy-paste away.
+//  2. Detaches HEAD again (`git checkout --detach`) — the commits stay
+//     reachable, they are on the base branch now.
+//  3. Drops the LOCAL branch with `git branch -d` (the safe variant: git
+//     refuses when the branch is not merged, and we never force it away).
+//
+// Every step is best-effort: a failure here is cosmetic compared to the
+// push that already succeeded, so it is logged and never fails the job.
+//
+// git is the caller's credential-aware git runner (see execPushBaseShell).
+func cleanupStrayBranchAfterPush(job *store.Job, dir, strayBranch string, git func(args ...string) (string, error)) {
+	if job == nil || dir == "" || strayBranch == "" {
+		return
+	}
+	// 1. Did the agent push the stray branch to the remote?
+	if upstream, err := git("rev-parse", "--abbrev-ref", strayBranch+"@{upstream}"); err == nil &&
+		strings.TrimSpace(upstream) != "" {
+		job.Append(store.LogLine{Type: "warning",
+			Content: "⚠️ 开发代理曾把分支 " + strayBranch + " 推送到远端（" + strings.TrimSpace(upstream) + "）—— 不创建分支模式下不应保留它。" +
+				"如需清理请手动执行: git push origin --delete " + strayBranch})
+	}
+	// 2. Detach HEAD again so the worktree matches the no-branch shape.
+	if out, err := git("checkout", "--detach"); err != nil {
+		job.Append(store.LogLine{Type: "warning",
+			Content: "⚠️ 未能把隔离 worktree 切回 detached HEAD（分支 " + strayBranch + "）: " + strings.TrimSpace(out+" "+err.Error())})
+		return
+	}
+	job.Append(store.LogLine{Type: "message",
+		Content: "🌿 隔离 worktree 已切回 detached HEAD（分支 " + strayBranch + " 不再被检出）"})
+	// 3. Drop the local branch. `-d` refuses when the branch is not merged
+	// into HEAD — we never force it.
+	if out, err := git("branch", "-d", strayBranch); err != nil {
+		job.Append(store.LogLine{Type: "warning",
+			Content: "ℹ️ 本地分支 " + strayBranch + " 未删除（可能未合并或被其它 worktree 占用）: " +
+				strings.TrimSpace(out+" "+err.Error()) + "。如需清理请手动执行: git branch -D " + strayBranch})
+		return
+	}
+	job.Append(store.LogLine{Type: "message",
+		Content: "🧹 已删除不创建分支模式下的残留本地分支: " + strayBranch})
 }
 
 // appendProtectedBaseHint surfaces an actionable message when the remote
