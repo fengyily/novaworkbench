@@ -1442,10 +1442,10 @@ func (t originTransport) CollectResult(ctx context.Context, client *gossh.Client
 	// ref refs/heads/<branch>. The `{ diff || commit; }` grouping removes the
 	// &&/|| precedence ambiguity: clean tree skips commit but still pushes; a
 	// dirty tree commits then pushes; a failed commit skips the push.
-	commitScript := "cd " + shellQuoteSingle(wtPath) +
+	commitScript := withShellPath("cd " + shellQuoteSingle(wtPath) +
 		" && git add -A" +
 		" && { git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) + "; }" +
-		" && git push origin " + shellQuoteSingle("HEAD:refs/heads/"+branch)
+		" && git push origin " + shellQuoteSingle("HEAD:refs/heads/"+branch))
 	if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, &pushStderr); exit != 0 {
 		// GPG signing / push failures carry specific stderr patterns; classify
 		// them into a precise Chinese message, falling back to generic wording.
@@ -1536,8 +1536,8 @@ func (t bundleTransport) CollectResult(ctx context.Context, client *gossh.Client
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步代码变更回本地隔离 worktree（git bundle 下行）..."})
 
 	// 1. Commit on the remote (no push).
-	commitScript := "cd " + shellQuoteSingle(wtPath) +
-		" && git add -A && (git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) + ")"
+	commitScript := withShellPath("cd " + shellQuoteSingle(wtPath) +
+		" && git add -A && (git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) + ")")
 	if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 		in.job.Append(store.LogLine{Type: "error", Content: "❌ 远端提交失败（exit=" + fmtInt(exit) + "）"})
 		return
