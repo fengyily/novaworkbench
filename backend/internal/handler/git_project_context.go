@@ -76,18 +76,47 @@ func gitProjectBlock(
 	reqRow *model.Requirement,
 	forPR bool,
 ) string {
-	if projectSvc == nil || reqRow == nil {
+	if reqRow == nil {
 		return promptpkg.GitCommitConvention
 	}
-	proj, err := projectSvc.Get(reqRow.ProjectID)
-	if err != nil || proj == nil {
-		return promptpkg.GitCommitConvention
+	// Load the project row first (best-effort) so the no-branch contract can
+	// name the REAL base branch even on the degraded paths below.
+	var proj *model.Project
+	if projectSvc != nil {
+		if p, err := projectSvc.Get(reqRow.ProjectID); err == nil {
+			proj = p
+		}
+	}
+	// The no-branch contract is appended on EVERY development-facing path
+	// below — including the degraded ones — because it is the one
+	// instruction that keeps the no-branch mode's delivery contract intact
+	// (no branch creation, no push, no PR: the platform pushes HEAD onto the
+	// base branch itself).
+	//
+	// No-branch mode ("直接在 base 分支上开发"): the child runs in a
+	// detached-HEAD worktree, which looks broken enough that the agent
+	// creates a branch of its own, pushes it and opens a PR — after which
+	// the platform's own push stage refuses to run (req_1a42496198026380,
+	// 2026-10-27). The contract is appended HERE, inside the one helper
+	// every prompt path shares, so the coding run, the adjust / continue
+	// rounds and the sub-task children all inherit it.
+	//
+	// forPR=true (the push / PR sub-agent) is EXCLUDED on purpose: that
+	// agent's job IS to push. In the no-branch mode the platform owns the
+	// delivery and the push agent is not dispatched at all, so telling it
+	// "don't push" would be wrong if it ever were.
+	noBranchBlock := ""
+	if reqRow.NoBranch && !forPR {
+		noBranchBlock = "\n\n" + promptpkg.BuildNoBranchConvention(resolveBaseBranch(reqRow, proj))
+	}
+	if proj == nil {
+		return promptpkg.GitCommitConvention + noBranchBlock
 	}
 
 	ctx, err := buildGitProjectContext(proj, platformSvc)
 	if err != nil {
 		log.Printf("[git-context] %s: build context failed: %v — falling back to GitCommitConvention only", reqRow.ID, err)
-		return promptpkg.GitCommitConvention
+		return promptpkg.GitCommitConvention + noBranchBlock
 	}
 
 	block := promptpkg.BuildGitProjectBlock(ctx, forPR)
@@ -95,7 +124,7 @@ func gitProjectBlock(
 	// "in addition to" the universal no-AI-signature / no-typed-credentials
 	// rule, never a replacement. Concat with a blank line so downstream
 	// parsers that look for "## Git 提交与推送规范" stay happy.
-	return promptpkg.GitCommitConvention + "\n" + block
+	return promptpkg.GitCommitConvention + "\n" + block + noBranchBlock
 }
 
 // platformRunEnv returns the env pairs to splice into the child process /
