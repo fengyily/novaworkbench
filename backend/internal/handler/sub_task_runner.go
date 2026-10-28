@@ -1091,8 +1091,10 @@ func (r *SubTaskRunner) Run(
 		job.Append(store.LogLine{Type: "message", Content: "📎 已注入需求附件清单，AI 可直接 Read 查看。"})
 	}
 	// 已授权读取目录清单（--add-dir grants）。子任务继承父需求的授权，
-	// 这样需要翻日志 / 规格目录的子任务不必等用户再授权一次。
-	addDirs := resolveAddDirs(r.dirSvc, req.ID)
+	// 这样需要翻日志 / 规格目录的子任务不必等用户再授权一次。附件目录一并授权：
+	// 上面注入的清单指向的就是它，不授权则子任务读不到附件。
+	addDirs := attachGrantDirs(resolveAddDirs(r.dirSvc, req.ID), r.attachSvc,
+		attachmentGrant{ownerID: req.ID, dir: attachDir})
 	if m := dirsManifestFor(r.dirSvc, req.ID); m != "" {
 		prompt += "\n" + m
 		job.Append(store.LogLine{Type: "message", Content: "📂 已授权读取 " + fmt.Sprintf("%d", len(addDirs)) + " 个目录，AI 可直接读取。"})
@@ -1238,7 +1240,7 @@ func (r *SubTaskRunner) Run(
 			usage:          subUsage,
 			FreshSession:   freshSession,
 			Bare:           bare,
-			AddDirs:        resolveAddDirs(r.dirSvc, req.ID),
+			AddDirs:        addDirs,
 		})
 		// v0.5.x: 远端 Agent 服务器路径暂未接入 phase tracker；保持单一 artifact 落库。
 		// Persist the session id the CLI actually reported. The local path

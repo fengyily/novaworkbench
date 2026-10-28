@@ -132,6 +132,8 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 			attachDir = rd
 		}
 	}
+	// No --add-dir grant here — review runs with --dangerously-skip-permissions
+	// (see handler/attachment_grant.go for the requirement-side grant).
 	manifest := attachManifestFor(h.attachSvc, rv.ID, attachDir)
 	systemPrompt := appendManifest(rolePrompt, manifest)
 

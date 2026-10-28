@@ -137,6 +137,27 @@
   padding: 1px 6px;
 }
 
+/* Auto-authorized row (the requirement's attachment directory). It is
+   maintained by the system, not added by the user, so it reads as secondary
+   and carries no delete button. */
+.dir-panel__row--auto {
+  background: var(--surface-subtle, #f8fafc);
+  border-style: dashed;
+}
+
+.dir-panel__path--auto {
+  color: var(--text-muted, #64748b);
+}
+
+.dir-panel__auto {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-primary, #4f46e5);
+  background: #eef2ff;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
 .dir-panel__label {
   font-size: 12px;
   color: var(--text-muted, #64748b);

@@ -268,7 +268,7 @@ func main() {
 	// its working directory. Metadata in requirement_dirs; the directories
 	// themselves stay where they are on disk.
 	requirementDirSvc := service.NewRequirementDirService(database)
-	requirementDirH := handler.NewRequirementDirHandler(requirementDirSvc)
+	requirementDirH := handler.NewRequirementDirHandler(requirementDirSvc, attachmentSvc)
 	// Persisted Review sessions — owner of the attachments above, carrier of
 	// the user-written 改动目标 description, landing spot for the graded
 	// (P0/P1/P3) report.

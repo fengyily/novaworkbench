@@ -239,7 +239,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 					stageLabel:     "analyst-chat",
 					SystemPrompt:   systemPrompt,
 					baseBranch:     defaultBranch,
-					AddDirs:        h.addDirsFor(req.RequirementID),
+					AddDirs:        h.grantDirsFor(req.RequirementID, ""),
 				},
 				kind:            requirement.Kind,
 				firstTurnPrompt: firstTurnPrompt,
@@ -248,7 +248,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				resume:          !isFirstRound,
 			})
 		} else {
-			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.addDirsFor(req.RequirementID))
+			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.grantDirsFor(req.RequirementID, ""))
 		}
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -480,7 +480,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxForConfig("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage, claudeConfigID)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.addDirsFor(req.RequirementID))
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.grantDirsFor(req.RequirementID, ""))
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())

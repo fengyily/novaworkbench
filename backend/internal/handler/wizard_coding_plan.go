@@ -205,7 +205,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 		// Authorized directories (--add-dir grants). This is a plan-mode
 		// turn, so the grant is what keeps the read-only exploration from
 		// stalling on a path outside the working directory.
-		AddDirs: h.addDirsFor(reqID),
+		AddDirs: h.grantDirsFor(reqID, ""),
 	})
 	defer cancel()
 

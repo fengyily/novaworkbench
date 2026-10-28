@@ -11,13 +11,24 @@ import (
 	"testing"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
 
 // newReqDirTestHandler wires a RequirementDirHandler with a real SQLite DB
-// (migrations applied by db.Init) and one seeded requirement.
+// (migrations applied by db.Init) and one seeded requirement. The returned
+// attachment service is the one the handler consults for the synthetic
+// "auto" row — the tests that need it upload a file through it.
+//
+// The attachment root (a package-global in the service layer) is pointed at a
+// temp dir so an upload in a test never writes into the real
+// ~/.novaworkbench/attachments.
 func newReqDirTestHandler(t *testing.T) (*RequirementDirHandler, *db.DB) {
 	t.Helper()
+	oldRoot := service.AttachmentRoot()
+	service.SetAttachmentRoot(t.TempDir())
+	t.Cleanup(func() { service.SetAttachmentRoot(oldRoot) })
+
 	path := filepath.Join(t.TempDir(), "test.db")
 	d, err := db.Init(db.Config{Driver: string(db.SQLite), SQLitePath: path})
 	if err != nil {
@@ -30,7 +41,8 @@ func newReqDirTestHandler(t *testing.T) (*RequirementDirHandler, *db.DB) {
 	if _, err := d.Exec("INSERT INTO requirements (id, project_id, title) VALUES ('req_1', 'proj_1', '目录授权')"); err != nil {
 		t.Fatalf("seed requirement: %v", err)
 	}
-	return NewRequirementDirHandler(service.NewRequirementDirService(d)), d
+	attachSvc := service.NewAttachmentService(d)
+	return NewRequirementDirHandler(service.NewRequirementDirService(d), attachSvc), d
 }
 
 // decodeDirEnvelope pulls the {success, data, error} envelope out of a
@@ -235,5 +247,100 @@ func TestDirsManifestFor(t *testing.T) {
 	}
 	if got := resolveAddDirs(nil, "req_1"); got != nil {
 		t.Fatalf("resolveAddDirs(nil svc) = %v, want nil", got)
+	}
+}
+
+// --- synthetic "auto" row: the requirement's attachment directory ---
+
+// listDirs pulls the rows out of a List response.
+func listDirs(t *testing.T, h *RequirementDirHandler) []requirementDirView {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/requirements/req_1/dirs", nil)
+	req.SetPathValue("id", "req_1")
+	w := httptest.NewRecorder()
+	h.List(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("List status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	data, code, msg := decodeDirEnvelope(t, w.Body.Bytes())
+	if code != "" {
+		t.Fatalf("List error = %s/%s", code, msg)
+	}
+	var views []requirementDirView
+	if err := json.Unmarshal(data, &views); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	return views
+}
+
+// TestRequirementDirListIncludesAutoAttachmentRow pins the contract that the
+// panel shows the attachment directory: it is handed to claude as --add-dir on
+// every run (handler/attachment_grant.go), so the user must be able to see it.
+func TestRequirementDirListIncludesAutoAttachmentRow(t *testing.T) {
+	h, d := newReqDirTestHandler(t)
+
+	// No attachment yet → no auto row.
+	for _, v := range listDirs(t, h) {
+		if v.Auto {
+			t.Fatalf("a requirement without attachments must not list an auto row, got %+v", v)
+		}
+	}
+
+	attachSvc := service.NewAttachmentService(d)
+	if _, err := attachSvc.Upload("req_1", model.AttachmentUpload{
+		Filename:   "error.log",
+		Reader:     strings.NewReader("boom"),
+		UploadedBy: "u1",
+	}); err != nil {
+		t.Fatalf("upload attachment: %v", err)
+	}
+
+	var auto *requirementDirView
+	for _, v := range listDirs(t, h) {
+		if v.Auto {
+			vv := v
+			auto = &vv
+		}
+	}
+	if auto == nil {
+		t.Fatal("expected an auto row once the requirement has an attachment")
+	}
+	if auto.ID != "auto:attachment" {
+		t.Fatalf("auto row id = %q, want %q", auto.ID, "auto:attachment")
+	}
+	if auto.Reason != "attachment" {
+		t.Fatalf("auto row reason = %q, want %q", auto.Reason, "attachment")
+	}
+	if want := filepath.Join(service.AttachmentRoot(), "req_1"); auto.Path != want {
+		t.Fatalf("auto row path = %q, want %q", auto.Path, want)
+	}
+}
+
+// TestRequirementDirListHasNoAutoRowWithoutAttachments is the other half: the
+// synthetic row must not appear for a requirement with no attachments, and it
+// must not be mistaken for a user grant.
+func TestRequirementDirListHasNoAutoRowWithoutAttachments(t *testing.T) {
+	h, _ := newReqDirTestHandler(t)
+
+	views := listDirs(t, h)
+	if len(views) != 0 {
+		t.Fatalf("expected no rows at all, got %+v", views)
+	}
+}
+
+// TestRequirementDirDeleteAutoRowIsNotFound pins that the synthetic row cannot
+// be revoked — it is not a grant, so DELETE answers 404 instead of silently
+// pretending to revoke something.
+func TestRequirementDirDeleteAutoRowIsNotFound(t *testing.T) {
+	h, _ := newReqDirTestHandler(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/requirements/req_1/dirs/auto:attachment", nil)
+	req.SetPathValue("id", "req_1")
+	req.SetPathValue("dir_id", "auto:attachment")
+	w := httptest.NewRecorder()
+	h.Delete(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Delete(auto row) status = %d, want 404, body=%s", w.Code, w.Body.String())
 	}
 }

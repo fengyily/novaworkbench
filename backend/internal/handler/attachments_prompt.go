@@ -36,7 +36,17 @@ func attachManifestFor(svc *service.AttachmentService, ownerID, attachDir string
 	if strings.TrimSpace(attachDir) == "" {
 		attachDir = filepath.Join(service.AttachmentRoot(), ownerID)
 	}
-	return svc.BuildManifest(ownerID, attachDir)
+	m := svc.BuildManifest(ownerID, attachDir)
+	if m == "" {
+		return ""
+	}
+	// Tell the model the directory is already granted, so it reads the file
+	// directly instead of probing with Bash (which would look like a write
+	// attempt and trip the permission gate). The wording stays true for the
+	// code-review surface too — that path runs with
+	// --dangerously-skip-permissions, so no confirmation is needed there
+	// either.
+	return m + "\n> 上方各条「位置」所在的目录已随本次运行纳入授权范围，可直接用 Read 工具读取该目录下的文件，无需再申请权限确认。\n"
 }
 
 // resolveAttachDirFor returns the directory the caller should pass into
@@ -78,7 +88,21 @@ func resolveAttachDirFor(ctx context.Context, attachSvc *service.AttachmentServi
 		log.Printf("[attachments] remote attach-dir sync to %s failed: %v (using local paths)", srv.Name, err)
 		return local
 	}
-	return rd
+	// The canonical remote path is "~/.nova/attachments/<reqID>". SFTP expands
+	// "~", but the claude CLI does NOT — handed a literal "~/.nova/..." it
+	// would not resolve it, so both the manifest and the --add-dir grant would
+	// name a path that doesn't exist on the agent host. Expand it to the
+	// agent's absolute $HOME so the two agree on a real path. A failure here
+	// keeps the raw value (degraded, never fatal).
+	//
+	// ExpandHome runs a command over the SSH connection, so it has to happen
+	// before the deferred Close() above tears the connection down.
+	if expanded, xerr := sshClient.ExpandHome(rd); xerr == nil {
+		return expanded
+	} else {
+		log.Printf("[attachments] ExpandHome(%s) failed: %v — keeping the raw path", rd, xerr)
+		return rd
+	}
 }
 
 // novaAttachRe matches the placeholder the frontend inserts when the user

@@ -537,6 +537,11 @@ export interface RequirementDir {
   label: string;
   added_by: string;
   added_at: string;           // ISO 8601
+  /** Synthetic row: this directory is auto-authorized on every claude run
+   *  (the requirement's attachment directory) and cannot be revoked here. */
+  auto?: boolean;
+  /** Why the auto row exists — currently only "attachment". */
+  reason?: string;
 }
 
 // Granted directories for a requirement. Unlike attachments these are NOT

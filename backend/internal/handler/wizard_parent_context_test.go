@@ -103,7 +103,7 @@ func TestPrepareDesignWorkspace_ParentBlockOnEveryPromptBranch(t *testing.T) {
 	h.projectSvc = service.NewProjectService(d, nil, nil)
 
 	reqSvc := h.reqSvc
-	parent, block := h.buildParentBlock(context.Background(), mustGetReq(t, reqSvc, childID), "")
+	parent, block, _ := h.buildParentBlock(context.Background(), mustGetReq(t, reqSvc, childID), "")
 	if block == "" {
 		t.Fatal("buildParentBlock returned empty for a well-formed parent link")
 	}
@@ -237,7 +237,7 @@ func TestBuildParentBlock_RejectsBrokenLinks(t *testing.T) {
 	t.Run("parent row does not exist", func(t *testing.T) {
 		child := mustGetReq(t, reqSvc, childID)
 		child.ParentID = "req_does_not_exist"
-		parent, block := h.buildParentBlock(context.Background(), child, "")
+		parent, block, _ := h.buildParentBlock(context.Background(), child, "")
 		if parent != nil || block != "" {
 			t.Fatalf("deleted parent must degrade to (nil, \"\"), got (%v, %q)", parent != nil, block)
 		}
@@ -254,7 +254,7 @@ func TestBuildParentBlock_RejectsBrokenLinks(t *testing.T) {
 		}
 		child := mustGetReq(t, reqSvc, childID)
 		child.ParentID = "req_cross_proj"
-		parent, block := h.buildParentBlock(context.Background(), child, "")
+		parent, block, _ := h.buildParentBlock(context.Background(), child, "")
 		if parent != nil || block != "" {
 			t.Fatalf("cross-project parent must degrade to (nil, \"\"), got (%v, %q)", parent != nil, block)
 		}
@@ -267,7 +267,7 @@ func TestBuildParentBlock_RejectsBrokenLinks(t *testing.T) {
 		}
 		child := mustGetReq(t, reqSvc, childID)
 		child.ParentID = "req_grandparent"
-		parent, block := h.buildParentBlock(context.Background(), child, "")
+		parent, block, _ := h.buildParentBlock(context.Background(), child, "")
 		if parent != nil || block != "" {
 			t.Fatalf("grandparent must degrade to (nil, \"\") — nesting is one level, got (%v, %q)", parent != nil, block)
 		}
@@ -276,7 +276,7 @@ func TestBuildParentBlock_RejectsBrokenLinks(t *testing.T) {
 	t.Run("no parent id at all", func(t *testing.T) {
 		child := mustGetReq(t, reqSvc, childID)
 		child.ParentID = ""
-		parent, block := h.buildParentBlock(context.Background(), child, "")
+		parent, block, _ := h.buildParentBlock(context.Background(), child, "")
 		if parent != nil || block != "" {
 			t.Fatalf("top-level requirement must yield (nil, \"\"), got (%v, %q)", parent != nil, block)
 		}
