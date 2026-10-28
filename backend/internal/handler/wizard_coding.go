@@ -1551,6 +1551,13 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if perr := h.reqSvc.UpdateDeveloperConfig(p.RequirementID, claudeConfigID); perr != nil {
 				log.Printf("[start-coding] failed to persist developer_config_id for %s: %v", p.RequirementID, perr)
 			}
+			// The remote path must correct the pre-minted session id with the
+			// one the CLI actually reported, exactly like the local path
+			// does below. Without this the DB keeps pointing at the id we
+			// GUESSED, and once the CLI's --session-id semantics drift the
+			// stored id resolves to a file that exists nowhere — the exact
+			// symptom this whole change set is about.
+			h.persistRemoteCodingSession(p.RequirementID, out.sessionID, p.AgentServerID)
 			// dev_source / agent_server_id were stamped up front by the
 			// execStartCoding prologue (see line ~1246) — no need to re-write on
 			// the success path. The prologue fires before the remote job starts
@@ -2040,7 +2047,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				model:      model,
 				usage:      h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID),
 			})
-			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "adjust-coding", "✅ 追加调整完成！")
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, req.AgentServerID, "adjust-coding", "✅ 追加调整完成！")
 			return
 		}
 		// Local credential + platform-token env (was missing entirely from the
@@ -2129,7 +2136,11 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 // result + a done frame and stamp developer_model. Factored out so
 // StartCoding / AdjustCoding / ContinueCoding all report remote runs
 // identically — the frontend can't tell a remote job from a local one.
-func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, claudeConfigID, tag, doneMsg string) {
+//
+// serverID is the Agent server the run executed on: the transcript of this
+// session now lives there, and requirements.session_server_id is the pointer
+// that lets a later run on a DIFFERENT host pull it back.
+func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, claudeConfigID, serverID, tag, doneMsg string) {
 	switch {
 	case out.staleSession:
 		job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
@@ -2153,9 +2164,52 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 		if perr := h.reqSvc.UpdateDeveloperConfig(reqID, claudeConfigID); perr != nil {
 			log.Printf("[%s] failed to persist developer_config_id for %s: %v", tag, reqID, perr)
 		}
+		// Correct the persisted session id with the one the CLI actually
+		// reported. The adjust / continue rounds resume the SAME session, so
+		// this is normally a no-op — it only fires when the CLI minted a
+		// different id, and then the DB MUST follow it or the next round
+		// resumes a file that exists nowhere.
+		h.persistRemoteCodingSession(reqID, out.sessionID, serverID)
 	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[%s] remote job %s finished for %s", tag, job.ID, reqID)
+}
+
+// persistRemoteCodingSession records the two facts a remote coding run
+// establishes: which session id the CLI actually used, and which Agent server
+// now holds the transcript.
+//
+// The session id is corrected only when it differs from what the row already
+// carries. The local path has always done this — the remote path used to DROP
+// the CLI-reported id entirely, so the row kept pointing at the pre-minted
+// UUID. Today the CLI honours --session-id so the two happen to match; the
+// moment that semantic drifts, the stored id resolves to a file that exists
+// nowhere and the next round starts from scratch with no context — the exact
+// symptom this change set is about.
+//
+// The session server is what makes a server switch survivable: the transcript
+// of the requirement lives on that host until it is pulled back, and the
+// pointer is the only way to find it again.
+func (h *WizardHandler) persistRemoteCodingSession(reqID, reportedSID, serverID string) {
+	if reqID == "" || h.reqSvc == nil {
+		return
+	}
+	if reportedSID != "" {
+		curSID := ""
+		if cur, gerr := h.reqSvc.Get(reqID); gerr == nil {
+			curSID = cur.CodingSessionID
+		}
+		if curSID != reportedSID {
+			if perr := h.reqSvc.UpdateCodingSession(reqID, reportedSID); perr != nil {
+				log.Printf("[session-sync] failed to persist reported coding session for %s: %v", reqID, perr)
+			}
+		}
+	}
+	if serverID != "" {
+		if perr := h.reqSvc.UpdateSessionServer(reqID, serverID); perr != nil {
+			log.Printf("[session-sync] failed to persist session_server_id for %s: %v", reqID, perr)
+		}
+	}
 }
 
 // ContinueCoding resumes an interrupted/cleared coding task by --resume'ing the
@@ -2327,7 +2381,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 				model:      model,
 				usage:      h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			})
-			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "continue-coding", "✅ 续接开发完成！")
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, req.AgentServerID, "continue-coding", "✅ 续接开发完成！")
 			return
 		}
 		// Local credential + platform-token env (symmetric with AdjustCoding).

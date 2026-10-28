@@ -457,6 +457,21 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	remoteProjectsRoot := "~/.claude/projects/"
 	remoteSlug := util.EncodeClaudeSlug(wtPath)
 	remoteSlugDir := remoteProjectsRoot + remoteSlug
+	// Resolve "~" NOW, before any consumer sees this string — same reason as
+	// the architect path (prepareRemoteAgentRun): Mkdirp builds a
+	// single-quoted `mkdir -p '~/.claude/...'` (the shell does not expand a
+	// tilde inside quotes) and pkg/sftp does not understand "~" either, so
+	// every op below would address a directory literally named "~" — where the
+	// remote CLI never looks. The observable damage is a permanent no-op on
+	// Step 6 ("📥 同步会话结果回本地...") plus a bogus "远端未找到 session
+	// 文件" pre-flight warning on every run. Resolving once here also makes
+	// the path printed in the job log match the path actually used, which is
+	// what the pre-flight check below logs.
+	if expanded, eerr := client.ExpandHome(remoteSlugDir); eerr == nil {
+		remoteSlugDir = expanded
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法解析远端 $HOME（" + eerr.Error() + "），会话同步可能失效"})
+	}
 	var sessionMissingSide string
 	// missingSIDs carries the locally-missing <sid>.jsonl list from the
 	// up-sync pass. Lifted to function scope so the post-pre-flight
@@ -464,6 +479,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// at the pre-flight point; it's parsed from the worker's NDJSON
 	// stream later).
 	var missingSIDs []string
+	var sessionSyncErr error
 	if in.FreshSession || in.sourceSID == "" {
 		// Nothing to --resume → nothing worth pushing. This covers explicit
 		// FreshSession runs AND every sourceSID=="" case: "基于方案开发"
@@ -500,38 +516,32 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 			sessionMissingSide = "local"
 		default:
 			wantSIDs := requirementSessionIDs(in.reqRow, in.sourceSID)
-			synced, missingSIDs, sftpErr := h.syncRequirementSessionsUp(client, in.job, slugDirs, remoteSlugDir, wantSIDs)
-			if sftpErr != nil {
+			// The session we are about to resume may still live on ANOTHER
+			// Agent server (the user switched hosts) — pull it back before
+			// pushing it to the current one.
+			h.ensureSessionAvailableLocally(ctx, in.job, in.reqRow, wantSIDs, in.serverID)
+			// Push to the computed dir AND — when the discovery found the
+			// session elsewhere — that dir too, so the remote CLI finds the
+			// transcript whether it looks in its cwd-slug or scans the tree.
+			remoteDirs := h.remoteUploadDirs(ctx, client, wtPath, in.sourceSID, remoteSlugDir)
+			// NOTE: assignment (not `:=`) — a `:=` here would shadow the
+			// function-scope missingSIDs and leave out.MissingSIDs empty.
+			_, missingSIDs, sessionSyncErr = h.syncRequirementSessionsUp(client, in.job, slugDirs, remoteDirs, wantSIDs)
+			if sessionSyncErr != nil {
 				// "sync-failed" side: SFTP itself errored. The remote
 				// CLI will look for a jsonl we never landed.
-				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sessionSyncErr.Error()})
 				sessionMissingSide = "sync-failed"
-			} else if synced == 0 && len(missingSIDs) > 0 {
-				// "local" side: every sid was a miss across ALL
-				// candidate dirs (worktree + project-root). Don't ask
-				// the remote to "check ~/.claude/projects/<slug>/" —
-				// it can't help; the jsonl was never written here.
-				// Surface the offending ids so the user can tell
-				// whether they need to rerun the prior stage or
-				// investigate the worktree state.
-				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到需求会话文件: " + strings.Join(missingSIDs, ", ") + "（已跳过同步回本地）"})
-				sessionMissingSide = "local"
-			} else if in.sourceSID != "" {
-				// Pre-flight: confirm the jsonl actually landed under
-				// the remote slug dir. Catches the "slug mismatch on
-				// the remote" case (everything uploaded fine locally
-				// but the agent host's CWD points elsewhere).
-				remoteSidPath := remoteSlugDir + "/" + in.sourceSID + ".jsonl"
-				exists, statErr := client.RemoteFileExists(remoteSidPath)
-				if statErr != nil {
-					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端 session 文件探测失败（" + statErr.Error() + "），将按「sync-failed」分类"})
-					sessionMissingSide = "sync-failed"
-				} else if !exists {
-					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端未找到 session 文件 " + remoteSidPath + "（上行未生效或 slug 不匹配），将按「remote」分类"})
-					sessionMissingSide = "remote"
-				} else {
-					in.job.Append(store.LogLine{Type: "message", Content: "✅ 远端 session 文件就绪: " + remoteSidPath})
+			} else {
+				// Pre-flight: confirm the jsonl the run is about to
+				// --resume actually landed on the remote. Catches the
+				// "slug mismatch on the remote" case (everything uploaded
+				// fine locally but the agent host's CWD points elsewhere).
+				line, side := h.classifyRemoteSessionPreFlight(client, remoteDirs, in.sourceSID, missingSIDs)
+				if line != "" {
+					in.job.Append(store.LogLine{Type: "message", Content: line})
 				}
+				sessionMissingSide = side
 			}
 		}
 	}
@@ -715,7 +725,12 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// runFailed flips the helper into "upstream already failed" mode so it
 	// suppresses the misleading "✅ 会话结果已同步回本地" line on a stale or
 	// errored coding run (see wizard_remote.go:964).
-	h.syncSessionDownWithTimeout(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir)
+	// The sessions worth pulling back: the one the CLI just reported (the
+	// transcript this run wrote), the pre-minted id we handed to --session-id,
+	// and the source session it resumed from.
+	downSIDs := dedupeSessionIDs(append([]string{out.sessionID, in.sessionArg, in.sourceSID},
+		requirementSessionIDs(in.reqRow, in.sourceSID)...))
+	h.syncSessionDown(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir, wtPath, downSIDs)
 
 	// Step 7: collect the result. Skip when the run errored out (no real
 	// result) so we don't propagate half-broken state. The user can always
@@ -955,6 +970,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// doesn't exist yet at the pre-flight point; it's parsed from the
 	// worker's NDJSON stream later).
 	var missingSIDs []string
+	var sessionSyncErr error
 	if in.sourceSID == "" {
 		// No source session to resume → no jsonl to push. The architect
 		// fresh-session path (skip-analysis) lands here too. Log a
@@ -977,34 +993,28 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 			sessionMissingSide = "local"
 		default:
 			wantSIDs := requirementSessionIDs(in.reqRow, in.sourceSID)
-			synced, missingSIDs, sftpErr := h.syncRequirementSessionsUp(client, in.job, slugDirs, remoteSlugDir, wantSIDs)
-			if sftpErr != nil {
-				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+			// The session we are about to resume may still live on ANOTHER
+			// Agent server (the user switched hosts) — pull it back before
+			// pushing it to the current one.
+			h.ensureSessionAvailableLocally(ctx, in.job, in.reqRow, wantSIDs, in.serverID)
+			// Push to the computed dir AND — when the discovery found the
+			// session elsewhere — that dir too, so the remote CLI finds the
+			// transcript whether it looks in its cwd-slug or scans the tree.
+			remoteDirs := h.remoteUploadDirs(ctx, client, wtPath, in.sourceSID, remoteSlugDir)
+			// NOTE: assignment (not `:=`) — a `:=` here would shadow the
+			// function-scope missingSIDs and leave out.MissingSIDs empty.
+			_, missingSIDs, sessionSyncErr = h.syncRequirementSessionsUp(client, in.job, slugDirs, remoteDirs, wantSIDs)
+			if sessionSyncErr != nil {
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sessionSyncErr.Error()})
 				sessionMissingSide = "sync-failed"
-			} else if synced == 0 && len(missingSIDs) > 0 {
-				// "local" side: every sid was a miss across ALL
-				// candidate dirs (worktree + project-root). Don't ask
-				// the remote to "check ~/.claude/projects/<slug>/" —
-				// it can't help; the jsonl was never written here.
-				// Surface the offending ids so the user can tell
-				// whether they need to rerun the prior stage or
-				// investigate the worktree state.
-				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到需求会话文件: " + strings.Join(missingSIDs, ", ") + "（已跳过同步回本地）"})
-				sessionMissingSide = "local"
 			} else {
 				// Pre-flight: confirm the jsonl actually landed under the
 				// remote slug dir.
-				remoteSidPath := remoteSlugDir + "/" + in.sourceSID + ".jsonl"
-				exists, statErr := client.RemoteFileExists(remoteSidPath)
-				if statErr != nil {
-					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端 session 文件探测失败（" + statErr.Error() + "），将按「sync-failed」分类"})
-					sessionMissingSide = "sync-failed"
-				} else if !exists {
-					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端未找到 session 文件 " + remoteSidPath + "（上行未生效或 slug 不匹配），将按「remote」分类"})
-					sessionMissingSide = "remote"
-				} else {
-					in.job.Append(store.LogLine{Type: "message", Content: "✅ 远端 session 文件就绪: " + remoteSidPath})
+				line, side := h.classifyRemoteSessionPreFlight(client, remoteDirs, in.sourceSID, missingSIDs)
+				if line != "" {
+					in.job.Append(store.LogLine{Type: "message", Content: line})
 				}
+				sessionMissingSide = side
 			}
 		}
 	}
@@ -1098,95 +1108,142 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// runFailed flips the helper into "upstream already failed" mode so it
 	// suppresses the misleading "✅ 会话结果已同步回本地" line on a stale or
 	// errored architect run (see wizard_remote.go:964).
-	h.syncSessionDownWithTimeout(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir)
+	// The sessions worth pulling back: the one the CLI just reported (the
+	// transcript this run wrote), the pre-minted id we handed to --session-id,
+	// and the source session it resumed from.
+	downSIDs := dedupeSessionIDs(append([]string{out.sessionID, in.sessionArg, in.sourceSID},
+		requirementSessionIDs(in.reqRow, in.sourceSID)...))
+	h.syncSessionDown(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir, wtPath, downSIDs)
 
 	return out, cleanup, nil
 }
 
-// syncSessionDownWithTimeout wraps Step 6's local-slug lookup and SFTP
-// download of the remote session directory.
+// syncSessionDown pulls the session transcripts the remote run produced back
+// to the local machine.
 //
-// Why a timeout: SyncDirDownMapped bottoms out in Client.sftp() ->
-// sftp.NewClient(conn), which takes neither a context nor a timeout and can
-// block indefinitely when the SSH connection is unusable or the server is out
-// of channels. This step sits AFTER the "📥 同步会话结果回本地..." phase line
-// and BEFORE prepareRemoteAgentRun returns, so a block here means the caller
-// never receives an outcome: the job neither errors nor completes and the UI
-// stays pinned to the last phase line forever.
+// Why per-session instead of the whole directory: the remote slug dir also
+// holds the transcripts of OTHER requirements that shared the same remote
+// worktree, and dragging them all home is cross-requirement pollution. It
+// also made the transfer size unbounded (a worktree's whole history), which
+// is what pushed the old fixed 60s timeout over the edge.
 //
-// Why every path appends a line: success, failure and timeout all emit a
-// message line, so that phase line can never be the last thing the user sees.
-// A stall becomes a visible conclusion instead of a silent hang.
+// Why the source dir is DISCOVERED, not computed: see resolveRemoteSessionDir.
 //
-// runFailed: when true the upstream Claude run is already known to have
-// failed (stale session / non-empty errMsg) by the time we get here. We
-// still kick off the SFTP download as a best-effort — the remote jsonl may
-// contain partial work worth keeping for forensics — but we suppress the
-// "✅ 会话结果已同步回本地" success line and append a "⚠️ 上游失败" hint
-// instead, so the user doesn't read a misleading "sync succeeded" message
-// right before the terminal error appears.
+// Why every path appends a line: success, partial, failure and timeout all
+// emit a message, so the "📥 同步会话结果回本地..." phase line can never be
+// the last thing the user sees. The silent loss is what made this bug
+// invisible in the first place.
 //
-// Note: the timeout only stops US waiting. Go cannot safely cancel the SFTP
-// call itself, so the worker goroutine may finish its transfer in the
-// background after the timeout has already been reported. That is acceptable
-// here — the download is forward-only and idempotent, so a late-completing
-// transfer just lands the same files.
-func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, runFailed bool, client *gossh.Client, job *store.Job, reqRow *model.Requirement, remoteSlugDir string) {
+// runFailed: when true the upstream Claude run already failed (stale session
+// / non-empty errMsg). The download still runs — the partial transcript is
+// worth keeping for forensics — but the success line is withheld so the user
+// doesn't read "sync succeeded" right before the terminal error.
+func (h *WizardHandler) syncSessionDown(ctx context.Context, runFailed bool, client remoteSessionClient, job *store.Job, reqRow *model.Requirement, remoteSlugDir, wtPath string, wantSIDs []string) {
+	if client == nil || job == nil {
+		return
+	}
+	timeout := sessionSyncTimeout()
 	done := make(chan string, 1)
-	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				done <- "⚠️ 会话下行异常: " + fmt.Sprint(r)
 			}
 		}()
-		slugDirs, slugErr := h.claudeProjectsSlugDir(reqRow)
-		if slugErr != nil || len(slugDirs) == 0 {
-			// No local slug directory to write into — nothing to sync. This is
-			// the pre-existing "best effort" semantics (see claudeProjectsSlugDir).
-			// It returns immediately rather than blocking, so it cannot pin the
-			// UI on the phase line; emitting nothing keeps the log quiet.
-			if slugErr != nil {
-				done <- "⚠️ 无法定位本地 claude session 目录: " + slugErr.Error()
-			} else {
-				done <- "⚠️ 本地未找到匹配的 claude session 目录（无候选 slug 目录），跳过同步回本地"
-			}
-			return
-		}
-		// Pick the first candidate — prepareRemoteAgentRun writes into
-		// the same first-candidate slot, so the round-trip mapping stays
-		// consistent across up-sync and down-sync.
-		slugDir := slugDirs[0]
-		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
-			if errors.Is(sftpErr, gossh.ErrRemoteDirMissing) {
-				// Remote slug dir simply wasn't created — nothing was
-				// ever uploaded (or the analyst never ran). Suppress
-				// the misleading "上游会话失败" hint; the up-sync
-				// pre-flight has already surfaced the real cause.
-				return
-			}
-			done <- "⚠️ 会话下行失败: " + sftpErr.Error()
-			return
-		}
-		if runFailed {
-			// Upstream run already errored; don't claim "sync succeeded".
-			// Best-effort download still completed so the partial jsonl is
-			// on disk for postmortem, but the user-visible line should
-			// point them at the upstream failure rather than this step.
-			done <- "⚠️ 上游会话失败，已跳过同步回本地（远端会话文件已保留，可联系管理员排查）"
-			return
-		}
-		done <- "✅ 会话结果已同步回本地"
+		done <- h.doSyncSessionDown(ctx, runFailed, client, job, reqRow, remoteSlugDir, wtPath, wantSIDs)
 	}()
+	sctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	select {
 	case msg := <-done:
 		if msg != "" {
 			job.Append(store.LogLine{Type: "message", Content: msg})
 		}
 	case <-sctx.Done():
-		job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（60s），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（" + timeout.String() + "），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
 	}
+}
+
+// doSyncSessionDown performs the actual download and returns the user-facing
+// summary line ("" = nothing worth saying).
+func (h *WizardHandler) doSyncSessionDown(ctx context.Context, runFailed bool, client remoteSessionClient, job *store.Job, reqRow *model.Requirement, remoteSlugDir, wtPath string, wantSIDs []string) string {
+	targets, tErr := h.sessionDownTargets(reqRow)
+	if tErr != nil {
+		return "⚠️ 无法定位本地 claude session 目录: " + tErr.Error()
+	}
+	if len(targets) == 0 {
+		return "⚠️ 本地未找到匹配的 claude session 目录（无候选 slug 目录），跳过同步回本地"
+	}
+	// Only the sessions we actually care about — the one the CLI just
+	// reported plus the source session it resumed from.
+	sids := dedupeSessionIDs(wantSIDs)
+	if len(sids) == 0 {
+		return "ℹ️ 本次运行没有需要同步的会话 ID，跳过会话下行"
+	}
+	// Find where the remote actually keeps the transcript.
+	choice := h.resolveRemoteSessionDir(ctx, client, wtPath, sids[0], remoteSlugDir)
+	remoteDir := choice.dir
+	if remoteDir != remoteSlugDir {
+		job.Append(store.LogLine{Type: "message", Content: "🔎 远端会话目录已重新定位（" + choice.why + "）: " + remoteDir})
+	}
+	var got, missing []string
+	for _, sid := range sids {
+		remoteFile := remoteDir + "/" + sid + ".jsonl"
+		landed := false
+		var firstErr error
+		for _, target := range targets {
+			localFile := filepath.Join(target, sid+".jsonl")
+			if err := client.DownloadFileMapped(remoteFile, localFile); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			landed = true
+			// Sub-agent transcripts live in a sibling directory named after
+			// the session id.
+			if err := client.DownloadDirMapped(remoteDir+"/"+sid, filepath.Join(target, sid)); err != nil &&
+				!errors.Is(err, gossh.ErrRemoteDirMissing) {
+				log.Printf("[session-sync] sub-agent transcript download failed (%s): %v", sid, err)
+			}
+		}
+		if landed {
+			got = append(got, sid+".jsonl")
+			continue
+		}
+		missing = append(missing, sid)
+		if firstErr != nil && !errors.Is(firstErr, gossh.ErrRemoteFileMissing) {
+			log.Printf("[session-sync] download %s failed: %v", remoteFile, firstErr)
+		}
+	}
+	if runFailed {
+		if len(got) > 0 {
+			return "⚠️ 上游会话失败，已同步 " + fmtInt(len(got)) + " 个会话文件回本地（仅供排查）"
+		}
+		return "⚠️ 上游会话失败，未同步回本地（远端会话文件已保留，可联系管理员排查）"
+	}
+	if len(got) == 0 {
+		return "⚠️ 远端未找到会话文件（" + strings.Join(missing, ", ") + "），会话未同步回本地（仍保留在 Agent Server 上）"
+	}
+	msg := "📥 会话同步回本地：" + fmtInt(len(got)) + " 个（" + strings.Join(got, ", ") + "）"
+	if len(missing) > 0 {
+		msg += "；缺失 " + strings.Join(missing, ", ")
+	}
+	return msg
+}
+
+// dedupeSessionIDs drops empty / duplicate session ids while preserving order.
+func dedupeSessionIDs(ids []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // runRemoteArchitectDesign is the architect-stage counterpart of
@@ -1657,6 +1714,461 @@ func requirementSessionIDs(reqRow *model.Requirement, sourceSID string) []string
 	return ids
 }
 
+// ---- Remote session directory discovery ------------------------------------
+//
+// The remote claude CLI stores a session transcript at
+// $HOME/.claude/projects/<slug-of-cwd>/<session-id>.jsonl. The slug is
+// derived from the CLI's cwd, so we can COMPUTE it — but "computed" is only a
+// hypothesis:
+//
+//   - the remote work root can change between the run and the download
+//     (NOVA_AGENT_WORKTREE_ROOT / agent_servers.worktree_root / the
+//     agent.worktree_root setting);
+//   - the CLI resolves symlinks in its cwd (/tmp -> /private/tmp on macOS
+//     hosts), so the encoded path differs from the one we computed;
+//   - the worker may run with a different HOME than the SSH session.
+//
+// When the hypothesis misses, the download silently no-ops
+// (ErrRemoteDirMissing) and the session is lost — which is exactly the
+// "远端开发完成后本机找不到会话文件" symptom this discovery pass fixes.
+
+// remoteSessionDirChoice is the outcome of the remote session-dir discovery:
+// which directory to use, and why (for the job log).
+type remoteSessionDirChoice struct {
+	dir string
+	why string
+}
+
+// remoteSessionClient is the subset of the SSH client the session-sync code
+// needs. Narrowing it to an interface keeps the discovery / download logic
+// unit-testable without a live SSH server — the decision table is where the
+// bugs live, and it must be exercisable in CI.
+type remoteSessionClient interface {
+	RemoteFileExists(remotePath string) (bool, error)
+	ListRemoteDirs(remoteDir string) ([]string, error)
+	ListRemoteFilesUnder(ctx context.Context, root, fileName string) ([]string, error)
+	DownloadFileMapped(remoteFile, localPath string) error
+	DownloadDirMapped(remoteDir, localDir string) error
+	ExpandHome(remotePath string) (string, error)
+}
+
+// agentServerDialer opens a session to an Agent server. Indirected through a
+// package variable so the cross-server session pull-back (the "回源" path that
+// makes switching Agent servers keep the conversation) can be exercised
+// without a live host.
+var agentServerDialer = func(ctx context.Context, srv *model.AgentServer, authValue string) (remoteSessionClient, error) {
+	return gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, authValue)
+}
+
+// remoteProjectsRootOf returns the parent directory of a remote
+// ~/.claude/projects/<slug> path, i.e. the remote projects root. Remote
+// paths are always POSIX, so the split is done on "/" (not filepath, whose
+// separator is OS-dependent).
+func remoteProjectsRootOf(dir string) string {
+	idx := strings.LastIndex(dir, "/")
+	if idx <= 0 {
+		return ""
+	}
+	return dir[:idx]
+}
+
+// remoteDirOf returns the directory part of a remote file path.
+func remoteDirOf(filePath string) string {
+	idx := strings.LastIndex(filePath, "/")
+	if idx <= 0 {
+		return ""
+	}
+	return filePath[:idx]
+}
+
+// remoteBaseName returns the last path segment of a remote path.
+func remoteBaseName(p string) string {
+	idx := strings.LastIndex(p, "/")
+	if idx < 0 {
+		return p
+	}
+	return p[idx+1:]
+}
+
+// chooseRemoteSessionDir decides which remote directory holds the session
+// transcript, given the evidence gathered from the remote host.
+//
+// Pure function (no I/O) so the decision table can be unit-tested without an
+// SSH server.
+//
+// Evidence:
+//   - sidDirs — the remote project dirs that actually contain <sid>.jsonl;
+//   - nameDirs — every remote project dir name.
+//
+// Priority: the computed path when it holds the file → the dir that holds
+// the file → the dir whose name matches the encoded worktree path → a dir
+// whose name CONTAINS it (realpath divergence, e.g. "-private-tmp-…-"
+// contains "-tmp-…-") → the computed path as the fallback (it is where the
+// CLI will write the next transcript anyway).
+func chooseRemoteSessionDir(computedDir, projectsRoot, slug string, sidDirs, nameDirs []string) remoteSessionDirChoice {
+	// ① The computed hypothesis already holds the session file.
+	for _, d := range sidDirs {
+		if d == computedDir {
+			return remoteSessionDirChoice{dir: computedDir, why: "计算路径命中"}
+		}
+	}
+	// ② The session file lives somewhere else — the strongest evidence,
+	//    because the CLI itself put it there.
+	if len(sidDirs) > 0 {
+		best := sidDirs[0]
+		for _, d := range sidDirs[1:] {
+			if remoteBaseName(d) == slug {
+				best = d
+				break
+			}
+			if remoteBaseName(best) != slug && len(remoteBaseName(d)) > len(remoteBaseName(best)) {
+				best = d
+			}
+		}
+		return remoteSessionDirChoice{dir: best, why: "会话文件实际落在 " + remoteBaseName(best)}
+	}
+	// ③ No transcript yet (first run on this host) — match by dir name.
+	for _, n := range nameDirs {
+		if n == slug {
+			return remoteSessionDirChoice{dir: computedDir, why: "远端目录名与计算 slug 一致"}
+		}
+	}
+	// ④ Realpath divergence: the encoded path of the RESOLVED cwd contains
+	//    the encoded path we computed.
+	bestName := ""
+	for _, n := range nameDirs {
+		if !strings.Contains(n, slug) {
+			continue
+		}
+		if bestName == "" || len(n) > len(bestName) {
+			bestName = n
+		}
+	}
+	if bestName != "" {
+		return remoteSessionDirChoice{dir: projectsRoot + "/" + bestName, why: "远端目录名包含计算 slug（realpath 分歧）"}
+	}
+	// ⑤ Nothing found — keep the computed path: that is where the CLI writes
+	//    the transcript it is about to create.
+	return remoteSessionDirChoice{dir: computedDir, why: "未在远端找到会话目录，回落计算路径"}
+}
+
+// sessionFallbackEnabled reports whether the remote session-dir discovery is
+// active. Escape hatch: NOVA_SESSION_SYNC_FALLBACK=0 restores the old
+// "trust the computed path only" behaviour without a code rollback.
+func sessionFallbackEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("NOVA_SESSION_SYNC_FALLBACK"))
+	if v == "" {
+		return true
+	}
+	return v != "0" && !strings.EqualFold(v, "false") && !strings.EqualFold(v, "off")
+}
+
+// sessionSyncTimeout is the budget for the session down-sync. The old fixed
+// 60s was too tight for the multi-MB transcripts this repo produces (0.5–3.6
+// MB measured), and a timeout used to leave the transfer half-done with no
+// way to recover it. Default 5m; NOVA_SESSION_SYNC_TIMEOUT overrides.
+func sessionSyncTimeout() time.Duration {
+	const def = 5 * time.Minute
+	raw := strings.TrimSpace(os.Getenv("NOVA_SESSION_SYNC_TIMEOUT"))
+	if raw == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// resolveRemoteSessionDir locates the directory the remote claude CLI
+// actually keeps the session transcript in.
+//
+// See the "Remote session directory discovery" block comment above for why
+// computing the path is not enough. The function is best-effort: every remote
+// probe failure degrades to "use the computed path", never to an error.
+func (h *WizardHandler) resolveRemoteSessionDir(ctx context.Context, client remoteSessionClient, wtPath, sid, computedDir string) remoteSessionDirChoice {
+	if client == nil || computedDir == "" {
+		return remoteSessionDirChoice{dir: computedDir, why: "未启用发现式定位"}
+	}
+	projectsRoot := remoteProjectsRootOf(computedDir)
+	if projectsRoot == "" {
+		return remoteSessionDirChoice{dir: computedDir, why: "无法解析远端 projects 根目录"}
+	}
+	slug := util.EncodeClaudeSlug(wtPath)
+
+	// ① Fast path — the hypothesis already holds the session file. No extra
+	//    remote round-trip beyond the single stat.
+	if sid != "" {
+		if exists, err := client.RemoteFileExists(computedDir + "/" + sid + ".jsonl"); err == nil && exists {
+			return remoteSessionDirChoice{dir: computedDir, why: "计算路径命中"}
+		}
+	}
+	if !sessionFallbackEnabled() {
+		return remoteSessionDirChoice{dir: computedDir, why: "发现式定位已关闭"}
+	}
+	// ② Where does the remote actually keep <sid>.jsonl? One `ls` round-trip.
+	var sidDirs []string
+	if sid != "" {
+		paths, err := client.ListRemoteFilesUnder(ctx, projectsRoot, sid+".jsonl")
+		if err != nil {
+			log.Printf("[session-sync] remote session discovery failed (root=%s sid=%s): %v", projectsRoot, sid, err)
+		}
+		for _, p := range paths {
+			if d := remoteDirOf(p); d != "" {
+				sidDirs = append(sidDirs, d)
+			}
+		}
+	}
+	// ③ What does the remote projects root look like?
+	nameDirs, err := client.ListRemoteDirs(projectsRoot)
+	if err != nil {
+		log.Printf("[session-sync] remote project dir listing failed (root=%s): %v", projectsRoot, err)
+		nameDirs = nil
+	}
+	return chooseRemoteSessionDir(computedDir, projectsRoot, slug, sidDirs, nameDirs)
+}
+
+// remoteUploadDirs returns the remote directories a requirement's session
+// transcripts should be pushed to.
+//
+// The computed dir (the slug of the remote cwd) always comes first; when the
+// discovery found the session somewhere ELSE, that dir is prepended, because
+// the CLI may look the session up either in its cwd-slug or by scanning the
+// projects tree. Pushing to both makes the resume work either way.
+func (h *WizardHandler) remoteUploadDirs(ctx context.Context, client remoteSessionClient, wtPath, sid, computedDir string) []string {
+	if computedDir == "" {
+		return nil
+	}
+	choice := h.resolveRemoteSessionDir(ctx, client, wtPath, sid, computedDir)
+	dirs := []string{computedDir}
+	if choice.dir != "" && choice.dir != computedDir {
+		dirs = append([]string{choice.dir}, dirs...)
+	}
+	return dirs
+}
+
+// sessionDownTargets returns the local directories the downloaded session
+// transcripts should land in.
+//
+// Two of them, because the local claude CLI derives ITS slug from its own
+// cwd and the two can differ:
+//   - the first existing candidate (the same slot the up-sync reads from, so
+//     the round-trip mapping stays consistent);
+//   - the requirement's worktree slug, so a local run inside that worktree
+//     can --resume the session we just pulled back.
+//
+// When neither exists on disk the worktree slug is CREATED: a project that
+// never ran claude locally would otherwise skip the down-sync entirely, and
+// the transcript would stay on the Agent server forever.
+func (h *WizardHandler) sessionDownTargets(reqRow *model.Requirement) ([]string, error) {
+	existing, err := h.claudeProjectsSlugDir(reqRow)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(dir string, create bool) {
+		if dir == "" || seen[dir] {
+			return
+		}
+		if create {
+			if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+				log.Printf("[session-sync] mkdir local session dir %s failed: %v", dir, mkErr)
+				return
+			}
+		} else if _, statErr := os.Stat(dir); statErr != nil {
+			return
+		}
+		seen[dir] = true
+		out = append(out, dir)
+	}
+	for _, d := range existing {
+		add(d, false)
+	}
+	// The requirement's worktree slug — a local run inside that worktree
+	// derives the same slug, so this is where its --resume will look.
+	if reqRow != nil && reqRow.WorktreePath != "" {
+		add(filepath.Join(claudeSessionHome(), "projects", util.EncodeClaudeSlug(reqRow.WorktreePath)), true)
+	}
+	// The project-root slug — same reasoning for a local run inside the
+	// project checkout. Created on demand: a project that never ran claude
+	// locally used to skip the down-sync entirely, which left the
+	// transcript stranded on the Agent server forever.
+	if reqRow != nil && h.projectSvc != nil {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil && proj.LocalPath != "" {
+			add(filepath.Join(claudeSessionHome(), "projects", util.EncodeClaudeSlug(proj.LocalPath)), true)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no local claude session directory candidate")
+	}
+	return out, nil
+}
+
+// classifyRemoteSessionPreFlight probes the remote for the session file the
+// run is about to --resume and reports what it found.
+//
+// Returns the user-facing line ("" = nothing worth saying) and the
+// "missing side" classification used by the "源会话已失效" diagnostic:
+//
+//   - "local"       — the transcript is nowhere: it was never written locally
+//     AND the remote doesn't have it either;
+//   - "remote"      — the transcript was pushed but the remote can't see it
+//     (slug mismatch / cleaned up on the remote);
+//   - "sync-failed" — the probe itself failed.
+//
+// An empty classification means the resume will work.
+//
+// The "local copy missing but remote still has it" case is deliberately NOT
+// an error: the remote CLI resumes its own transcript in place, so the run
+// continues with the full context even though this machine never got the
+// file back. Reporting it as a failure would be a false alarm.
+func (h *WizardHandler) classifyRemoteSessionPreFlight(client remoteSessionClient, remoteDirs []string, sourceSID string, missingSIDs []string) (string, string) {
+	localMissingLine := "⚠️ 本地未找到需求会话文件: " + strings.Join(missingSIDs, ", ") +
+		"（将以新会话继续；如需续接请确认会话已从 Agent Server 同步回本机）"
+	if sourceSID == "" {
+		if len(missingSIDs) > 0 {
+			return localMissingLine, "local"
+		}
+		return "", ""
+	}
+	remoteSidPath := ""
+	exists := false
+	var statErr error
+	for _, dir := range remoteDirs {
+		hit, err := client.RemoteFileExists(dir + "/" + sourceSID + ".jsonl")
+		if err != nil {
+			statErr = err
+			continue
+		}
+		if hit {
+			exists = true
+			remoteSidPath = dir + "/" + sourceSID + ".jsonl"
+			break
+		}
+	}
+	if statErr != nil && !exists {
+		return "⚠️ 远端 session 文件探测失败（" + statErr.Error() + "），将按「sync-failed」分类", "sync-failed"
+	}
+	if !exists {
+		if len(missingSIDs) > 0 {
+			return localMissingLine, "local"
+		}
+		return "⚠️ 远端未找到 session 文件 " + remoteSidPath + "（上行未生效或 slug 不匹配），将按「remote」分类", "remote"
+	}
+	if len(missingSIDs) > 0 {
+		return "ℹ️ 本机缺少 " + strings.Join(missingSIDs, ", ") + ".jsonl 副本，但远端仍保留待续接的会话，将直接续接", ""
+	}
+	return "✅ 远端 session 文件就绪: " + remoteSidPath, ""
+}
+
+// localSessionFile returns the local path of <sid>.jsonl: the candidate slug
+// dirs first, then a full scan of the claude projects tree (the same
+// fallback the up-sync uses).
+func localSessionFile(candidateDirs []string, sid string) (string, bool) {
+	if sid == "" {
+		return "", false
+	}
+	for _, dir := range candidateDirs {
+		candidate := filepath.Join(dir, sid+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return findSessionJsonlFallback(sid)
+}
+
+// ensureSessionAvailableLocally makes sure the sessions we are about to push
+// to the Agent server exist LOCALLY.
+//
+// Why this step exists: the up-sync is a "move an existing id" operation — it
+// pushes the <sid>.jsonl the local machine already has. A session that was
+// CREATED on an Agent server and never pulled back therefore has nothing to
+// push, and the remote run starts from scratch with the whole context lost.
+//
+// The cross-server fallback closes that loop: requirements.session_server_id
+// records the host that still holds the transcript, so we fetch it from there
+// before pushing it to the current target. That is what makes "换一台 Agent
+// Server 也能继续会话" work.
+//
+// Best-effort by design: any failure degrades to "not available locally", and
+// the caller reports the sid as missing (the run continues with a fresh
+// session instead of failing outright).
+func (h *WizardHandler) ensureSessionAvailableLocally(ctx context.Context, job *store.Job, reqRow *model.Requirement, wantSIDs []string, currentServerID string) {
+	if h.agentSvrSvc == nil || reqRow == nil || reqRow.SessionServerID == "" {
+		return
+	}
+	if reqRow.SessionServerID == currentServerID {
+		// The transcript already lives on the server we are about to run on —
+		// the remote CLI resumes it in place, no local copy needed.
+		return
+	}
+	candidateDirs, slugErr := h.claudeProjectsSlugDir(reqRow)
+	if slugErr != nil {
+		log.Printf("[session-sync] %s: local slug lookup failed: %v", reqRow.ID, slugErr)
+		candidateDirs = nil
+	}
+	var missing []string
+	for _, sid := range wantSIDs {
+		if sid == "" {
+			continue
+		}
+		if _, ok := localSessionFile(candidateDirs, sid); ok {
+			continue
+		}
+		missing = append(missing, sid)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	srv, plain, credErr := h.agentSvrSvc.GetWithCredential(reqRow.SessionServerID)
+	if credErr != nil {
+		log.Printf("[session-sync] %s: session server credential load failed (server=%s): %v", reqRow.ID, reqRow.SessionServerID, credErr)
+		if job != nil {
+			job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话 " + strings.Join(missing, ", ") + " 只存在于 Agent Server 上，但读取该服务器凭据失败，无法回源。"})
+		}
+		return
+	}
+	// The pull-back must survive the job's ctx going away — it is the only
+	// chance to rescue the conversation.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+	defer cancel()
+	oldClient, dialErr := agentServerDialer(pctx, srv, plain)
+	if dialErr != nil {
+		log.Printf("[session-sync] %s: session server dial failed (server=%s): %v", reqRow.ID, srv.ID, dialErr)
+		if job != nil {
+			job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话 " + strings.Join(missing, ", ") + " 只存在于 Agent Server「" + srv.Name + "」上，但该服务器当前不可达，无法回源。"})
+		}
+		return
+	}
+	// Where does the OLD server keep the transcript? Same layout as the
+	// current one: <work root>/<projectID>/<reqID>.
+	oldWt := agentWorktreeRootFor(srv) + "/" + reqRow.ProjectID + "/" + reqRow.ID
+	oldComputed := "~/.claude/projects/" + util.EncodeClaudeSlug(oldWt)
+	if expanded, eerr := oldClient.ExpandHome(oldComputed); eerr == nil {
+		oldComputed = expanded
+	}
+	choice := h.resolveRemoteSessionDir(pctx, oldClient, oldWt, missing[0], oldComputed)
+	targets, tErr := h.sessionDownTargets(reqRow)
+	if tErr != nil || len(targets) == 0 {
+		log.Printf("[session-sync] %s: no local target dir for the pulled-back session: %v", reqRow.ID, tErr)
+		return
+	}
+	target := targets[0]
+	for _, sid := range missing {
+		localFile := filepath.Join(target, sid+".jsonl")
+		if dlErr := oldClient.DownloadFileMapped(choice.dir+"/"+sid+".jsonl", localFile); dlErr != nil {
+			log.Printf("[session-sync] %s: pull-back of %s from server %s failed: %v", reqRow.ID, sid, srv.ID, dlErr)
+			if job != nil {
+				job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话 " + sid + " 只存在于 Agent Server「" + srv.Name + "」上，回源失败：" + dlErr.Error()})
+			}
+			continue
+		}
+		if job != nil {
+			job.Append(store.LogLine{Type: "message", Content: "↩️ 从 Agent Server「" + srv.Name + "」回源会话 " + sid + ".jsonl"})
+		}
+	}
+}
+
 // humanSize renders a byte count as a compact human-readable string
 // (B / KB / MB), used only for the per-session sync detail lines.
 func humanSize(n int64) string {
@@ -1717,8 +2229,8 @@ func findSessionJsonlFallback(sid string) (string, bool) {
 }
 
 // syncRequirementSessionsUp uploads the requirement-relevant <sid>.jsonl
-// files (wantSIDs) to the remote slug dir, printing a per-file detail line so
-// the user can see exactly which sessions were synced.
+// files (wantSIDs) to the remote session dirs, printing a per-file detail line
+// so the user can see exactly which sessions were synced.
 //
 // candidateDirs is an ORDERED list of plausible local session directories
 // (typically the worktree slug first, then the project-root slug). For EACH
@@ -1728,6 +2240,12 @@ func findSessionJsonlFallback(sid string) (string, bool) {
 // project-root slug — the previous single-slugDir version silently skipped
 // every sid whose jsonl wasn't in the cache-hit directory and surfaced as
 // "0 files uploaded → remote missing" downstream.
+//
+// remoteDirs is the list of remote directories to push into: the computed
+// slug dir of the remote cwd, plus — when the session-dir discovery found
+// the transcript somewhere else — that other dir as well. Pushing to both
+// makes the remote CLI's --resume work whether it looks the session up in
+// its own cwd-slug or scans the projects tree.
 //
 // Returns:
 //   synced      — number of jsonl files actually uploaded.
@@ -1741,7 +2259,7 @@ func findSessionJsonlFallback(sid string) (string, bool) {
 // wantSIDs empty and candidateDirs empty are defensive paths — production
 // callers guard against them upstream, but if we somehow get here we still
 // return a structured result instead of swallowing the situation.
-func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *store.Job, candidateDirs []string, remoteSlugDir string, wantSIDs []string) (synced int, missingSIDs []string, err error) {
+func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *store.Job, candidateDirs []string, remoteDirs []string, wantSIDs []string) (synced int, missingSIDs []string, err error) {
 	if len(wantSIDs) == 0 {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未记录需求会话 ID，跳过会话上行（远端将以新会话启动，无需同步整个项目会话目录）"})
 		return 0, nil, nil
@@ -1760,8 +2278,13 @@ func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *sto
 		}
 		return 0, missingSIDs, nil
 	}
-	if merr := client.Mkdirp(remoteSlugDir); merr != nil {
-		return 0, nil, merr
+	if len(remoteDirs) == 0 {
+		return 0, nil, errors.New("ssh: no remote session directory to upload to")
+	}
+	for _, remoteDir := range remoteDirs {
+		if merr := client.Mkdirp(remoteDir); merr != nil {
+			return 0, nil, merr
+		}
 	}
 	for _, sid := range wantSIDs {
 		if sid == "" {
@@ -1804,8 +2327,15 @@ func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *sto
 			missingSIDs = append(missingSIDs, sid)
 			continue
 		}
-		if perr := client.PutFile(localPath, remoteSlugDir+"/"+sid+".jsonl", 0644); perr != nil {
-			return synced, missingSIDs, perr
+		uploaded := false
+		for _, remoteDir := range remoteDirs {
+			if perr := client.PutFile(localPath, remoteDir+"/"+sid+".jsonl", 0644); perr != nil {
+				return synced, missingSIDs, perr
+			}
+			uploaded = true
+		}
+		if !uploaded {
+			continue
 		}
 		synced++
 		job.Append(store.LogLine{Type: "message", Content: "  • " + sid + ".jsonl (" + humanSize(fi.Size()) + ")"})
