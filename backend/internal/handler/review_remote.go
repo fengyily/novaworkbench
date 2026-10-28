@@ -155,6 +155,16 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	}
 	// The remote run's session_id is what a later 追问 resumes (on the same
 	// agent host, in the same scratch clone).
+	//
+	// KNOWN GAP (deliberately out of scope for req_6a9b88dd80fe8f01): the
+	// remote Review path has NO session transcript sync at all — the .jsonl
+	// stays on the agent host, so the conversation cannot be continued from
+	// this machine and does not survive an agent-server switch. The
+	// development path got the full treatment (discovery-based remote
+	// session-dir lookup + per-session down-sync + a cross-server pull-back
+	// keyed on requirements.session_server_id — see wizard_remote.go's
+	// "Remote session directory discovery" block). The same building blocks
+	// apply here; only the wiring is missing.
 	h.rememberReviewSession(rv, out.sessionID)
 	// finalResult is the authoritative report; streamText is the fallback for
 	// runs that ended without a `result` event (seen with some OpenAI-

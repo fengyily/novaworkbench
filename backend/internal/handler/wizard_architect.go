@@ -1427,6 +1427,18 @@ func (h *WizardHandler) finalizeArchitectRun(
 			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 		}
 	}
+	// Where does the design transcript live now? The column is the pointer the
+	// Agent-server up-sync uses to pull a session back when this machine has
+	// no copy — so it must name the host that actually holds the file.
+	//
+	// The coding stage owns the column once it runs (the coding session is
+	// the one that has to survive a server switch), so the design stage only
+	// claims it while it is still empty.
+	if p.AgentServerID != "" && p.Req != nil && p.Req.SessionServerID == "" {
+		if perr := h.reqSvc.UpdateSessionServer(id, p.AgentServerID); perr != nil {
+			log.Printf("[architect-design] failed to persist session_server_id for %s: %v", id, perr)
+		}
+	}
 
 	// In plan mode, the full plan markdown is captured from the Write
 	// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream

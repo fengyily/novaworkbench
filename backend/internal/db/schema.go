@@ -1037,6 +1037,14 @@ var alterColumns = []string{
 	// errors on already-migrated DBs (sqlite/mysql/pg), so this is safe to
 	// ship before all deployments have caught up.
 	`ALTER TABLE requirements ADD COLUMN design_agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Which Agent server currently holds this requirement's Claude session
+	// files (the .jsonl transcripts). Distinct from agent_server_id, which
+	// records "where the last development run happened" and is OVERWRITTEN
+	// when the user switches servers — this one keeps pointing at the host
+	// that still has the transcript, so the up-sync can pull it back before
+	// pushing it to the new target (跨 Agent Server 续接会话). Empty = local /
+	// unknown; legacy rows read as empty and simply can't be recovered.
+	`ALTER TABLE requirements ADD COLUMN session_server_id TEXT NOT NULL DEFAULT ''`,
 	// Merged "design_and_coding" scheduled task: per-stage model / agent-server
 	// binding for the developer half of the chained run. coding_model mirrors
 	// the design-stage model column (empty = role default resolved at dispatch

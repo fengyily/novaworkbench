@@ -1241,6 +1241,16 @@ func (r *SubTaskRunner) Run(
 			AddDirs:        resolveAddDirs(r.dirSvc, req.ID),
 		})
 		// v0.5.x: 远端 Agent 服务器路径暂未接入 phase tracker；保持单一 artifact 落库。
+		// Persist the session id the CLI actually reported. The local path
+		// does the same inside runLocalSubTaskAttempt; without it the row
+		// keeps the pre-minted id, which is not guaranteed to be the file
+		// that ended up on disk — and "继续执行" would then resume a
+		// transcript that exists nowhere.
+		if out.sessionID != "" && out.sessionID != newSID {
+			if perr := r.subTaskSvc.UpdateSession(st.ID, out.sessionID, sourceSID); perr != nil {
+				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
+			}
+		}
 		r.finishSubTask(st, job, out, modelName, startTime, nil)
 		return
 	}
