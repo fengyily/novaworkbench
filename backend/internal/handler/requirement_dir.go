@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/model"
@@ -29,11 +32,16 @@ import (
 // non-interactive run has nobody to make it.
 type RequirementDirHandler struct {
 	svc *service.RequirementDirService
+	// attachSvc is consulted for the synthetic "auto" row: the requirement's
+	// attachment directory is granted on every Claude run, so the UI shows it
+	// even though it is not a row in requirement_dirs.
+	attachSvc *service.AttachmentService
 }
 
-// NewRequirementDirHandler builds the handler.
-func NewRequirementDirHandler(svc *service.RequirementDirService) *RequirementDirHandler {
-	return &RequirementDirHandler{svc: svc}
+// NewRequirementDirHandler builds the handler. attachSvc may be nil — the
+// handler then lists the user's grants only, with no synthetic row.
+func NewRequirementDirHandler(svc *service.RequirementDirService, attachSvc *service.AttachmentService) *RequirementDirHandler {
+	return &RequirementDirHandler{svc: svc, attachSvc: attachSvc}
 }
 
 // Add — POST /api/requirements/{id}/dirs.
@@ -111,10 +119,26 @@ func (h *RequirementDirHandler) Add(w http.ResponseWriter, r *http.Request) {
 type requirementDirView struct {
 	model.RequirementDir
 	ExistsLocally bool `json:"exists_locally"`
+	// Auto marks a synthetic row: the requirement's attachment directory is
+	// granted automatically on every Claude run and cannot be revoked here.
+	Auto bool `json:"auto,omitempty"`
+	// Reason explains why an auto row exists. Currently only "attachment".
+	Reason string `json:"reason,omitempty"`
 }
+
+// autoAttachmentDirID is the synthetic id of the attachment-directory row. The
+// "auto:" prefix keeps it out of the DB id space, so a stray DELETE can never
+// hit a real grant.
+const autoAttachmentDirID = "auto:attachment"
 
 // List — GET /api/requirements/{id}/dirs. Returns every granted directory;
 // an empty result is "[]", not null.
+//
+// The requirement's attachment directory is appended as a synthetic row when
+// the requirement actually has attachments: it is handed to claude as
+// --add-dir on every run (see handler/attachment_grant.go), so the user should
+// see it here rather than wonder why the attachment is unreadable. It is not a
+// database row and carries no revoke button.
 func (h *RequirementDirHandler) List(w http.ResponseWriter, r *http.Request) {
 	reqID := r.PathValue("id")
 	if h.svc == nil {
@@ -130,7 +154,42 @@ func (h *RequirementDirHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, d := range dirs {
 		views = append(views, requirementDirView{RequirementDir: d, ExistsLocally: service.ExistsLocally(d.Path)})
 	}
+	if auto, ok := h.autoAttachmentView(reqID); ok {
+		views = append(views, auto)
+	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+// autoAttachmentView builds the synthetic row for the requirement's attachment
+// directory. Returns ok=false when the requirement has no attachments (nothing
+// to grant) or when the attachment lookup fails — the panel then shows the
+// user's own grants only, which is exactly the pre-existing behaviour.
+func (h *RequirementDirHandler) autoAttachmentView(reqID string) (requirementDirView, bool) {
+	if h.attachSvc == nil || strings.TrimSpace(reqID) == "" {
+		return requirementDirView{}, false
+	}
+	atts, err := h.attachSvc.List(reqID)
+	if err != nil {
+		log.Printf("[requirement-dirs] attachment lookup for %s failed: %v — skipping the auto row", reqID, err)
+		return requirementDirView{}, false
+	}
+	if len(atts) == 0 {
+		return requirementDirView{}, false
+	}
+	dir := filepath.Join(service.AttachmentRoot(), reqID)
+	return requirementDirView{
+		RequirementDir: model.RequirementDir{
+			ID:            autoAttachmentDirID,
+			RequirementID: reqID,
+			Path:          dir,
+			Label:         "",
+			AddedBy:       "system",
+			AddedAt:       time.Now(),
+		},
+		ExistsLocally: service.ExistsLocally(dir),
+		Auto:          true,
+		Reason:        "attachment",
+	}, true
 }
 
 // Delete — DELETE /api/requirements/{id}/dirs/{dir_id}. Revokes the grant.
@@ -140,6 +199,12 @@ func (h *RequirementDirHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	dirID := r.PathValue("dir_id")
 	if h.svc == nil {
 		writeError(w, http.StatusServiceUnavailable, "DIRS_DISABLED", "目录授权功能未启用")
+		return
+	}
+	// The synthetic row is not a grant — there is nothing to revoke. Short
+	// circuit before touching the DB so the id space stays clean.
+	if strings.HasPrefix(dirID, "auto:") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "目录授权不存在")
 		return
 	}
 	if err := h.svc.Delete(reqID, dirID); err != nil {

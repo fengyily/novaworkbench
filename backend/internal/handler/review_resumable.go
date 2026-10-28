@@ -61,6 +61,9 @@ type reviewTurnSpec struct {
 // gone. resumed reports which of the two produced the returned text, so the
 // caller can record it (the 追问 row's `resumed` column) or say so in the UI.
 func (h *ReviewHandler) runLocalReviewTurn(ctx context.Context, job *store.Job, rv *model.CodeReview, project *model.Project, rolePrompt, modelName, claudeConfigID string, spec reviewTurnSpec) (text string, resumed bool, errMsg string) {
+	// No --add-dir grant here — review runs with --dangerously-skip-permissions,
+	// so reads outside the working directory are already allowed. Only the
+	// requirement-side stages need the grant (see handler/attachment_grant.go).
 	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
 	systemPrompt := appendManifest(rolePrompt, manifest)
 	sessionID := strings.TrimSpace(rv.ClaudeSessionID)
@@ -121,6 +124,8 @@ func (h *ReviewHandler) runRemoteReviewTurn(ctx context.Context, job *store.Job,
 			attachDir = rd
 		}
 	}
+	// No --add-dir grant here — review runs with --dangerously-skip-permissions
+	// (see handler/attachment_grant.go for the requirement-side grant).
 	systemPrompt := appendManifest(rolePrompt, attachManifestFor(h.attachSvc, rv.ID, attachDir))
 
 	ignoreLocal := true

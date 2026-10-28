@@ -1166,8 +1166,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if m := h.dirsManifestFor(p.RequirementID); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m
 	}
-	// The granted paths, handed to claude as --add-dir.
-	addDirs := h.addDirsFor(p.RequirementID)
+	// The granted paths, handed to claude as --add-dir — plus the attachment
+	// directory the manifest above points at, so Claude can actually Read the
+	// attached files (plan mode has nobody to approve an out-of-tree read).
+	addDirs := h.grantDirsFor(p.RequirementID, attachDir)
 	// Per-request model override (highest precedence); empty means role default.
 	if p.Model != "" {
 		model = p.Model
@@ -2077,7 +2079,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:         true,
 			Fork:           false,
 			ExtraEnv:       adjustCredEnv,
-			AddDirs:        h.addDirsFor(body.RequirementID),
+			AddDirs:        h.grantDirsFor(body.RequirementID, ""),
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
@@ -2405,7 +2407,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:         true,
 			Fork:           false,
 			ExtraEnv:       continueCredEnv,
-			AddDirs:        h.addDirsFor(req.ID),
+			AddDirs:        h.grantDirsFor(req.ID, ""),
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)

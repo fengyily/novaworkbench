@@ -518,7 +518,7 @@ func (h *WizardHandler) runQATurn(
 		// "why is it designed this way", so it needs the same read access to
 		// the granted reference material the other stages had.
 		if reqRow != nil {
-			opts.AddDirs = h.addDirsFor(reqRow.ID)
+			opts.AddDirs = h.grantDirsFor(reqRow.ID, "")
 		}
 		switch p.Mode {
 		case qaModeResume:

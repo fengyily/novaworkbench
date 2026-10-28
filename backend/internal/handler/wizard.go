@@ -199,6 +199,28 @@ func (h *WizardHandler) addDirsFor(reqID string) []string {
 	return resolveAddDirs(h.dirSvc, reqID)
 }
 
+// grantDirsFor merges the directories the user authorized for a requirement
+// with the directory the stage's attachment manifest points at, and returns
+// the combined list to hand to the claude CLI as `--add-dir`.
+//
+// attachDir MUST be the very same value the same stage passes to
+// attachManifestFor — that identity is the whole point: the manifest tells
+// Claude "the file is at X", and the grant makes X readable. If the two drift
+// apart the attachment stays invisible (in plan mode the read outside the
+// working directory needs a permission decision that a non-interactive `-p`
+// run has nobody to make). Pass "" for "the local NovaWorkbench attachment
+// root" — attachGrantDirs resolves it exactly the way attachManifestFor's own
+// empty-value fallback does.
+//
+// extra carries grants for other owners — e.g. the master requirement's
+// attachment directory while designing a sub-requirement.
+func (h *WizardHandler) grantDirsFor(reqID, attachDir string, extra ...attachmentGrant) []string {
+	grants := make([]attachmentGrant, 0, len(extra)+1)
+	grants = append(grants, attachmentGrant{ownerID: reqID, dir: attachDir})
+	grants = append(grants, extra...)
+	return attachGrantDirs(h.addDirsFor(reqID), h.attachSvc, grants...)
+}
+
 // dirsManifestFor renders the granted directories as a prompt block so
 // Claude knows they exist and were authorized for this requirement.
 // Empty string when nothing is granted.

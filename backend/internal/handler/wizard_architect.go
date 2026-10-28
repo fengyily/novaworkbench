@@ -816,7 +816,6 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// —— 这正是方案设计阶段会卡住的原因。授权后目录直接可读，Glob/Grep 的
 	// 搜索范围也随之扩大。
 	dirsManifest := h.dirsManifestFor(requirementID)
-	addDirs := h.addDirsFor(requirementID)
 
 	// SystemPrompt 的组装：
 	//   skipRoleContext=false（默认）→ persona + 清单，与今天逐字节一致
@@ -848,7 +847,20 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// view. Built here (synchronously, next to the attachment manifest above
 	// so both share the same resolveAttachDir semantics) but appended to the
 	// prompt inside prepareDesignWorkspace.
-	parent, parentBlock := h.buildParentBlock(context.Background(), req, agentServerID)
+	parent, parentBlock, parentAttachDir := h.buildParentBlock(context.Background(), req, agentServerID)
+
+	// --add-dir 授权 = 用户手工授权的目录 + 本需求的附件目录 + （子需求时）
+	// 父需求的附件目录。
+	//
+	// 附件目录**必须**授权：附件清单指向的就是它，而 plan 模式下读工作目录
+	// 之外的路径需要一次权限裁决，非交互 (-p) 运行里没有人能批准 —— 这正是
+	// 「看不到附件内容」的根因。清单与授权由同一个 attachDir 派生，两边口径
+	// 不会漂移。
+	var parentGrant attachmentGrant
+	if parent != nil {
+		parentGrant = attachmentGrant{ownerID: parent.ID, dir: parentAttachDir}
+	}
+	addDirs := h.grantDirsFor(requirementID, attachDir, parentGrant)
 
 	return &designRunParams{
 		Req:          req,
@@ -897,25 +909,31 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 // sub-requirement's own manifest uses, so an Agent-server run gets the parent's
 // files synced to that host under its own per-requirement subdirectory (owner
 // id is the parent's, so no collision with the sub-requirement's mirror).
-func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Requirement, agentServerID string) (*model.Requirement, string) {
+//
+// The third return value is that attachment directory. The caller's manifest
+// names it, so the caller has to grant it (--add-dir) as well — otherwise the
+// sub-requirement's plan-mode run can see the parent's files in the prompt
+// but not read them. It is returned rather than re-resolved so the sync
+// happens once and the grant can never drift from the manifest path.
+func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Requirement, agentServerID string) (*model.Requirement, string, string) {
 	if req == nil || strings.TrimSpace(req.ParentID) == "" {
-		return nil, ""
+		return nil, "", ""
 	}
 	parent, err := h.reqSvc.Get(req.ParentID)
 	if err != nil {
 		log.Printf("[architect-design] parent lookup failed for %s (parent=%s): %v — continuing without parent context", req.ID, req.ParentID, err)
-		return nil, ""
+		return nil, "", ""
 	}
 	if parent.ProjectID != req.ProjectID {
 		log.Printf("[architect-design] parent %s is in project %s but child %s is in %s — skipping parent context", parent.ID, parent.ProjectID, req.ID, req.ProjectID)
-		return nil, ""
+		return nil, "", ""
 	}
 	if strings.TrimSpace(parent.ParentID) != "" {
 		log.Printf("[architect-design] parent %s is itself a child (parent_id=%s) — nesting is one level deep, skipping parent context", parent.ID, parent.ParentID)
-		return nil, ""
+		return nil, "", ""
 	}
 	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
-	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir))
+	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir)), dir
 }
 
 // parentTitle is the display name for the master requirement in job-log lines.

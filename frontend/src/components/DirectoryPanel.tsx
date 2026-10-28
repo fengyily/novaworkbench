@@ -150,24 +150,42 @@ export default function DirectoryPanel({ requirementId, compact = false }: Props
           <div className="dir-panel__empty">{t('requirements.dirs.empty')}</div>
         ) : (
           items.map((d) => (
-            <div className="dir-panel__row" key={d.id}>
+            <div className={d.auto ? 'dir-panel__row dir-panel__row--auto' : 'dir-panel__row'} key={d.id}>
               <div className="dir-panel__row-main">
-                <span className="dir-panel__path" title={d.path}>{d.path}</span>
+                <span
+                  className={d.auto ? 'dir-panel__path dir-panel__path--auto' : 'dir-panel__path'}
+                  title={d.path}
+                >
+                  {d.path}
+                </span>
+                {d.auto && (
+                  <span className="dir-panel__auto" title={t('requirements.dirs.autoHint')}>
+                    {t('requirements.dirs.autoBadge')}
+                  </span>
+                )}
                 {!d.exists_locally && (
                   <span className="dir-panel__missing" title={t('requirements.dirs.missingHint')}>
                     {t('requirements.dirs.missing')}
                   </span>
                 )}
               </div>
-              {d.label && <div className="dir-panel__label">{d.label}</div>}
-              <button
-                type="button"
-                className="dir-panel__delete"
-                onClick={() => void onDelete(d)}
-                title={t('requirements.dirs.delete')}
-              >
-                🗑
-              </button>
+              {d.auto ? (
+                <div className="dir-panel__label">{t('requirements.dirs.autoAttachment')}</div>
+              ) : (
+                d.label && <div className="dir-panel__label">{d.label}</div>
+              )}
+              {/* An auto row is not a grant — there is nothing to revoke, so
+                  it gets no delete button (the backend would 404 anyway). */}
+              {!d.auto && (
+                <button
+                  type="button"
+                  className="dir-panel__delete"
+                  onClick={() => void onDelete(d)}
+                  title={t('requirements.dirs.delete')}
+                >
+                  🗑
+                </button>
+              )}
             </div>
           ))
         )}
