@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -364,6 +365,69 @@ func hasMarkdownStructure(s string) bool {
 	}
 	return false
 }
+
+// HTTP LLM channel timeouts.
+//
+// The channel serves two very different workloads and one cap cannot serve
+// both:
+//
+//   - light  — title/description distillation (3072 max_tokens), commit + PR
+//     title (512): short input, short output.
+//   - heavy  — plan → sub-task step extraction (24000-rune input, 8192
+//     max_tokens), report → knowledge, PDF → Markdown, idea → requirement,
+//     mermaid diagram: minutes on a reasoning model or a self-hosted gateway.
+//
+// The channel originally shipped with ONE hard-coded 30s cap, tuned for the
+// light workloads, and every later caller inherited it. Step extraction that
+// needs 40s therefore died on EVERY attempt with
+// "llm http: read response: context deadline exceeded", and the split path
+// degraded to a single coarse child.
+//
+// Both defaults are overridable per deployment (Go duration strings):
+//
+//	NOVA_LLM_HTTP_TIMEOUT        — light calls  (default 30s)
+//	NOVA_LLM_HTTP_HEAVY_TIMEOUT  — heavy calls  (default 5m)
+const (
+	httpChatTimeoutLight = 30 * time.Second
+	httpChatTimeoutHeavy = 5 * time.Minute
+
+	envHTTPTimeout      = "NOVA_LLM_HTTP_TIMEOUT"
+	envHTTPHeavyTimeout = "NOVA_LLM_HTTP_HEAVY_TIMEOUT"
+)
+
+// httpChatTimeout resolves one channel timeout: env override first, then the
+// package default. An unparsable or non-positive value is logged and ignored
+// — a typo in the environment must never disable the timeout entirely.
+func httpChatTimeout(env string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("[llm http] ignoring invalid %s=%q (want a Go duration like 90s / 5m)", env, raw)
+		return def
+	}
+	return d
+}
+
+// Package vars (not consts) so tests can pin a timeout without sleeping.
+var (
+	lightChatTimeoutFn = func() time.Duration { return httpChatTimeout(envHTTPTimeout, httpChatTimeoutLight) }
+	heavyChatTimeoutFn = func() time.Duration { return httpChatTimeout(envHTTPHeavyTimeout, httpChatTimeoutHeavy) }
+)
+
+// LightChatTimeout returns the resolved timeout for light-weight calls on the
+// direct HTTP LLM channel (title/description distillation, commit + PR title).
+func LightChatTimeout() time.Duration { return lightChatTimeoutFn() }
+
+// HeavyChatTimeout returns the resolved timeout for heavy calls on the direct
+// HTTP LLM channel (plan → sub-task step extraction, report → knowledge,
+// PDF → Markdown, idea → requirement, mermaid diagram).
+//
+// It is also the budgeting unit for the split path's retry loop, so raising
+// the per-call timeout cannot multiply the worst-case wait.
+func HeavyChatTimeout() time.Duration { return heavyChatTimeoutFn() }
 
 // chatCompletion sends a single-turn chat completion to an OpenAI-compatible
 // /chat/completions endpoint and returns the assistant's raw text. Shared by
