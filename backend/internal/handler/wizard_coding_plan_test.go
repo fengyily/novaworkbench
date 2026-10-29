@@ -3,6 +3,7 @@ package handler
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
@@ -153,4 +154,121 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestSplitBudgetExhausted pins the wall-clock guard that keeps the split
+// phase from parking the pipeline for attempts × per-call-timeout once the
+// heavy channel timeout was raised from 30s to 5m. The predicate answers one
+// question: if the next attempt burns its full per-attempt timeout, would the
+// phase blow its total budget?
+//
+// The first case is the load-bearing one — a fresh phase must still be
+// allowed one full attempt, otherwise the guard would degrade a split that
+// never even ran.
+func TestSplitBudgetExhausted(t *testing.T) {
+	cases := []struct {
+		name       string
+		elapsed    time.Duration
+		perAttempt time.Duration
+		budget     time.Duration
+		want       bool
+	}{
+		{
+			name:       "fresh phase still has room for one full attempt",
+			elapsed:    0,
+			perAttempt: 5 * time.Minute,
+			budget:     10 * time.Minute,
+			want:       false,
+		},
+		{
+			name:       "one more full attempt would exceed the budget",
+			elapsed:    6 * time.Minute,
+			perAttempt: 5 * time.Minute,
+			budget:     10 * time.Minute,
+			want:       true,
+		},
+		{
+			name:       "budget already spent",
+			elapsed:    10 * time.Minute,
+			perAttempt: 5 * time.Minute,
+			budget:     10 * time.Minute,
+			want:       true,
+		},
+		{
+			name:       "short per-attempt timeout leaves plenty of room",
+			elapsed:    1 * time.Minute,
+			perAttempt: 30 * time.Second,
+			budget:     10 * time.Minute,
+			want:       false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitBudgetExhausted(tc.elapsed, tc.perAttempt, tc.budget)
+			if got != tc.want {
+				t.Fatalf("splitBudgetExhausted(%s, %s, %s) = %v, want %v",
+					tc.elapsed, tc.perAttempt, tc.budget, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSplitErrHint pins the operator-facing half of the degradation path: a
+// timeout-derived reason must carry an actionable hint (which env to raise,
+// which escape hatch to use), while a reason the operator cannot act on must
+// stay empty so the job stream isn't padded with advice nobody can take.
+//
+// Budget exhaustion is grouped with the timeout arms on purpose — the attempts
+// each burned their full per-call timeout, so it is the most common way a
+// degraded split ends and it must carry the same hint.
+func TestSplitErrHint(t *testing.T) {
+	cases := []struct {
+		name         string
+		reason       string
+		wantNonEmpty bool
+		wantContains []string
+	}{
+		{
+			name:         "context deadline exceeded",
+			reason:       "llm http: read response: context deadline exceeded",
+			wantNonEmpty: true,
+			wantContains: []string{"NOVA_LLM_HTTP_HEAVY_TIMEOUT", "🔄 重新拆分"},
+		},
+		{
+			name:         "retry-exhausted wrapper around a timeout",
+			reason:       "重试 3 次后仍失败：llm http: read response: context deadline exceeded",
+			wantNonEmpty: true,
+		},
+		{
+			name:         "budget exhausted",
+			reason:       "步骤解析超过总预算 10m0s（已用 10m0s）",
+			wantNonEmpty: true,
+		},
+		{
+			name:         "unconfigured channel is not actionable",
+			reason:       "llm not configured: base_url and api_key required",
+			wantNonEmpty: false,
+		},
+		{
+			name:         "upstream server error is not actionable",
+			reason:       "llm http: status 500: upstream boom",
+			wantNonEmpty: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitErrHint(tc.reason)
+			if tc.wantNonEmpty && got == "" {
+				t.Fatalf("splitErrHint(%q) = \"\", want an actionable hint", tc.reason)
+			}
+			if !tc.wantNonEmpty && got != "" {
+				t.Fatalf("splitErrHint(%q) = %q, want an empty hint", tc.reason, got)
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(got, want) {
+					t.Fatalf("splitErrHint(%q) = %q, want it to contain %q", tc.reason, got, want)
+				}
+			}
+		})
+	}
 }
