@@ -434,9 +434,17 @@ func HeavyChatTimeout() time.Duration { return heavyChatTimeoutFn() }
 // the lightweight LLM tasks that bypass the claude CLI for speed — none need
 // tool use. baseURL is the API root (with or without trailing slash, with or
 // without /v1); the path /chat/completions is appended. maxTokens caps the
-// response; the caller picks a size appropriate to the task. A 30s timeout
-// keeps the request fail-fast so the caller's fallback path is not stalled.
-func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, maxTokens int) (string, *Usage, error) {
+// response; the caller picks a size appropriate to the task.
+//
+// timeout bounds the whole request (connect → body read). The caller passes
+// it explicitly because the channel serves two very different workloads: a
+// title distillation wants to fail fast, while a plan → sub-task extraction
+// ships 24k runes and asks for 8192 tokens and needs minutes. Passing the
+// wrong tier makes the call either stall the fallback path or die
+// deterministically mid-body ("context deadline exceeded"). A non-positive
+// timeout falls back to LightChatTimeout() so a forgotten argument can never
+// disable the bound entirely.
+func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, maxTokens int, timeout time.Duration) (string, *Usage, error) {
 	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
 
 	body := chatRequest{
@@ -457,7 +465,10 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 		return "", nil, fmt.Errorf("llm http: marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if timeout <= 0 {
+		timeout = LightChatTimeout()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -573,7 +584,7 @@ func formatAndTitleViaHTTP(baseURL, apiKey, model, content, kind string) (markdo
 	default:
 		systemPrompt = formatAndTitleSystemPrompt
 	}
-	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, content, 3072)
+	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, content, 3072, LightChatTimeout())
 	if err != nil {
 		return "", "", nil, err
 	}
