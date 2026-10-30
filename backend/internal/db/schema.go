@@ -1176,6 +1176,24 @@ var alterColumns = []string{
 	// top level. Distinct from source_requirement_id (promotion provenance).
 	// No FK and no index (TEXT index would need VARCHAR on MySQL).
 	`ALTER TABLE requirements ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+	// 引用需求：方案设计阶段注入的「关联需求上下文」。JSON 数组字符串，形如
+	// [{"requirement_id":"req_x","note":"复用其鉴权中间件"}]，空 = "[]"。
+	//
+	// 与 parent_id（主/子层级，仅一层同项目）、source_requirement_id（转需求
+	// 溯源）三者语义互斥：这一列表达的是「本需求参考了哪些别的需求」，允许
+	// 跨项目，且不构成层级。
+	//
+	// 之所以用 JSON 列而不是 join 表：新表需要额外的 service / handler /
+	// 路由 / 删除清理 / copyOrder 维护，而 SQLite 从不开 PRAGMA
+	// foreign_keys，ON DELETE CASCADE 不生效；JSON 列随 requirements 行一起
+	// 被 db.Migrate 复制，跨库迁移零成本。被引用需求被删后的「悬空引用」在
+	// 解析阶段直接跳过，不做跨方言的 JSON 数组 UPDATE。
+	//
+	// TEXT NOT NULL DEFAULT '[]' 兼容 SQLite / MySQL / Postgres 三方言：
+	// mysqlTextDefault 会把 MySQL 上的 TEXT DEFAULT '[]' 转成 DEFAULT ('[]')，
+	// 与 tags / marks 完全同款。isIgnorableDDLError 吞掉"duplicate column"
+	// 以便历史库平滑升级。
+	`ALTER TABLE requirements ADD COLUMN referenced_requirements TEXT NOT NULL DEFAULT '[]'`,
 	// Per-stage context compression (analyst / architect / coding). When the
 	// user clicks "压缩上下文", the wizard handler asks Claude to summarize the
 	// current session via --resume and stores the result here, then clears the

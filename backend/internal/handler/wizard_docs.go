@@ -404,6 +404,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DocType == "design" {
 		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
+		prompt += referencedContextKeepRule(requirement.DesignDocs)
 	}
 
 	skillText := req.UserMessage
@@ -771,6 +772,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		// this a legacy-JSON → plan-markdown conversion could drop the section
 		// that the design run had appended.
 		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
+		prompt += referencedContextKeepRule(requirement.DesignDocs)
 	}
 
 	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
@@ -963,6 +965,26 @@ func parentContextKeepRule(req *model.Requirement, doc string) string {
 		return ""
 	}
 	return promptpkg.ParentContextKeepRule()
+}
+
+// referencedContextKeepRule returns the retain-the-referenced-section
+// instruction for a refine / apply prompt, or "" when the rule doesn't apply.
+//
+// Only the document itself is consulted: if it already carries the
+// 「关联需求上下文」 section, the section must survive. Refine rewrites the
+// doc from scratch each turn, and a section distilled from other requirements
+// looks like context the conversation never discussed — exactly the kind of
+// thing a model prunes as redundant. The rule makes it load-bearing instead.
+//
+// Unlike the parent rule there is no requirement-side condition: whether a
+// reference still exists is the service layer's business, and telling a model
+// to preserve a section that is no longer backed by a reference would be
+// worse than dropping it on the next save.
+func referencedContextKeepRule(doc string) string {
+	if !promptpkg.HasReferencedContextSection(doc) {
+		return ""
+	}
+	return promptpkg.ReferencedContextKeepRule()
 }
 
 func stageAgentServerID(req *model.Requirement, docType string) string {

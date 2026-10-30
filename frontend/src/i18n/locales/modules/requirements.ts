@@ -976,6 +976,29 @@ export const requirements = {
     parentDisabledHint: '该需求有子需求，请先将子需求移出后再设置主需求',
     parentFailed: '设置主需求失败：{{msg}}',
   },
+  // 「引用需求」—— 本需求参考的其它需求。方案设计时，这些需求的描述 + 既有
+  // 方案会作为上下文注入到架构师提示词里（标题不会注入，那是给人看的）。
+  references: {
+    label: '引用需求',
+    hint: '方案设计时会把这些需求的描述与既有方案作为上下文注入',
+    searchPlaceholder: '搜索需求标题…',
+    loading: '加载中…',
+    empty: '还没有引用需求',
+    noMatch: '没有匹配的需求',
+    add: '引用',
+    remove: '移除引用',
+    notePlaceholder: '为什么引用它？（会写进方案上下文）',
+    noteLabel: '引用原因',
+    originDirect: '直接引用',
+    originParent: '继承自主需求',
+    limitReached: '最多引用 {{n}} 个需求',
+    moreResults: '还有 {{n}} 条，请继续输入关键词',
+    count: '已引用 {{n}}/{{max}}',
+    hasDesign: '已有方案',
+    saveFailed: '引用需求保存失败：',
+    detailLabel: '引用需求',
+    emptyDetail: '未引用其它需求',
+  },
 } as const;
 
 export default requirements;

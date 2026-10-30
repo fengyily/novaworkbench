@@ -801,6 +801,13 @@ func main() {
 	mux.HandleFunc("PUT /api/requirements/{id}/marks", reqH.UpdateMarks)
 	// SetParent nests a requirement under a master requirement (one level).
 	mux.HandleFunc("PUT /api/requirements/{id}/parent", reqH.SetParent)
+	// References: the requirements this one points at for design context.
+	// GET returns the resolved set (direct + inherited from the master
+	// requirement); PUT replaces the direct set in one call. The referenced
+	// requirements' bodies are injected into the design prompt server-side —
+	// they are never part of either response.
+	mux.HandleFunc("GET /api/requirements/{id}/references", reqH.GetReferences)
+	mux.HandleFunc("PUT /api/requirements/{id}/references", reqH.SetReferences)
 	// PromoteFromIdea: turns a finished idea-discussion thread into a new
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.

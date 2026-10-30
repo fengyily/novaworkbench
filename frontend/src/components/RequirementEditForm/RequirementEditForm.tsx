@@ -13,13 +13,24 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import RichDescriptionEditor from '../RichDescriptionEditor/RichDescriptionEditor';
-import { requirementsApi, type Requirement } from '../../api/client';
+import RequirementReferencePicker from '../RequirementReferencePicker/RequirementReferencePicker';
+import { requirementsApi, type Requirement, type RequirementReference } from '../../api/client';
 import { errorMessage } from '../../utils/errMsg';
 import '../CreateRequirementForm/CreateRequirementForm.css';
 import './RequirementEditForm.css';
 
 const ACCEPTED_IMPORT_EXTS = ['.md', '.markdown', '.pdf', '.docx', '.txt'];
 const PRIORITIES = ['low', 'medium', 'high', 'critical'] as const;
+
+// referenceKey renders the direct reference set as a comparable string for
+// the dirty check. Only direct entries count — inherited ones come from the
+// master requirement and are not writable from here.
+function referenceKey(refs: RequirementReference[]): string {
+  return refs
+    .filter(r => r.origin === 'direct')
+    .map(r => `${r.requirement_id}:${r.note}`)
+    .join('|');
+}
 
 export interface RequirementEditFormProps {
   requirement: Requirement;
@@ -46,12 +57,45 @@ export default function RequirementEditForm({ requirement, onSaved, onCancel }: 
   const rootRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Referenced requirements — loaded on mount (the panel is only mounted when
+  // the user clicks 编辑, so this is a one-shot fetch, not a poll).
+  //
+  // Inherited entries (origin === 'parent') come from the master requirement
+  // and are shown read-only; only the direct ones are written back.
+  const [refs, setRefs] = useState<RequirementReference[]>([]);
+  const [refsLoaded, setRefsLoaded] = useState(false);
+  // The baseline the dirty check compares against. Captured when the load
+  // resolves — capturing it on the first render would capture the empty
+  // pre-load state and make the form look dirty the moment it opens.
+  const initialRefKeyRef = useRef<string>('');
+  useEffect(() => {
+    let alive = true;
+    initialRefKeyRef.current = '';
+    setRefsLoaded(false);
+    requirementsApi.getReferences(requirement.id)
+      .then(rows => {
+        if (!alive) return;
+        const list = rows || [];
+        setRefs(list);
+        initialRefKeyRef.current = referenceKey(list);
+      })
+      .catch(() => { if (alive) setRefs([]); })
+      .finally(() => { if (alive) setRefsLoaded(true); });
+    return () => { alive = false; };
+  }, [requirement.id]);
+
+  // The direct set is what we write back, so the dirty check compares only
+  // those — an inherited entry the user can't touch must not make the form
+  // look permanently dirty.
+  const directRefKey = referenceKey(refs);
+
   const showSkipAnalysis = requirement.status === 'draft' || requirement.status === 'analyzing';
   const dirty =
     title !== initial.title ||
     description !== initial.description ||
     priority !== initial.priority ||
-    (showSkipAnalysis && skipAnalysis !== initial.skipAnalysis);
+    (showSkipAnalysis && skipAnalysis !== initial.skipAnalysis) ||
+    (refsLoaded && directRefKey !== initialRefKeyRef.current);
 
   useEffect(() => {
     rootRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -112,6 +156,30 @@ export default function RequirementEditForm({ requirement, onSaved, onCancel }: 
         priority,
         skip_analysis: showSkipAnalysis ? skipAnalysis : requirement.skip_analysis,
       });
+      // The reference set is written separately (its own endpoint). Only the
+      // direct entries go back — writing an inherited entry would freeze it
+      // as a direct reference and break the inheritance.
+      //
+      // A failure here is NOT swallowed: onSaved closes the panel, so calling
+      // it would hide the error and lose the user's chance to retry. The
+      // requirement's own fields are already saved (that write succeeded), so
+      // the panel just stays open with the error and the Save button stays
+      // enabled — the refs are still "dirty" because their baseline was never
+      // advanced.
+      try {
+        const saved = await requirementsApi.setReferences(
+          requirement.id,
+          refs
+            .filter(r => r.origin === 'direct')
+            .map(r => ({ requirement_id: r.requirement_id, note: r.note })),
+        );
+        setRefs(saved || []);
+        initialRefKeyRef.current = referenceKey(saved || []);
+      } catch (err) {
+        setError(t('requirements.references.saveFailed') + errorMessage(err));
+        setSaving(false);
+        return;
+      }
       await onSaved(next);
     } catch (err) {
       setError(t('requirements.detail2.saveFailPrefix') + errorMessage(err));
@@ -209,6 +277,18 @@ export default function RequirementEditForm({ requirement, onSaved, onCancel }: 
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="form-group">
+        <label>{t('requirements.references.label')}</label>
+        <small className="form-hint">{t('requirements.references.hint')}</small>
+        <RequirementReferencePicker
+          value={refs}
+          onChange={setRefs}
+          projectId={requirement.project_id}
+          excludeIds={[requirement.id]}
+          disabled={saving}
+        />
       </div>
 
       {showSkipAnalysis && (

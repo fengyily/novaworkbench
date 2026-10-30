@@ -1136,6 +1136,42 @@ export interface Requirement {
   launch_error?: string;
 }
 
+/**
+ * RequirementReference is one entry of a requirement's reference set — the
+ * requirements this one points at so their content + existing plan inform the
+ * design.
+ *
+ * The display fields (title / status / kind / project) exist for the UI only
+ * (picker candidates, detail-page chips). The backend injects **only** the
+ * referenced requirement's description + plan into the design prompt — the
+ * title is deliberately withheld, so it must not be relied on for anything
+ * model-facing.
+ */
+export interface RequirementReference {
+  // The referenced requirement's id (req_*), not the referencing row's id.
+  requirement_id: string;
+  // The user's "why am I referencing this" note. Injected into the design
+  // prompt as the relevance signal.
+  note: string;
+  // 'direct' = picked by the user on this requirement; 'parent' = inherited
+  // from the master requirement (a child inherits its master's set).
+  origin: 'direct' | 'parent';
+  title: string;
+  status: string;
+  kind?: Kind;
+  project_id: string;
+  project_name: string;
+  // The referenced requirement already has a plan — the UI hints that its
+  // content can be reused as-is.
+  has_design: boolean;
+}
+
+/** The write shape of a reference: only the id + the note are user-authored. */
+export interface RequirementReferenceInput {
+  requirement_id: string;
+  note: string;
+}
+
 // LaunchSpec is the optional execution plan attached to a POST /api/requirements
 // request. When omitted, Create behaves exactly as today (insert row + return).
 // When supplied, the backend resolves the flow → task-type mapping (see
@@ -1407,6 +1443,20 @@ export const requirementsApi = {
   // server enforces same-project / one-level rules and returns 400 otherwise.
   setParent: (id: string, parentId: string) =>
     api.put<Requirement>(`/api/requirements/${id}/parent`, { parent_id: parentId }),
+  // Read the resolved reference set: the references the user picked directly
+  // plus the ones inherited from the master requirement. The display fields
+  // (title / status / kind / project) come back for the UI; the referenced
+  // requirements' bodies do NOT — those are injected into the design prompt
+  // server-side.
+  getReferences: (id: string) =>
+    api.get<RequirementReference[]>(`/api/requirements/${id}/references`),
+  // Replace the **direct** reference set in one call. The response is the
+  // resolved set (direct + inherited), so the UI refreshes its chips from a
+  // single round-trip. Only the id + note are sent — the origin is derived
+  // server-side, and an inherited entry must never be written back as a
+  // direct one.
+  setReferences: (id: string, references: RequirementReferenceInput[]) =>
+    api.put<RequirementReference[]>(`/api/requirements/${id}/references`, { references }),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

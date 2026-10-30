@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName, type RequirementReference } from '../api/client';
 import { configIdForModel } from '../utils/modelConfig';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -1815,6 +1815,21 @@ export default function RequirementDetail() {
     return () => { alive = false; };
   }, [req?.id, req?.project_id, req?.parent_id]);
   const hasChildReqs = !!req && projectReqs.some(x => x.parent_id === req.id);
+
+  // ── Referenced requirements (read-only header chips) ────────────────────
+  // The requirements this one points at for design context. The backend
+  // injects each referenced requirement's description + existing plan into the
+  // architect's prompt; the header only surfaces the chip row so the user can
+  // see (and jump to) what informed the design.
+  const [refs, setRefs] = useState<RequirementReference[]>([]);
+  useEffect(() => {
+    if (!req?.id) { setRefs([]); return; }
+    let alive = true;
+    requirementsApi.getReferences(req.id)
+      .then(rows => { if (alive) setRefs(rows || []); })
+      .catch(() => { if (alive) setRefs([]); });
+    return () => { alive = false; };
+  }, [req?.id]);
   const handleParentChange = async (parentId: string) => {
     if (!req) return;
     setParentSaving(true);
@@ -4064,6 +4079,29 @@ export default function RequirementDetail() {
               .map(x => <option key={x.id} value={x.id}>{x.title}</option>)}
           </select>
         </label>
+        {/* Referenced requirements — read-only chip row next to the master
+            picker. Each chip links to the referenced requirement so the user
+            can jump to what informed this design. An inherited chip (origin
+            = parent) is badged so it's clear the master requirement supplied
+            it, not the user. */}
+        {refs.length > 0 && (
+          <span className="req-ref-header" aria-label={t('requirements.references.detailLabel')}>
+            <span className="req-ref-header-label">{t('requirements.references.detailLabel')}</span>
+            {refs.map(r => (
+              <Link
+                key={`${r.requirement_id}-${r.origin}`}
+                to={`/requirements/${r.requirement_id}`}
+                className={`req-ref-header-chip${r.origin === 'parent' ? ' is-inherited' : ''}`}
+                title={r.note || r.title || r.requirement_id}
+              >
+                {r.title || r.requirement_id}
+                {r.origin === 'parent' && (
+                  <span className="req-ref-header-origin">{t('requirements.references.originParent')}</span>
+                )}
+              </Link>
+            ))}
+          </span>
+        )}
         {/* Dev source: Agent Server (with server name + model) or local dev.
             Written when the coding stage starts; not rendered for
             requirements that have not entered coding. */}

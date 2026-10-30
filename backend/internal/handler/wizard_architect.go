@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +187,21 @@ type designRunParams struct {
 	// this doubles as the "does this run need parent handling at all" flag
 	// for finalizeArchitectRun.
 	ParentBlock string
+	// ReferencedBlock is the pre-rendered 「关联需求上下文」 prompt block: the
+	// referenced requirements' descriptions + existing plans plus the output
+	// contract. Empty = this run has no usable references, and the prompt is
+	// then byte-identical to a requirement that never had the feature.
+	//
+	// Parallel to ParentBlock, not merged into it: the two blocks have
+	// different inputs (one master requirement vs. N referenced ones), different
+	// injected content (the parent block carries a title and an attachment
+	// manifest; this one carries neither) and different output contracts.
+	ReferencedBlock string
+	// ReferencedRefs holds the resolved references behind ReferencedBlock so
+	// finalizeArchitectRun can render the fallback appendix without a second
+	// lookup — and, more importantly, so the appendix describes exactly the
+	// references the prompt actually carried.
+	ReferencedRefs []model.RequirementReferenceContent
 }
 
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
@@ -849,6 +865,13 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// prompt inside prepareDesignWorkspace.
 	parent, parentBlock, parentAttachDir := h.buildParentBlock(context.Background(), req, agentServerID)
 
+	// Referenced requirements: the user pointed this requirement at other
+	// requirements whose content + existing plan should inform this design.
+	// Resolved here (synchronously, next to the parent block) so both share
+	// the same "degrade, never block" philosophy, but appended to the prompt
+	// inside prepareDesignWorkspace.
+	referencedBlock, referencedRefs := h.buildReferencedBlock(req)
+
 	// --add-dir 授权 = 用户手工授权的目录 + 本需求的附件目录 + （子需求时）
 	// 父需求的附件目录。
 	//
@@ -856,6 +879,9 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// 之外的路径需要一次权限裁决，非交互 (-p) 运行里没有人能批准 —— 这正是
 	// 「看不到附件内容」的根因。清单与授权由同一个 attachDir 派生，两边口径
 	// 不会漂移。
+	//
+	// 被引用的需求**不**产出授权：引用块只注入描述 + 方案（不含附件清单），
+	// 所以没有目录需要被授予，Agent Server 路径也没有额外的附件同步。
 	var parentGrant attachmentGrant
 	if parent != nil {
 		parentGrant = attachmentGrant{ownerID: parent.ID, dir: parentAttachDir}
@@ -863,16 +889,18 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	addDirs := h.grantDirsFor(requirementID, attachDir, parentGrant)
 
 	return &designRunParams{
-		Req:          req,
-		ProjectPath:  projectPath,
-		BaseBranch:   effectiveBase,
-		SourceSID:    sourceSID,
-		Fork:         fork,
-		SkipAnalysis: skipAnalysis,
-		Regenerate:   regenerate,
-		NewDesignSID: newDesignSID,
-		Parent:       parent,
-		ParentBlock:  parentBlock,
+		Req:             req,
+		ProjectPath:     projectPath,
+		BaseBranch:      effectiveBase,
+		SourceSID:       sourceSID,
+		Fork:            fork,
+		SkipAnalysis:    skipAnalysis,
+		Regenerate:      regenerate,
+		NewDesignSID:    newDesignSID,
+		Parent:          parent,
+		ParentBlock:     parentBlock,
+		ReferencedBlock: referencedBlock,
+		ReferencedRefs:  referencedRefs,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
 		// thread so the SSE panel can surface the hard-sync phase events
@@ -934,6 +962,37 @@ func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Require
 	}
 	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
 	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir)), dir
+}
+
+// buildReferencedBlock renders the 「关联需求上下文」 prompt block for the
+// requirements this one references.
+//
+// Differences from buildParentBlock, and why:
+//
+//   - It injects the referenced requirements' **description + existing plan
+//     only**. No title, no project / status / kind, no attachment manifest —
+//     so unlike the parent block it needs no resolveAttachDir /
+//     attachManifestFor round-trip and produces no attachmentGrant. An Agent
+//     Server run therefore performs zero extra attachment syncs.
+//   - It handles N references, not one master requirement.
+//
+// Every failure path degrades to "no references" rather than erroring out,
+// for the same reason the parent block does: the references are reference
+// material. Their absence makes the design less informed but never wrong, so
+// blocking the stage would trade a soft problem for a hard one.
+func (h *WizardHandler) buildReferencedBlock(req *model.Requirement) (string, []model.RequirementReferenceContent) {
+	if req == nil || strings.TrimSpace(req.ID) == "" {
+		return "", nil
+	}
+	refs, err := h.reqSvc.ResolveReferenceContent(req.ID)
+	if err != nil {
+		log.Printf("[architect-design] reference lookup failed for %s: %v — continuing without referenced context", req.ID, err)
+		return "", nil
+	}
+	if len(refs) == 0 {
+		return "", nil
+	}
+	return promptpkg.BuildReferencedContextBlock(refs), refs
 }
 
 // parentTitle is the display name for the master requirement in job-log lines.
@@ -1145,6 +1204,16 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// execution without touching wizard_remote.go.
 	if p.ParentBlock != "" {
 		prompt += "\n\n" + p.ParentBlock
+	}
+	// Referenced requirements: append their description + existing plan plus
+	// the 「关联需求上下文」 output contract. Placed right after the parent
+	// block (and still before the kind-specific tail), so the block is
+	// guaranteed to be present no matter which branch built `prompt` —
+	// duplicating it into three branches would guarantee drift. Local and
+	// remote runs share p.Prompt, so this also covers Agent-server execution
+	// without touching wizard_remote.go.
+	if p.ReferencedBlock != "" {
+		prompt += "\n\n" + p.ReferencedBlock
 	}
 	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
 	// the user would normally have hidden this CTA in the frontend; we still
@@ -1519,6 +1588,22 @@ func (h *WizardHandler) finalizeArchitectRun(
 	if p.ParentBlock != "" && !promptpkg.HasParentContextSection(planMarkdown) {
 		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「主需求关联上下文」章节，已自动追加附录（主需求：" + parentTitle(p.Parent) + "）"})
 		if fallback := promptpkg.BuildParentContextFallback(p.Parent); fallback != "" {
+			planMarkdown = planMarkdown + "\n\n" + fallback
+		}
+	}
+
+	// Same backstop for the 「关联需求上下文」 contract. A prompt is a soft
+	// guarantee and downstream (coding / sub-task split) reads ONLY this
+	// requirement's design_docs — so a plan that skipped the section would
+	// silently lose the referenced requirements' decisions with nothing
+	// downstream able to notice. Append the machine-written appendix so the
+	// referenced context is at least present and traceable.
+	//
+	// Deliberately not a re-run: a second claude invocation to "fix" the
+	// omission would double the token cost of a run that mostly succeeded.
+	if p.ReferencedBlock != "" && !promptpkg.HasReferencedContextSection(planMarkdown) {
+		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「关联需求上下文」章节，已自动追加附录（" + strconv.Itoa(len(p.ReferencedRefs)) + " 个关联需求）"})
+		if fallback := promptpkg.BuildReferencedContextFallback(p.ReferencedRefs); fallback != "" {
 			planMarkdown = planMarkdown + "\n\n" + fallback
 		}
 	}

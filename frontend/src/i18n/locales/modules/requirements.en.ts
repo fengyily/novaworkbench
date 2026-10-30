@@ -913,6 +913,31 @@ export const requirements = {
     parentDisabledHint: 'This requirement has sub-requirements; move them out before assigning a parent',
     parentFailed: 'Failed to set parent: {{msg}}',
   },
+  // Referenced requirements — the requirements this one points at for design
+  // context. The backend injects each referenced requirement's description +
+  // existing plan into the architect's prompt (the title is withheld — that
+  // one is for humans).
+  references: {
+    label: 'Referenced requirements',
+    hint: 'Their content and existing plans are injected as design context',
+    searchPlaceholder: 'Search requirement titles…',
+    loading: 'Loading…',
+    empty: 'No referenced requirements yet',
+    noMatch: 'No matching requirements',
+    add: 'Reference',
+    remove: 'Remove reference',
+    notePlaceholder: 'Why reference it? (included in the design context)',
+    noteLabel: 'Reference reason',
+    originDirect: 'Direct',
+    originParent: 'Inherited from parent',
+    limitReached: 'At most {{n}} requirements can be referenced',
+    moreResults: '{{n}} more — keep typing',
+    count: '{{n}}/{{max}} referenced',
+    hasDesign: 'Has a plan',
+    saveFailed: 'Failed to save referenced requirements: ',
+    detailLabel: 'Referenced requirements',
+    emptyDetail: 'No referenced requirements',
+  },
 } as const;
 
 export default requirements;
