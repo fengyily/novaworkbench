@@ -218,7 +218,7 @@ func (g *Gateway) GenerateCommitArtifacts(opts GenerateCommitArtifactsOpts) (*Co
 	if maxTokens <= 0 {
 		maxTokens = 512
 	}
-	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, userPrompt, maxTokens)
+	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, userPrompt, maxTokens, LightChatTimeout())
 	if err != nil {
 		return nil, nil, fmt.Errorf("llm commit: %w", err)
 	}
@@ -1004,7 +1004,7 @@ func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title st
 	if baseURL == "" || apiKey == "" {
 		return "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
 	}
-	out, _, err := chatCompletion(baseURL, apiKey, model, summarizeIdeaToRequirementPrompt, content, 4096)
+	out, _, err := chatCompletion(baseURL, apiKey, model, summarizeIdeaToRequirementPrompt, content, 4096, HeavyChatTimeout())
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -1051,7 +1051,7 @@ func (g *Gateway) ExtractReportKnowledge(reportKind, content, instruction string
 	if instruction != "" {
 		promptContent = content + "\n\n附加提取要求：\n" + instruction
 	}
-	out, u, err := chatCompletion(baseURL, apiKey, model, extractReportKnowledgePrompt, promptContent, 4096)
+	out, u, err := chatCompletion(baseURL, apiKey, model, extractReportKnowledgePrompt, promptContent, 4096, HeavyChatTimeout())
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -1120,7 +1120,7 @@ func (g *Gateway) ConvertPdfTextToMarkdown(rawText, sourceFile string) (markdown
 	}
 
 	userContent := "原始文件名：" + sourceFile + "\n\n---\n\n" + rawText
-	out, u, callErr := chatCompletion(baseURL, apiKey, model, pdfToMarkdownPrompt, userContent, 4096)
+	out, u, callErr := chatCompletion(baseURL, apiKey, model, pdfToMarkdownPrompt, userContent, 4096, HeavyChatTimeout())
 	if callErr != nil {
 		return "", nil, callErr
 	}
@@ -1174,7 +1174,7 @@ func (g *Gateway) GenerateDiagram(input, kindHint string) (title, mermaid, kind,
 	if kindHint != "" {
 		promptContent = input + "\n\n用户希望的类型：" + kindHint + "（不强求，按内容判断更合适的类型）。"
 	}
-	out, u, err := chatCompletion(baseURL, apiKey, model, generateDiagramPrompt, promptContent, 4096)
+	out, u, err := chatCompletion(baseURL, apiKey, model, generateDiagramPrompt, promptContent, 4096, HeavyChatTimeout())
 	if err != nil {
 		return "", "", "", "", nil, err
 	}
@@ -1225,6 +1225,10 @@ func (g *Gateway) GenerateDiagram(input, kindHint string) (title, mermaid, kind,
 // wizard_coding_plan.decomposePlanIntoSteps's retry loop to mirror the legacy
 // ExtractSubtasksJSON / extractSubtasksWithLLM "parse → feedback → retry"
 // pattern.
+//
+// The call runs on the heavy channel timeout (default 5m) because it ships
+// the whole plan and asks for 8192 tokens; the old 30s cap made it fail
+// deterministically with "context deadline exceeded".
 func (g *Gateway) ExtractStepsFromPlan(planMarkdown, feedback string) (string, error) {
 	if g.llmCfg == nil {
 		return "", fmt.Errorf("llm not configured: no llm config provider")
@@ -1250,7 +1254,7 @@ func (g *Gateway) ExtractStepsFromPlan(planMarkdown, feedback string) (string, e
 			"\n\n（你上一次的输出无法解析为合法 JSON 或未能生成有效步骤列表，错误信息：" +
 			feedback + "，这次请严格输出合法 JSON。）"
 	}
-	out, _, err := chatCompletion(baseURL, apiKey, model, extractStepsSystemPrompt, planMarkdown, 8192)
+	out, _, err := chatCompletion(baseURL, apiKey, model, extractStepsSystemPrompt, planMarkdown, 8192, HeavyChatTimeout())
 	if err != nil {
 		return "", err
 	}

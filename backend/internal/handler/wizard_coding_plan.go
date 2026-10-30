@@ -37,16 +37,22 @@ import (
 	"github.com/novaworkbench/backend/internal/store"
 )
 
-// Step-extraction retry budget. The HTTP LLM channel (llm/httpchat.go:175) is
-// hard-capped at 30s — once a 24KB plan + 8192 maxTokens overshoots that on
-// some providers we get "context deadline exceeded" and the whole split path
-// degrades to one coarse child. Three attempts is enough to absorb a single
-// transient blip without burning a multi-minute wait on a broken endpoint.
-// The fallback after exhaustion is unchanged: dispatch the whole plan as one
-// child (decomposePlanIntoSteps.fallback).
+// Step-extraction retry budget.
+//
+// The step-extraction call is the heaviest user of the direct HTTP LLM
+// channel: it ships the whole implementation plan (up to 24000 runes) and asks
+// for up to 8192 output tokens, which needs minutes on a reasoning model or a
+// self-hosted gateway. It therefore runs on the HEAVY channel timeout
+// (llm.HeavyChatTimeout, default 5m) rather than the 30s light cap.
+//
+// splitRetryMax bounds the number of attempts; splitRetryBudget bounds the
+// wall-clock the whole phase may burn. Without the budget, raising the
+// per-call timeout would multiply the worst case (attempts x timeout) and
+// park the pipeline for 15 minutes before degrading.
 const (
 	splitRetryMax       = 3
 	splitRetryBaseDelay = 1 * time.Second
+	splitRetryBudget    = 10 * time.Minute
 )
 
 // planSplitInput carries the state execStartCoding already resolved into
@@ -359,6 +365,30 @@ func (h *WizardHandler) buildPlanPrompt(in *planSplitInput) string {
 	return prompt
 }
 
+// splitBudgetExhausted reports whether one more attempt — assuming it burns
+// the full per-attempt timeout — would blow the phase budget.
+func splitBudgetExhausted(elapsed, perAttempt, budget time.Duration) bool {
+	return elapsed+perAttempt > budget
+}
+
+// splitErrHint returns an actionable hint for a degradation reason, or "".
+// Only timeouts get a hint: for every other failure there is nothing the
+// operator can do but retry.
+//
+// The "预算" arm matters as much as the timeout arms — budget exhaustion is
+// itself a timeout-derived outcome (the attempts each burned their full
+// per-call timeout), and it is the most common way a degraded split ends, so
+// it must carry the same hint.
+func splitErrHint(reason string) string {
+	s := strings.ToLower(reason)
+	if !strings.Contains(s, "deadline") && !strings.Contains(s, "timeout") &&
+		!strings.Contains(s, "超时") && !strings.Contains(s, "预算") {
+		return ""
+	}
+	return "。提示：HTTP LLM 通道超时——可调大 NOVA_LLM_HTTP_HEAVY_TIMEOUT（默认 5m），" +
+		"或在 设置→LLM 换用响应更快的模型；若模型不可用，可用「🔄 重新拆分」在 coding 会话中手动拆分。"
+}
+
 // decomposePlanIntoSteps turns the plan Markdown into a dispatchable payload,
 // plus the raw step JSON to stash on the batch row for provenance.
 //
@@ -374,7 +404,8 @@ func (h *WizardHandler) decomposePlanIntoSteps(
 ) (*orchestratorPayload, string) {
 	fallback := func(reason string) (*orchestratorPayload, string) {
 		log.Printf("[coding-plan] %s: step extraction unavailable (%s) — dispatching the whole plan as one child", reqID, reason)
-		job.Append(store.LogLine{Type: "message", Content: "⚠️ 步骤解析不可用（" + reason + "），已降级为 1 个子任务承载完整实施计划。"})
+		job.Append(store.LogLine{Type: "message",
+			Content: "⚠️ 步骤解析不可用（" + reason + "），已降级为 1 个子任务承载完整实施计划。" + splitErrHint(reason)})
 		title := "执行完整实施计划"
 		if reqRow != nil && strings.TrimSpace(reqRow.Title) != "" {
 			title = truncateForLog(reqRow.Title, 40)
@@ -408,6 +439,8 @@ func (h *WizardHandler) decomposePlanIntoSteps(
 		err      error
 		feedback string
 	)
+	start := time.Now()
+	perAttempt := llm.HeavyChatTimeout()
 	for attempt := 1; attempt <= splitRetryMax; attempt++ {
 		raw, err = h.llm.ExtractStepsFromPlan(planMarkdown, feedback)
 		// 用完即清，避免重试传输错误时把过期的 parse feedback 一起塞进去。
@@ -420,6 +453,10 @@ func (h *WizardHandler) decomposePlanIntoSteps(
 			}
 			if attempt == splitRetryMax {
 				return fallback(fmt.Sprintf("重试 %d 次后仍失败：%s", splitRetryMax, errStr))
+			}
+			// Budget check BEFORE burning another full timeout.
+			if splitBudgetExhausted(time.Since(start), perAttempt, splitRetryBudget) {
+				return fallback(fmt.Sprintf("步骤解析超过总预算 %s（已用 %s）", splitRetryBudget, time.Since(start).Round(time.Second)))
 			}
 			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🔄 步骤解析第 %d/%d 次重试（上次错误：%s）", attempt+1, splitRetryMax, truncateForLog(errStr, 120))})
 			// Exponential backoff: 1s, 2s, 4s (only sleeps 1s + 2s because the third
