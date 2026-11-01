@@ -44,40 +44,40 @@
 
 | # | 严重度 | 规则 | 标题 | 证据 | Issue |
 |---|---|---|---|---|---|
-| 1 | P1 | R11 | 「btn」在 23 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/400](https://github.com/fengyily/novaworkbench/issues/400) |
-| 2 | P1 | R11 | 「select」在 23 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/401](https://github.com/fengyily/novaworkbench/issues/401) |
-| 3 | P1 | R11 | 「btn-primary」在 21 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/402](https://github.com/fengyily/novaworkbench/issues/402) |
-| 4 | P1 | R11 | 「badge」在 10 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/403](https://github.com/fengyily/novaworkbench/issues/403) |
-| 5 | P1 | R11 | 「input-text」在 13 个页面的计算样式不一致 | [![/wizard](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/wizard.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/wizard.png) | [#https://github.com/fengyily/novaworkbench/issues/404](https://github.com/fengyily/novaworkbench/issues/404) |
-| 6 | P1 | R11 | 「btn-danger」在 3 个页面的计算样式不一致 | [![/projects](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/projects.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/projects.png) | [#https://github.com/fengyily/novaworkbench/issues/405](https://github.com/fengyily/novaworkbench/issues/405) |
-| 7 | P1 | R11 | 「btn-ghost」在 3 个页面的计算样式不一致 | [![/settings/users](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-users.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-users.png) | [#https://github.com/fengyily/novaworkbench/issues/406](https://github.com/fengyily/novaworkbench/issues/406) |
-| 8 | P1 | R11 | 「textarea」在 2 个页面的计算样式不一致 | [![/settings/roles](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png) | [#https://github.com/fengyily/novaworkbench/issues/407](https://github.com/fengyily/novaworkbench/issues/407) |
-| 9 | P1 | R11 | 「btn-secondary」在 3 个页面的计算样式不一致 | [![/settings/roles](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png) | [#https://github.com/fengyily/novaworkbench/issues/408](https://github.com/fengyily/novaworkbench/issues/408) |
-| 10 | P1 | R13 | 16 个「通用」类名被定义在页面私有样式表里，共 76 处引用 | — | [#https://github.com/fengyily/novaworkbench/issues/399](https://github.com/fengyily/novaworkbench/issues/399) |
-| 11 | P1 | R8 | 状态色存在两套并行词汇表（7 个需求状态 + 8 个运行状态） | — | [#https://github.com/fengyily/novaworkbench/issues/398](https://github.com/fengyily/novaworkbench/issues/398) |
-| 12 | P2 | R1 | 174 种颜色不在设计令牌里，共 546 处硬编码 | — | [#https://github.com/fengyily/novaworkbench/issues/409](https://github.com/fengyily/novaworkbench/issues/409) |
-| 13 | P2 | R10 | 13 处 <MarkdownRender> 没有挂在 .md-prose 上 | — | [#https://github.com/fengyily/novaworkbench/issues/424](https://github.com/fengyily/novaworkbench/issues/424) |
-| 14 | P2 | R11 | 「link」在 23 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/425](https://github.com/fengyily/novaworkbench/issues/425) |
-| 15 | P2 | R11 | 「card」在 9 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/426](https://github.com/fengyily/novaworkbench/issues/426) |
-| 16 | P2 | R11 | 「panel」在 13 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/427](https://github.com/fengyily/novaworkbench/issues/427) |
-| 17 | P2 | R11 | 「table」在 6 个页面的计算样式不一致 | [![/](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | [#https://github.com/fengyily/novaworkbench/issues/428](https://github.com/fengyily/novaworkbench/issues/428) |
-| 18 | P2 | R11 | 「input-choice」在 4 个页面的计算样式不一致 | [![/requirements](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements.png) | [#https://github.com/fengyily/novaworkbench/issues/429](https://github.com/fengyily/novaworkbench/issues/429) |
-| 19 | P2 | R11 | 「btn-icon」在 2 个页面的计算样式不一致 | [![/requirements/calendar](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements-calendar.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements-calendar.png) | [#https://github.com/fengyily/novaworkbench/issues/430](https://github.com/fengyily/novaworkbench/issues/430) |
-| 20 | P2 | R2 | 28 个令牌的值被写死 786 处，而不是引用 var(--token) | — | [#https://github.com/fengyily/novaworkbench/issues/410](https://github.com/fengyily/novaworkbench/issues/410) |
-| 21 | P2 | R4 | 类名 .input 被用了 5 处，但没有任何样式表定义它 | — | [#https://github.com/fengyily/novaworkbench/issues/411](https://github.com/fengyily/novaworkbench/issues/411) |
-| 22 | P2 | R4 | 类名 .modal-label 被用了 4 处，但没有任何样式表定义它 | — | [#https://github.com/fengyily/novaworkbench/issues/412](https://github.com/fengyily/novaworkbench/issues/412) |
-| 23 | P2 | R4 | 类名 .test-result 被用了 4 处，但没有任何样式表定义它 | — | [#https://github.com/fengyily/novaworkbench/issues/413](https://github.com/fengyily/novaworkbench/issues/413) |
-| 24 | P2 | R4 | 类名 .form-label 被用了 4 处，但没有任何样式表定义它 | — | [#https://github.com/fengyily/novaworkbench/issues/414](https://github.com/fengyily/novaworkbench/issues/414) |
-| 25 | P2 | R5 | btn 类名存在两套写法：19 个 `btn-*` vs 20 个 `*-btn` | — | [#https://github.com/fengyily/novaworkbench/issues/415](https://github.com/fengyily/novaworkbench/issues/415) |
-| 26 | P2 | R5 | 18 个 `*-card` 后缀式类名，仓库里没有对应的 `card-*` 前缀式约定 | — | [#https://github.com/fengyily/novaworkbench/issues/416](https://github.com/fengyily/novaworkbench/issues/416) |
-| 27 | P2 | R5 | input 类名存在两套写法：1 个 `input-*` vs 17 个 `*-input` | — | [#https://github.com/fengyily/novaworkbench/issues/417](https://github.com/fengyily/novaworkbench/issues/417) |
-| 28 | P2 | R5 | 15 个 `*-panel` 后缀式类名，仓库里没有对应的 `panel-*` 前缀式约定 | — | [#https://github.com/fengyily/novaworkbench/issues/418](https://github.com/fengyily/novaworkbench/issues/418) |
-| 29 | P2 | R5 | badge 类名存在两套写法：1 个 `badge-*` vs 20 个 `*-badge` | — | [#https://github.com/fengyily/novaworkbench/issues/419](https://github.com/fengyily/novaworkbench/issues/419) |
-| 30 | P2 | R6 | 容器有 6 套并存的类名（32 处引用） | — | [#https://github.com/fengyily/novaworkbench/issues/420](https://github.com/fengyily/novaworkbench/issues/420) |
-| 31 | P2 | R7 | 区块标题有 34 套并存的类名（95 处引用） | — | [#https://github.com/fengyily/novaworkbench/issues/421](https://github.com/fengyily/novaworkbench/issues/421) |
-| 32 | P2 | R8 | 5 个状态类名绕开了 .status-badge 体系 | — | [#https://github.com/fengyily/novaworkbench/issues/422](https://github.com/fengyily/novaworkbench/issues/422) |
-| 33 | P2 | R9 | 3 个文件里塞了大量内联样式（合计 505 处 style={{ }}） | — | [#https://github.com/fengyily/novaworkbench/issues/423](https://github.com/fengyily/novaworkbench/issues/423) |
-| 34 | P3 | R12 | 2 个路由仍是占位页：/chat、/reports | [![/chat](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/chat.png)](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/chat.png) | — |
+| 1 | P1 | R11 | 「btn」在 23 个页面的计算样式不一致 | 23 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 2 | P1 | R11 | 「select」在 23 个页面的计算样式不一致 | 23 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 3 | P1 | R11 | 「btn-primary」在 21 个页面的计算样式不一致 | 21 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 4 | P1 | R11 | 「badge」在 10 个页面的计算样式不一致 | 10 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 5 | P1 | R11 | 「input-text」在 13 个页面的计算样式不一致 | 13 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/wizard.png) | — |
+| 6 | P1 | R11 | 「btn-danger」在 3 个页面的计算样式不一致 | 3 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/projects.png) | — |
+| 7 | P1 | R11 | 「btn-ghost」在 3 个页面的计算样式不一致 | 3 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-users.png) | — |
+| 8 | P1 | R11 | 「textarea」在 2 个页面的计算样式不一致 | 2 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png) | — |
+| 9 | P1 | R11 | 「btn-secondary」在 3 个页面的计算样式不一致 | 3 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/settings-roles.png) | — |
+| 10 | P1 | R13 | 16 个「通用」类名被定义在页面私有样式表里，共 76 处引用 | — | — |
+| 11 | P1 | R8 | 状态色存在两套并行词汇表（7 个需求状态 + 8 个运行状态） | — | — |
+| 12 | P2 | R1 | 174 种颜色不在设计令牌里，共 546 处硬编码 | — | — |
+| 13 | P2 | R10 | 13 处 <MarkdownRender> 没有挂在 .md-prose 上 | — | — |
+| 14 | P2 | R11 | 「link」在 23 个页面的计算样式不一致 | 23 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 15 | P2 | R11 | 「card」在 9 个页面的计算样式不一致 | 9 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 16 | P2 | R11 | 「panel」在 13 个页面的计算样式不一致 | 13 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 17 | P2 | R11 | 「table」在 6 个页面的计算样式不一致 | 6 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/root.png) | — |
+| 18 | P2 | R11 | 「input-choice」在 4 个页面的计算样式不一致 | 4 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements.png) | — |
+| 19 | P2 | R11 | 「btn-icon」在 2 个页面的计算样式不一致 | 2 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/requirements-calendar.png) | — |
+| 20 | P2 | R2 | 28 个令牌的值被写死 786 处，而不是引用 var(--token) | — | — |
+| 21 | P2 | R4 | 类名 .input 被用了 5 处，但没有任何样式表定义它 | — | — |
+| 22 | P2 | R4 | 类名 .modal-label 被用了 4 处，但没有任何样式表定义它 | — | — |
+| 23 | P2 | R4 | 类名 .test-result 被用了 4 处，但没有任何样式表定义它 | — | — |
+| 24 | P2 | R4 | 类名 .form-label 被用了 4 处，但没有任何样式表定义它 | — | — |
+| 25 | P2 | R5 | btn 类名存在两套写法：19 个 `btn-*` vs 20 个 `*-btn` | — | — |
+| 26 | P2 | R5 | 18 个 `*-card` 后缀式类名，仓库里没有对应的 `card-*` 前缀式约定 | — | — |
+| 27 | P2 | R5 | input 类名存在两套写法：1 个 `input-*` vs 17 个 `*-input` | — | — |
+| 28 | P2 | R5 | 15 个 `*-panel` 后缀式类名，仓库里没有对应的 `panel-*` 前缀式约定 | — | — |
+| 29 | P2 | R5 | badge 类名存在两套写法：1 个 `badge-*` vs 20 个 `*-badge` | — | — |
+| 30 | P2 | R6 | 容器有 6 套并存的类名（32 处引用） | — | — |
+| 31 | P2 | R7 | 区块标题有 34 套并存的类名（95 处引用） | — | — |
+| 32 | P2 | R8 | 5 个状态类名绕开了 .status-badge 体系 | — | — |
+| 33 | P2 | R9 | 3 个文件里塞了大量内联样式（合计 505 处 style={{ }}） | — | — |
+| 34 | P3 | R12 | 2 个路由仍是占位页：/chat、/reports | 2 个路由 · [首张](https://raw.githubusercontent.com/fengyily/novaworkbench/audit/ui-20261025-2015/docs/ui-audit/20261025-2015/screenshots/chat.png) | — |
 | 35 | P3 | R3 | 51 个颜色各有多种写法（大小写 / 简写不一致） | — | — |
 
 ## 详情
