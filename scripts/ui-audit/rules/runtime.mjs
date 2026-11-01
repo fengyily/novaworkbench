@@ -143,7 +143,10 @@ export function runRuntimeRules(manifest, probeDir) {
   }
 
   findings.forEach((f, i) => {
-    f.id = `R11-${String(i + 1).padStart(3, '0')}`;
+    // The id has to name the rule that produced it: R12 (stub pages) shares
+    // this file with R11, and an id that claims otherwise sends the reader
+    // looking for a rule that is not there.
+    f.id = `${f.rule}-${String(i + 1).padStart(3, '0')}`;
     f.source = 'runtime';
   });
   return { findings, routesCompared: perRoute.length };

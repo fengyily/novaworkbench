@@ -8,10 +8,14 @@
 // name extraction that decides which findings exist at all.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { evidenceRelPath, normalizeColor, findColorLiterals } from './util.mjs';
 import { extractJSON } from './review.mjs';
 import { readGlobalTokens, readDefinedClasses, readUsedClasses } from './rules/static.mjs';
+import { runRuntimeRules } from './rules/runtime.mjs';
 
 test('evidenceRelPath maps artifact paths onto the evidence branch', () => {
   const runId = '20261025-2015';
@@ -96,4 +100,44 @@ test('class names are defined in the stylesheets', () => {
   const defined = readDefinedClasses();
   assert.ok(defined.has('btn-primary'), 'index.css defines .btn-primary');
   assert.ok(defined.has('status-badge'), 'index.css defines .status-badge');
+});
+
+test('a runtime finding is identified by the rule that produced it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uia-runtime-'));
+  try {
+    const probeDir = path.join(dir, 'probe');
+    fs.mkdirSync(probeDir);
+    // Two routes that paint the same role differently — the exact shape the
+    // R11 rule exists to catch.
+    const mk = (height) => ({
+      roles: {
+        'btn-primary': {
+          [`h=${height}`]: {
+            fingerprint: { fontSize: '13px', height, padding: '8px 16px' },
+            count: 2,
+            samples: ['button.btn-primary "Go"'],
+          },
+        },
+      },
+    });
+    fs.writeFileSync(path.join(probeDir, 'a.json'), JSON.stringify(mk('36px')));
+    fs.writeFileSync(path.join(probeDir, 'b.json'), JSON.stringify(mk('54px')));
+    const manifest = {
+      routes: [
+        { slug: 'a', path: '/a', group: 'core', screenshot: 'artifacts/ui-audit/x/screenshots/a.png', sha256: 'aa' },
+        { slug: 'b', path: '/b', group: 'core', screenshot: 'artifacts/ui-audit/x/screenshots/b.png', sha256: 'bb' },
+      ],
+    };
+    const { findings } = runRuntimeRules(manifest, probeDir);
+    assert.ok(findings.length >= 1, 'the drift between two routes is reported');
+    for (const f of findings) {
+      assert.ok(f.id.startsWith(f.rule), `${f.id} must name the rule ${f.rule} that produced it`);
+    }
+    // The stub-page finding lives in the same file but is a different rule,
+    // so its id must not claim to be an R11.
+    const stub = findings.find((f) => f.rule === 'R12');
+    if (stub) assert.ok(stub.id.startsWith('R12'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
