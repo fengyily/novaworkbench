@@ -13,6 +13,24 @@ import { run, REPO_ROOT } from './util.mjs';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const BATCH_SIZE = 5;
 
+/**
+ * Markers of a *systemic* model failure — quota exhausted, auth rejected,
+ * CLI not signed in. These do not resolve by sending the next batch, and
+ * the CLI happily exits 0 while printing them, so the reply has to be
+ * inspected rather than trusted.
+ */
+const SYSTEMIC_ERROR =
+  /API Error|\b429\b|\b401\b|\b403\b|quota|用量上限|积分|not logged in|Please run \/login|unauthori[sz]ed|rate limit|invalid api key/i;
+
+/** The first line that looks like an error, for the log line. */
+function firstErrorLine(text) {
+  const line = String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => SYSTEMIC_ERROR.test(l));
+  return line ? line.slice(0, 120) : 'no error detail';
+}
+
 /** Pull the last JSON array/object out of a model reply. */
 export function extractJSON(text) {
   const fence = [...text.matchAll(/```json\s*([\s\S]*?)```/g)].pop();
@@ -122,6 +140,7 @@ export async function reviewFindings(findings, opts) {
   const byId = new Map(reviewable.map((f) => [f.id, f]));
   let reviewed = 0;
   let rejected = 0;
+  let aborted = false;
 
   for (const [bi, batch] of batches.entries()) {
     const prompt = buildPrompt(batch, tokenSet);
@@ -130,6 +149,19 @@ export async function reviewFindings(findings, opts) {
       ['-p', prompt, '--output-format', 'text', '--dangerously-skip-permissions'],
       { timeout: opts.timeoutMs || 600000, cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 },
     );
+    const output = `${res.stdout}\n${res.stderr}`;
+
+    // A quota or auth failure applies to every batch. Stop here instead of
+    // spending the same exhausted quota on the remaining ones.
+    if (SYSTEMIC_ERROR.test(output)) {
+      process.stdout.write(
+        `  review batch ${bi + 1}/${batches.length}: model unavailable (${firstErrorLine(output)}) — ` +
+          `skipping the remaining ${batches.length - bi - 1} batch(es), keeping rule wording\n`,
+      );
+      aborted = true;
+      break;
+    }
+
     if (res.code !== 0) {
       process.stdout.write(`  review batch ${bi + 1}/${batches.length}: claude exited ${res.code} — keeping rule wording\n`);
       continue;
@@ -156,6 +188,12 @@ export async function reviewFindings(findings, opts) {
       reviewed++;
     }
     process.stdout.write(`  review batch ${bi + 1}/${batches.length}: ${parsed.length} verdicts\n`);
+  }
+
+  if (aborted) {
+    // Everything that was not judged keeps the rule's wording, and says so.
+    for (const f of reviewable) if (f.reviewed === undefined) f.reviewed = false;
+    return { findings: reviewable, reviewed, rejected, unavailable: true };
   }
 
   return { findings: reviewable, reviewed, rejected, unavailable: false };
