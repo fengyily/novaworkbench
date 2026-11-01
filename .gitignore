@@ -5,3 +5,7 @@ dist/
 .nova/
 .novaworkbench/
 .claude/
+
+# Local output of the UI audit tool. The committed evidence lives on the
+# audit branch under docs/ui-audit/<run-id>/, not here.
+artifacts/

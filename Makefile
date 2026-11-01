@@ -28,6 +28,18 @@ LDFLAGS := -s -w \
 #   make clean         - remove backend/web/dist and the deps-checked sentinel
 #   make doctor        - run scripts/check-build-deps.sh to verify toolchain
 #
+#   make ui-audit-deps - install the audit tool's browser driver (playwright-core)
+#   make ui-audit      - run the global UI consistency audit against a running
+#                       instance and open one issue per inconsistency.
+#                       Override the target with BASE_URL / USERNAME / PASSWORD:
+#                         make ui-audit BASE_URL=http://localhost:9527
+#   make ui-audit-review  - re-run the model pass on an existing capture
+#                       (RUN_ID=...); no browser needed.
+#   make ui-audit-publish - push the evidence branch and open the issues for an
+#                       existing capture (RUN_ID=...); no browser needed.
+#   make ui-audit-check- CI gate: fail when a NEW UI convention violation appears
+#                       (no browser, no model and no npm install needed).
+#
 # The frontend build runs through scripts/with-node.sh, which puts a
 # Vite-compatible Node (20.19+ / 22.12+) on PATH — a machine whose default
 # `node` is 18.x (Debian/Ubuntu apt) still builds as long as a newer Node is
@@ -41,7 +53,7 @@ LDFLAGS := -s -w \
 # Set SKIP_DEPS_CHECK=1 to bypass the check (CI cache, dev loop).
 #
 # If you change scripts/check-build-deps.sh, `make clean` first to re-verify.
-.PHONY: build build-frontend build-backend run clean doctor
+.PHONY: build build-frontend build-backend run clean doctor ui-audit ui-audit-deps ui-audit-review ui-audit-publish ui-audit-check
 
 SENTINEL := .deps-checked
 $(SENTINEL): scripts/check-build-deps.sh scripts/node-env.sh
@@ -75,3 +87,26 @@ clean:
 
 doctor:
 	@scripts/check-build-deps.sh --with-frontend
+
+# Global UI consistency audit (scripts/ui-audit). The tool needs a running
+# instance of the app; it drives a headless browser over every route,
+# compares the computed styles of shared controls page by page, and files
+# one GitHub issue per confirmed inconsistency with the screenshot attached.
+ui-audit-deps:
+	npm --prefix scripts/ui-audit ci
+
+ui-audit: ui-audit-deps
+	node scripts/ui-audit/run.mjs all --base-url $(BASE_URL) $(if $(USERNAME),--username $(USERNAME),) $(if $(PASSWORD),--password $(PASSWORD),) $(if $(SEED),--seed,) $(if $(RUN_ID),--run-id $(RUN_ID),)
+
+# Review and publish an already-captured run. Reusing the evidence avoids
+# driving the browser again when only the wording or the issue set changed.
+ui-audit-review:
+	@test -n "$(RUN_ID)" || (echo "RUN_ID is required (e.g. make ui-audit-review RUN_ID=20261025-2015)" && exit 1)
+	node scripts/ui-audit/run.mjs review --run-id $(RUN_ID)
+
+ui-audit-publish:
+	@test -n "$(RUN_ID)" || (echo "RUN_ID is required (e.g. make ui-audit-publish RUN_ID=20261025-2015)" && exit 1)
+	node scripts/ui-audit/run.mjs publish --run-id $(RUN_ID) $(if $(MIN_SEVERITY),--min-severity $(MIN_SEVERITY),) $(if $(MAX_ISSUES),--max-issues $(MAX_ISSUES),)
+
+ui-audit-check:
+	node scripts/ui-audit/run.mjs check
