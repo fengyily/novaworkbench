@@ -1,0 +1,1125 @@
+{
+  "url": "http://localhost:9601/requirements",
+  "title": "Nova Workbench",
+  "page": {
+    "rootFontSize": "14",
+    "rootColor": "rgb(30, 41, 59)",
+    "rootBackground": "rgb(248, 250, 252)",
+    "bodyFontSize": "14",
+    "bodyColor": "rgb(30, 41, 59)",
+    "bodyBackground": "rgba(0, 0, 0, 0)",
+    "bodyLineHeight": "21",
+    "bodyFontFamily": "system-ui"
+  },
+  "elementCount": 264,
+  "textLength": 349,
+  "roles": {
+    "header": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 20 0 20|borderRadius=0|border=0 0 1 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=48|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 20 0 20",
+          "borderRadius": "0",
+          "border": "0 0 1 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "48",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "header.app-header \"NovaWorkbench需求中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 2,
+        "samples": [
+          "div.app-header-left \"NovaWorkbench需求\"",
+          "div.app-header-right \"中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section \"需求\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section-label \"需求\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.lang-switcher.lang-switcher--header \"中文English\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-user \"管理员管理员\""
+        ]
+      },
+      "fontSize=11|fontWeight=400|lineHeight=16.5|fontFamily=system-ui|padding=1 7 1 7|borderRadius=10|border=0 0 0 0|borderColor=rgb(255, 255, 255)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=18.5|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "11",
+          "fontWeight": "400",
+          "lineHeight": "16.5",
+          "fontFamily": "system-ui",
+          "padding": "1 7 1 7",
+          "borderRadius": "10",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(255, 255, 255)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "18.5",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-admin \"管理员\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=39|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "39",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.page-header \"需求列表📅 日历+ 新建需求📅\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=39|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "39",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.page-header-actions.desktop-only \"📅 日历+ 新建需求\""
+        ]
+      }
+    },
+    "btn": {
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=6 6 6 6|borderRadius=6|border=0 0 0 0|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgba(0, 0, 0, 0)|height=36|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "6 6 6 6",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "36",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-hamburger"
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-header-logout \"退出\""
+        ]
+      },
+      "fontSize=18|fontWeight=400|lineHeight=18|fontFamily=Arial|padding=4 8 4 8|borderRadius=6|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "18",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "Arial",
+          "padding": "4 8 4 8",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.sidebar-close-btn \"✕\""
+        ]
+      },
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=39|minWidth=0|boxShadow=none|display=inline-flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "39",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn \"📅 日历\""
+        ]
+      },
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=auto|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn.mobile-only \"📅\""
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=999|border=1 1 1 1|borderColor=rgb(239, 68, 68)|color=rgb(185, 28, 28)|background=rgb(254, 242, 242)|height=31|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "999",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(239, 68, 68)",
+          "color": "rgb(185, 28, 28)",
+          "background": "rgb(254, 242, 242)",
+          "height": "31",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-kind-chip.kind-issue.active \"🐛 问题\""
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=999|border=1 1 1 1|borderColor=rgb(79, 70, 229)|color=rgb(67, 56, 202)|background=rgb(238, 242, 255)|height=31|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "999",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(67, 56, 202)",
+          "background": "rgb(238, 242, 255)",
+          "height": "31",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-kind-chip.kind-requirement.active \"📋 需求\""
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=999|border=1 1 1 1|borderColor=rgb(245, 158, 11)|color=rgb(180, 83, 9)|background=rgb(255, 251, 235)|height=31|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "999",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(245, 158, 11)",
+          "color": "rgb(180, 83, 9)",
+          "background": "rgb(255, 251, 235)",
+          "height": "31",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-kind-chip.kind-idea.active \"💡 想法\""
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=999|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(0, 0, 0)|background=rgb(255, 255, 255)|height=31|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "999",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(255, 255, 255)",
+          "height": "31",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-kind-chip.kind-wiki \"📚 知识库\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=13.3333|fontFamily=Arial|padding=0 0 0 0|borderRadius=6|border=0 0 0 0|borderColor=rgb(148, 163, 184)|color=rgb(148, 163, 184)|background=rgba(0, 0, 0, 0)|height=22|minWidth=0|boxShadow=none|display=inline-flex": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "13.3333",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(148, 163, 184)",
+          "color": "rgb(148, 163, 184)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "22",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-tree-toggle.req-tree-add"
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=13.3333|fontFamily=Arial|padding=0 0 0 0|borderRadius=6|border=0 0 0 0|borderColor=rgb(148, 163, 184)|color=rgb(148, 163, 184)|background=rgba(0, 0, 0, 0)|height=22|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "13.3333",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(148, 163, 184)",
+          "color": "rgb(148, 163, 184)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "22",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-tree-toggle.req-tree-add"
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=12 14 12 14|borderRadius=12|border=1 1 1 3|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=auto|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "12 14 12 14",
+          "borderRadius": "12",
+          "border": "1 1 1 3",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.req-card-mobile \"需求📝 草稿UI 一致性审计夹具📁 nova-ui-audit-fixtur\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=auto|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.fab.fab-extended \"＋+ 新建\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.tab-bar-item.more-tab \"更多\""
+        ]
+      }
+    },
+    "select": {
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=3 6 3 6|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "3 6 3 6",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "select.lang-switcher-select \"中文English\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=10 12 10 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(248, 250, 252)|height=40|minWidth=160|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "10 12 10 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(248, 250, 252)",
+          "height": "40",
+          "minWidth": "160",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 2,
+        "samples": [
+          "select.form-input.req-filter-select \"全部项目nova-ui-audit-fixture\"",
+          "select.form-input.req-filter-select \"全部状态📝 草稿🔍 需求分析中📐 方案设计中📐 方案完成🚀 开发中✅ \""
+        ]
+      }
+    },
+    "link": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.app-header-settings \"设置\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 6,
+        "samples": [
+          "a.nav-item \"仪表盘\"",
+          "a.nav-item \"项目\"",
+          "a.nav-item \"定时任务\""
+        ]
+      },
+      "fontSize=14|fontWeight=600|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(79, 70, 229)|color=rgb(79, 70, 229)|background=rgb(238, 242, 255)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "600",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(79, 70, 229)",
+          "background": "rgb(238, 242, 255)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.nav-item.active \"需求\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(0, 0, 238)|color=rgb(0, 0, 238)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 238)",
+          "color": "rgb(0, 0, 238)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 4,
+        "samples": [
+          "a.tab-bar-item \"仪表盘\"",
+          "a.tab-bar-item \"项目\"",
+          "a.tab-bar-item.active \"需求\""
+        ]
+      }
+    },
+    "btn-primary": {
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(79, 70, 229)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=36|minWidth=0|boxShadow=none|display=inline-flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "36",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn.btn-primary \"+ 新建需求\""
+        ]
+      }
+    },
+    "input-text": {
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=8 0 8 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=31|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 0 8 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "31",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "input"
+        ]
+      }
+    },
+    "badge": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=31|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "31",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-kind-chips \"🐛 问题📋 需求💡 想法📚 知识库全部类型已选\""
+        ]
+      },
+      "fontSize=12|fontWeight=400|lineHeight=18|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=18|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "18",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.req-kind-chip-hint \"全部类型已选\""
+        ]
+      },
+      "fontSize=12|fontWeight=600|lineHeight=18|fontFamily=system-ui|padding=3 10 3 10|borderRadius=4|border=0 0 0 0|borderColor=rgb(67, 56, 202)|color=rgb(67, 56, 202)|background=rgb(224, 231, 255)|height=24|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "600",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "3 10 3 10",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(67, 56, 202)",
+          "color": "rgb(67, 56, 202)",
+          "background": "rgb(224, 231, 255)",
+          "height": "24",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.kind-badge.kind-requirement \"需求\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=19.6|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=20.7969|minWidth=0|boxShadow=none|display=inline-flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "19.6",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "20.7969",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.status-chips \"📝 草稿\""
+        ]
+      },
+      "fontSize=12|fontWeight=600|lineHeight=16.8|fontFamily=system-ui|padding=2 8 2 8|borderRadius=4|border=0 0 0 0|borderColor=rgb(71, 85, 105)|color=rgb(71, 85, 105)|background=rgb(241, 245, 249)|height=20.7969|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "600",
+          "lineHeight": "16.8",
+          "fontFamily": "system-ui",
+          "padding": "2 8 2 8",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(71, 85, 105)",
+          "color": "rgb(71, 85, 105)",
+          "background": "rgb(241, 245, 249)",
+          "height": "20.7969",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.status-badge.status-draft \"📝 草稿\""
+        ]
+      },
+      "fontSize=11|fontWeight=600|lineHeight=16.5|fontFamily=system-ui|padding=2 8 2 8|borderRadius=4|border=0 0 0 0|borderColor=rgb(67, 56, 202)|color=rgb(67, 56, 202)|background=rgb(224, 231, 255)|height=auto|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "11",
+          "fontWeight": "600",
+          "lineHeight": "16.5",
+          "fontFamily": "system-ui",
+          "padding": "2 8 2 8",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(67, 56, 202)",
+          "color": "rgb(67, 56, 202)",
+          "background": "rgb(224, 231, 255)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.kind-badge.kind-requirement \"需求\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=19.6|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "19.6",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.status-chips \"📝 草稿\""
+        ]
+      },
+      "fontSize=11|fontWeight=600|lineHeight=15.4|fontFamily=system-ui|padding=2 8 2 8|borderRadius=4|border=0 0 0 0|borderColor=rgb(71, 85, 105)|color=rgb(71, 85, 105)|background=rgb(241, 245, 249)|height=auto|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "11",
+          "fontWeight": "600",
+          "lineHeight": "15.4",
+          "fontFamily": "system-ui",
+          "padding": "2 8 2 8",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(71, 85, 105)",
+          "color": "rgb(71, 85, 105)",
+          "background": "rgb(241, 245, 249)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.status-badge.status-draft \"📝 草稿\""
+        ]
+      }
+    },
+    "table": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=8|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=81.5|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "8",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "81.5",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-table-wrap.desktop-only \"拖到此处移出主需求类型标题状态模型项目Agent更新时间需求UI 一致性审计夹具\""
+        ]
+      }
+    },
+    "card": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=79.5|minWidth=0|boxShadow=none|display=table": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "79.5",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "table"
+        },
+        "count": 1,
+        "samples": [
+          "table.req-table.table-cards \"类型标题状态模型项目Agent更新时间需求UI 一致性审计夹具📝 草稿—nov\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-cards-mobile.mobile-only \"需求📝 草稿UI 一致性审计夹具📁 nova-ui-audit-fixtur\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-card-mobile-wrap.req-tree-row \"需求📝 草稿UI 一致性审计夹具📁 nova-ui-audit-fixtur\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-card-mobile-head \"需求📝 草稿\""
+        ]
+      },
+      "fontSize=15|fontWeight=600|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "15",
+          "fontWeight": "600",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-card-mobile-title \"UI 一致性审计夹具\""
+        ]
+      },
+      "fontSize=12|fontWeight=400|lineHeight=18|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.req-card-mobile-foot \"📁 nova-ui-audit-fixture刚刚\""
+        ]
+      },
+      "fontSize=12|fontWeight=400|lineHeight=18|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 2,
+        "samples": [
+          "span.req-card-mobile-project \"📁 nova-ui-audit-fixture\"",
+          "span.req-card-mobile-spacer"
+        ]
+      },
+      "fontSize=12|fontWeight=400|lineHeight=18|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(148, 163, 184)|color=rgb(148, 163, 184)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(148, 163, 184)",
+          "color": "rgb(148, 163, 184)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.req-card-mobile-time \"刚刚\""
+        ]
+      }
+    },
+    "input-choice": {
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgba(0, 0, 0, 0)|height=15|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "15",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 3,
+        "samples": [
+          "input.rb-check",
+          "input.rb-check",
+          "input.rb-check"
+        ]
+      }
+    }
+  }
+}

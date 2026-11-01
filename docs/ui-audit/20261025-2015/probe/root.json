@@ -1,0 +1,661 @@
+{
+  "url": "http://localhost:9601/",
+  "title": "Nova Workbench",
+  "page": {
+    "rootFontSize": "14",
+    "rootColor": "rgb(30, 41, 59)",
+    "rootBackground": "rgb(248, 250, 252)",
+    "bodyFontSize": "14",
+    "bodyColor": "rgb(30, 41, 59)",
+    "bodyBackground": "rgba(0, 0, 0, 0)",
+    "bodyLineHeight": "21",
+    "bodyFontFamily": "system-ui"
+  },
+  "elementCount": 219,
+  "textLength": 324,
+  "roles": {
+    "header": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 20 0 20|borderRadius=0|border=0 0 1 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=48|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 20 0 20",
+          "borderRadius": "0",
+          "border": "0 0 1 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "48",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "header.app-header \"NovaWorkbench仪表盘中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 2,
+        "samples": [
+          "div.app-header-left \"NovaWorkbench仪表盘\"",
+          "div.app-header-right \"中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section \"仪表盘\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section-label \"仪表盘\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.lang-switcher.lang-switcher--header \"中文English\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-user \"管理员管理员\""
+        ]
+      },
+      "fontSize=11|fontWeight=400|lineHeight=16.5|fontFamily=system-ui|padding=1 7 1 7|borderRadius=10|border=0 0 0 0|borderColor=rgb(255, 255, 255)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=18.5|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "11",
+          "fontWeight": "400",
+          "lineHeight": "16.5",
+          "fontFamily": "system-ui",
+          "padding": "1 7 1 7",
+          "borderRadius": "10",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(255, 255, 255)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "18.5",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-admin \"管理员\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=36|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "36",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.section-header \"项目列表+ 添加\""
+        ]
+      }
+    },
+    "btn": {
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=6 6 6 6|borderRadius=6|border=0 0 0 0|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgba(0, 0, 0, 0)|height=36|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "6 6 6 6",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "36",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-hamburger"
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-header-logout \"退出\""
+        ]
+      },
+      "fontSize=18|fontWeight=400|lineHeight=18|fontFamily=Arial|padding=4 8 4 8|borderRadius=6|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "18",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "Arial",
+          "padding": "4 8 4 8",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.sidebar-close-btn \"✕\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=39|minWidth=0|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "39",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "div.quick-actions.btn-row-2col \"🪄 新建项目向导添加项目需求列表开始对话生成周报知识审查\""
+        ]
+      },
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=39|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "39",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 5,
+        "samples": [
+          "button.btn \"添加项目\"",
+          "button.btn \"需求列表\"",
+          "button.btn \"开始对话\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=auto|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.fab.fab-extended \"＋新建项目\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.tab-bar-item.more-tab \"更多\""
+        ]
+      }
+    },
+    "select": {
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=3 6 3 6|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "3 6 3 6",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "select.lang-switcher-select \"中文English\""
+        ]
+      }
+    },
+    "link": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.app-header-settings \"设置\""
+        ]
+      },
+      "fontSize=14|fontWeight=600|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(79, 70, 229)|color=rgb(79, 70, 229)|background=rgb(238, 242, 255)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "600",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(79, 70, 229)",
+          "background": "rgb(238, 242, 255)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.nav-item.active \"仪表盘\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 6,
+        "samples": [
+          "a.nav-item \"项目\"",
+          "a.nav-item \"需求\"",
+          "a.nav-item \"定时任务\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(0, 0, 238)|color=rgb(0, 0, 238)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 238)",
+          "color": "rgb(0, 0, 238)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 4,
+        "samples": [
+          "a.tab-bar-item.active \"仪表盘\"",
+          "a.tab-bar-item \"项目\"",
+          "a.tab-bar-item \"需求\""
+        ]
+      }
+    },
+    "card": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=20 20 20 20|borderRadius=8|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=113.5|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "20 20 20 20",
+          "borderRadius": "8",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "113.5",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 4,
+        "samples": [
+          "div.stat-card \"1项目数\"",
+          "div.stat-card \"0活跃需求\"",
+          "div.stat-card \"0待 Review 知识\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=82|minWidth=0|boxShadow=none|display=table": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "82",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "table"
+        },
+        "count": 1,
+        "samples": [
+          "table.project-table.table-cards \"名称类型路径状态更新时间nova-ui-audit-fixtureUnknown\""
+        ]
+      }
+    },
+    "panel": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=20 20 20 20|borderRadius=8|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=172|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "20 20 20 20",
+          "borderRadius": "8",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "172",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.projects-section \"项目列表+ 添加名称类型路径状态更新时间nova-ui-audit-fixtur\""
+        ]
+      }
+    },
+    "btn-primary": {
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(79, 70, 229)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=36|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "36",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn.btn-primary.desktop-only \"+ 添加\""
+        ]
+      },
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(79, 70, 229)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=39|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "39",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn.btn-primary \"🪄 新建项目向导\""
+        ]
+      }
+    },
+    "table": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=82|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "82",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.project-table-wrap \"名称类型路径状态更新时间nova-ui-audit-fixtureUnknown\""
+        ]
+      }
+    },
+    "badge": {
+      "fontSize=12|fontWeight=400|lineHeight=18|fontFamily=system-ui|padding=2 8 2 8|borderRadius=4|border=0 0 0 0|borderColor=rgb(79, 70, 229)|color=rgb(79, 70, 229)|background=rgb(238, 242, 255)|height=22|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "system-ui",
+          "padding": "2 8 2 8",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(79, 70, 229)",
+          "background": "rgb(238, 242, 255)",
+          "height": "22",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "span.type-tag \"Unknown\""
+        ]
+      },
+      "fontSize=12|fontWeight=600|lineHeight=16.8|fontFamily=system-ui|padding=2 8 2 8|borderRadius=4|border=0 0 0 0|borderColor=rgb(4, 120, 87)|color=rgb(4, 120, 87)|background=rgb(209, 250, 229)|height=20.7969|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "12",
+          "fontWeight": "600",
+          "lineHeight": "16.8",
+          "fontFamily": "system-ui",
+          "padding": "2 8 2 8",
+          "borderRadius": "4",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(4, 120, 87)",
+          "color": "rgb(4, 120, 87)",
+          "background": "rgb(209, 250, 229)",
+          "height": "20.7969",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "span.status-badge.status-active \"🟢 active\""
+        ]
+      }
+    }
+  }
+}

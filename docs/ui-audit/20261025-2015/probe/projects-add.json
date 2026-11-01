@@ -1,0 +1,522 @@
+{
+  "url": "http://localhost:9601/projects/add",
+  "title": "Nova Workbench",
+  "page": {
+    "rootFontSize": "14",
+    "rootColor": "rgb(30, 41, 59)",
+    "rootBackground": "rgb(248, 250, 252)",
+    "bodyFontSize": "14",
+    "bodyColor": "rgb(30, 41, 59)",
+    "bodyBackground": "rgba(0, 0, 0, 0)",
+    "bodyLineHeight": "21",
+    "bodyFontFamily": "system-ui"
+  },
+  "elementCount": 196,
+  "textLength": 213,
+  "roles": {
+    "header": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 20 0 20|borderRadius=0|border=0 0 1 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=48|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 20 0 20",
+          "borderRadius": "0",
+          "border": "0 0 1 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "48",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "header.app-header \"NovaWorkbench添加项目中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 2,
+        "samples": [
+          "div.app-header-left \"NovaWorkbench添加项目\"",
+          "div.app-header-right \"中文English管理员管理员设置退出\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section \"添加项目\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-section-label \"添加项目\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(30, 41, 59)|color=rgb(30, 41, 59)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(30, 41, 59)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.lang-switcher.lang-switcher--header \"中文English\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-user \"管理员管理员\""
+        ]
+      },
+      "fontSize=11|fontWeight=400|lineHeight=16.5|fontFamily=system-ui|padding=1 7 1 7|borderRadius=10|border=0 0 0 0|borderColor=rgb(255, 255, 255)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=18.5|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "11",
+          "fontWeight": "400",
+          "lineHeight": "16.5",
+          "fontFamily": "system-ui",
+          "padding": "1 7 1 7",
+          "borderRadius": "10",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(255, 255, 255)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "18.5",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "span.app-header-admin \"管理员\""
+        ]
+      }
+    },
+    "btn": {
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=6 6 6 6|borderRadius=6|border=0 0 0 0|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgba(0, 0, 0, 0)|height=36|minWidth=0|boxShadow=none|display=none": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "6 6 6 6",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "36",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "none"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-hamburger"
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=25|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "25",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-header-back"
+        ]
+      },
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=4 12 4 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=28|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "4 12 4 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "28",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "button.app-header-logout \"退出\""
+        ]
+      },
+      "fontSize=18|fontWeight=400|lineHeight=18|fontFamily=Arial|padding=4 8 4 8|borderRadius=6|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "18",
+          "fontWeight": "400",
+          "lineHeight": "18",
+          "fontFamily": "Arial",
+          "padding": "4 8 4 8",
+          "borderRadius": "6",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.sidebar-close-btn \"✕\""
+        ]
+      },
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=36|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "36",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn \"取消\""
+        ]
+      },
+      "fontSize=13.3333|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=0 0 0 0|borderRadius=0|border=2 2 2 2|borderColor=rgb(0, 0, 0)|color=rgb(0, 0, 0)|background=rgb(239, 239, 239)|height=auto|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "13.3333",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "2 2 2 2",
+          "borderColor": "rgb(0, 0, 0)",
+          "color": "rgb(0, 0, 0)",
+          "background": "rgb(239, 239, 239)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "button.tab-bar-item.more-tab \"更多\""
+        ]
+      }
+    },
+    "select": {
+      "fontSize=13|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=3 6 3 6|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=25|minWidth=auto|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "3 6 3 6",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "25",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "select.lang-switcher-select \"中文English\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=10 12 10 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(248, 250, 252)|height=40|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "10 12 10 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(248, 250, 252)",
+          "height": "40",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 1,
+        "samples": [
+          "select.form-input \"— 无（仅适用公开仓库）—\""
+        ]
+      }
+    },
+    "link": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=21|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "21",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.app-header-settings \"设置\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(100, 116, 139)|color=rgb(100, 116, 139)|background=rgba(0, 0, 0, 0)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(100, 116, 139)",
+          "color": "rgb(100, 116, 139)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 6,
+        "samples": [
+          "a.nav-item \"仪表盘\"",
+          "a.nav-item \"需求\"",
+          "a.nav-item \"定时任务\""
+        ]
+      },
+      "fontSize=14|fontWeight=600|lineHeight=21|fontFamily=system-ui|padding=10 20 10 20|borderRadius=0|border=0 0 0 3|borderColor=rgb(79, 70, 229)|color=rgb(79, 70, 229)|background=rgb(238, 242, 255)|height=41|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "600",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "10 20 10 20",
+          "borderRadius": "0",
+          "border": "0 0 0 3",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(79, 70, 229)",
+          "background": "rgb(238, 242, 255)",
+          "height": "41",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "a.nav-item.active \"项目\""
+        ]
+      },
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=0 0 0 0|borderRadius=0|border=0 0 0 0|borderColor=rgb(0, 0, 238)|color=rgb(0, 0, 238)|background=rgba(0, 0, 0, 0)|height=auto|minWidth=0|boxShadow=none|display=inline": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "0 0 0 0",
+          "borderRadius": "0",
+          "border": "0 0 0 0",
+          "borderColor": "rgb(0, 0, 238)",
+          "color": "rgb(0, 0, 238)",
+          "background": "rgba(0, 0, 0, 0)",
+          "height": "auto",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline"
+        },
+        "count": 4,
+        "samples": [
+          "a.tab-bar-item \"仪表盘\"",
+          "a.tab-bar-item.active \"项目\"",
+          "a.tab-bar-item \"需求\""
+        ]
+      }
+    },
+    "card": {
+      "fontSize=14|fontWeight=400|lineHeight=21|fontFamily=system-ui|padding=24 24 24 24|borderRadius=8|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(255, 255, 255)|height=360.5|minWidth=0|boxShadow=none|display=block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "21",
+          "fontFamily": "system-ui",
+          "padding": "24 24 24 24",
+          "borderRadius": "8",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(255, 255, 255)",
+          "height": "360.5",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "block"
+        },
+        "count": 1,
+        "samples": [
+          "div.add-project-card \"Git 仓库地址:分支（可选）:平台 Token（私有仓库必填）:— 无（仅适用\""
+        ]
+      }
+    },
+    "input-text": {
+      "fontSize=14|fontWeight=400|lineHeight=normal|fontFamily=Arial|padding=10 12 10 12|borderRadius=6|border=1 1 1 1|borderColor=rgb(226, 232, 240)|color=rgb(30, 41, 59)|background=rgb(248, 250, 252)|height=38|minWidth=0|boxShadow=none|display=inline-block": {
+        "fingerprint": {
+          "fontSize": "14",
+          "fontWeight": "400",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "10 12 10 12",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(226, 232, 240)",
+          "color": "rgb(30, 41, 59)",
+          "background": "rgb(248, 250, 252)",
+          "height": "38",
+          "minWidth": "0",
+          "boxShadow": "none",
+          "display": "inline-block"
+        },
+        "count": 2,
+        "samples": [
+          "input.form-input",
+          "input.form-input"
+        ]
+      }
+    },
+    "btn-primary": {
+      "fontSize=13|fontWeight=500|lineHeight=normal|fontFamily=Arial|padding=8 16 8 16|borderRadius=6|border=1 1 1 1|borderColor=rgb(79, 70, 229)|color=rgb(255, 255, 255)|background=rgb(79, 70, 229)|height=36|minWidth=auto|boxShadow=none|display=flex": {
+        "fingerprint": {
+          "fontSize": "13",
+          "fontWeight": "500",
+          "lineHeight": "normal",
+          "fontFamily": "Arial",
+          "padding": "8 16 8 16",
+          "borderRadius": "6",
+          "border": "1 1 1 1",
+          "borderColor": "rgb(79, 70, 229)",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(79, 70, 229)",
+          "height": "36",
+          "minWidth": "auto",
+          "boxShadow": "none",
+          "display": "flex"
+        },
+        "count": 1,
+        "samples": [
+          "button.btn.btn-primary \"开始添加\""
+        ]
+      }
+    }
+  }
+}

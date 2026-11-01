@@ -1,0 +1,17 @@
+{
+  "url": "http://localhost:9601/settings/preflight",
+  "title": "Nova Workbench",
+  "page": {
+    "rootFontSize": "14",
+    "rootColor": "rgb(30, 41, 59)",
+    "rootBackground": "rgb(248, 250, 252)",
+    "bodyFontSize": "14",
+    "bodyColor": "rgb(30, 41, 59)",
+    "bodyBackground": "rgba(0, 0, 0, 0)",
+    "bodyLineHeight": "21",
+    "bodyFontFamily": "system-ui"
+  },
+  "elementCount": 28,
+  "textLength": 0,
+  "roles": {}
+}
