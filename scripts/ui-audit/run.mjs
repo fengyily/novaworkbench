@@ -174,7 +174,7 @@ async function cmdPublish(findings, manifest) {
   }
 
   const raw = rawInfo.pushed ? rawInfo.url : '';
-  const { issueUrls, failures, created } = await createIssues({
+  const { issueUrls, failures, created, reused } = await createIssues({
     findings,
     runId: opts.runId,
     repo: `${owner}/${repo}`,
@@ -186,7 +186,9 @@ async function cmdPublish(findings, manifest) {
     outDir: runDir,
     prefix: opts.evidencePrefix,
   });
-  process.stdout.write(`publish: ${created} issue(s) created, ${failures.length} failed\n`);
+  process.stdout.write(
+    `publish: ${created} issue(s) opened, ${reused || 0} already existed, ${failures.length} failed\n`,
+  );
   for (const f of failures) process.stdout.write(`  FAILED ${f.id || ''}: ${f.reason}\n`);
 
   // Now that the issue numbers are known, re-render the report with the

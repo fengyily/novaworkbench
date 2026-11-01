@@ -100,8 +100,15 @@ export async function publishEvidence({ runId, outDir, branch, owner, repo, plat
       ['commit', '-m', `chore(ui-audit): evidence for run ${runId}${whyTrailer([`Screenshots and style probes for the ${runId} audit run, pinned to the audited commit so every issue can point at verifiable evidence.`])}`],
       { cwd: dir },
     );
+    // Re-running the publisher for a run whose evidence is already on the
+    // branch has nothing to commit; that is a success, not a failure.
+    const nothingToCommit = commit.code !== 0 && /nothing to commit/i.test(commit.stderr || '');
     const push = await git(['push', 'origin', branch], { cwd: dir });
-    return { commit: commit.stdout.trim().split('\n')[0], pushCode: push.code, pushErr: push.stderr.trim() };
+    return {
+      commit: nothingToCommit ? '(unchanged)' : commit.stdout.trim().split('\n')[0],
+      pushCode: push.code,
+      pushErr: push.stderr.trim(),
+    };
   });
 
   if (!outcome.ok) {
@@ -205,6 +212,7 @@ export function buildIssueBody(finding, { runId, raw, branch, prefix = 'docs/ui-
   );
   L.push('');
   L.push(`<!-- ui-audit-run: ${runId} -->`);
+  L.push(`<!-- ui-audit-finding: ${finding.id} -->`);
   L.push('');
   return L.join('\n');
 }
@@ -246,6 +254,8 @@ export async function createIssues({ findings, runId, repo, raw, branch, provide
   const capped = eligible.slice(0, maxIssues);
   const issueUrls = {};
   const failures = [];
+  let created = 0;
+  let reused = 0;
   const bodiesDir = ensureDir(path.join(outDir, 'issue-bodies'));
 
   if (provider === 'local') {
@@ -255,31 +265,32 @@ export async function createIssues({ findings, runId, repo, raw, branch, provide
       fs.writeFileSync(file, body);
       issueUrls[f.id] = `file://${file}`;
     }
-    return { issueUrls, failures, created: capped.length, provider: 'local' };
+    return { issueUrls, failures, created: capped.length, reused: 0, provider: 'local' };
   }
 
   if (!(await ghAvailable())) {
-    return { issueUrls, failures: [{ reason: 'gh CLI not available' }], created: 0, provider };
+    return { issueUrls, failures: [{ reason: 'gh CLI not available' }], created: 0, reused: 0, provider };
   }
 
   // Idempotency: the run id is stamped into every body, so an interrupted
-  // run can be resumed without opening duplicates.
+  // run can be resumed without opening duplicates. The title is what ties an
+  // existing issue back to the finding that produced it.
   const existing = await run(
     'gh',
-    ['issue', 'list', '--repo', repo, '--state', 'all', '--search', `"ui-audit-run: ${runId}"`, '--limit', '100', '--json', 'number,body'],
+    ['issue', 'list', '--repo', repo, '--state', 'all', '--search', `"ui-audit-run: ${runId}"`, '--limit', '100', '--json', 'number,body,title'],
     { timeout: 90000 },
   );
-  const already = new Set();
+  const alreadyByTitle = new Map();
   if (existing.code === 0) {
     try {
       for (const i of JSON.parse(existing.stdout)) {
-        const m = String(i.body || '').match(/ui-audit-run:\s*(\S+)/);
-        if (m) already.add(m[1]);
+        if (!/ui-audit-run:\s*\S+/.test(String(i.body || ''))) continue;
+        alreadyByTitle.set(String(i.title || '').trim(), i.number);
       }
     } catch { /* proceed without dedupe info */ }
   }
-  if (already.size) {
-    process.stdout.write(`  ${already.size} issue(s) from run ${runId} already exist — skipping those\n`);
+  if (alreadyByTitle.size) {
+    process.stdout.write(`  ${alreadyByTitle.size} issue(s) from run ${runId} already exist — skipping those\n`);
   }
 
   const labels = [LABEL_BASE, ...new Set(capped.map((f) => f.severity))];
@@ -290,6 +301,16 @@ export async function createIssues({ findings, runId, repo, raw, branch, provide
     const body = buildIssueBody(f, { runId, raw, branch, prefix });
     const bodyFile = path.join(bodiesDir, `${f.id}.md`);
     fs.writeFileSync(bodyFile, body);
+
+    // Already filed by an earlier run of this same audit run: keep the
+    // existing issue and point the report at it.
+    const already = alreadyByTitle.get(title);
+    if (already) {
+      issueUrls[f.id] = `https://github.com/${repo}/issues/${already}`;
+      reused++;
+      process.stdout.write(`  skipped ${title} — already #${already}\n`);
+      continue;
+    }
 
     const res = await run(
       'gh',
@@ -308,9 +329,10 @@ export async function createIssues({ findings, runId, repo, raw, branch, provide
     }
     const url = res.stdout.trim().split('\n').pop();
     issueUrls[f.id] = url;
+    created++;
     process.stdout.write(`  opened ${url}\n`);
   }
 
   writeJSON(path.join(outDir, 'issues.json'), { runId, issueUrls, failures });
-  return { issueUrls, failures, created: Object.keys(issueUrls).length, provider };
+  return { issueUrls, failures, created, reused, provider };
 }

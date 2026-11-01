@@ -80,11 +80,22 @@ export function renderReport({ runId, manifest, findings, stats, rawBase, issueU
   out.push('| # | 严重度 | 规则 | 标题 | 证据 | Issue |');
   out.push('|---|---|---|---|---|---|');
   sortFindings(live).forEach((f, i) => {
-    const shot = (f.evidence || []).find((e) => e.screenshot);
+    const shots = (f.evidence || []).filter((e) => e.screenshot);
+    const shot = shots[0];
     const url = shot ? rawUrl(rawBase, shot.screenshot, runId) : '';
-    const shotLink = url ? `[![${shot.route}](${url})](${url})` : '—';
-    const issue = issueUrls?.[f.id] ? `[#${issueUrls[f.id]}](${issueUrls[f.id]})` : '—';
-    out.push(`| ${i + 1} | ${f.severity} | ${f.rule} | ${f.title} | ${shotLink} | ${issue} |`);
+    // One thumbnail per row is noise when every runtime finding would show
+    // the same first screenshot. The number of routes involved is what tells
+    // the findings apart; the details section lists every screenshot.
+    const routeCount = new Set(shots.map((e) => e.route).filter(Boolean)).size;
+    const cell = url
+      ? `${routeCount || 1} 个路由 · [首张](${url})`
+      : routeCount
+        ? `${routeCount} 个路由`
+        : '—';
+    const issueUrl = issueUrls?.[f.id];
+    const issueNo = issueUrl ? String(issueUrl).match(/(\d+)\s*$/)?.[1] : '';
+    const issue = issueUrl ? `[#${issueNo || '?'}](${issueUrl})` : '—';
+    out.push(`| ${i + 1} | ${f.severity} | ${f.rule} | ${f.title} | ${cell} | ${issue} |`);
   });
   out.push('');
 
