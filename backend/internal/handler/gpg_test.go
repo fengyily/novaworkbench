@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -288,6 +290,9 @@ func TestBuildGPGProvisionScript_NoSecretMaterial(t *testing.T) {
 //   - Set GNUPGHOME via single-quote shell escaping.
 //   - Only pass --passphrase-file when the file is non-empty.
 //   - End with a fallback `exec gpg … "$@"` for unprotected keys.
+//   - Carry its own PATH contract + gpg presence guard, because git
+//     spawns it (as gpg.program) outside our SSH exec channel — see
+//     TestGPGScriptsWidenPath for the full rationale.
 func TestBuildGPGWrapperScript(t *testing.T) {
 	script := buildGPGWrapperScript("/tmp/g")
 
@@ -301,6 +306,11 @@ func TestBuildGPGWrapperScript(t *testing.T) {
 		// carry --passphrase-file. We assert it exists as a
 		// standalone `exec gpg …` line without that flag.
 		`exec gpg --batch --no-tty --pinentry-mode loopback "$@"`,
+		// The wrapper is spawned by git, not by us: it must widen
+		// PATH itself and fail fast with an actionable hint when
+		// gpg is genuinely missing.
+		`export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"`,
+		"command -v gpg",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("wrapper script missing fragment %q\nfull script:\n%s", want, script)
@@ -866,5 +876,219 @@ func TestVerifyImportedGPGKey_Corrupt(t *testing.T) {
 	}
 	if _, _, _, err := verifyImportedGPGKey(corrupt, ""); err == nil {
 		t.Fatal("verifyImportedGPGKey accepted a corrupt armored block")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PATH contract for the GPG scripts (Agent Server remote-coding fix)
+// ---------------------------------------------------------------------------
+
+// gpgPathPreludeLine is the PATH export every GPG script must carry. It is
+// the probe's PATH prefix (agent_server.go / runCheck) verbatim — the two
+// MUST stay in lockstep, otherwise the script could resolve a different
+// gpg binary than the one the environment check validated.
+const gpgPathPreludeLine = `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"`
+
+// TestGPGScriptsWidenPath asserts that every GPG script we push to an
+// Agent Server carries the PATH contract and a fail-fast gpg guard.
+//
+// The bug this pins down: SSH exec runs the remote `$SHELL -c "<cmd>"`
+// (non-login, non-interactive), so it inherits sshd's narrow PATH. A
+// Homebrew gpg at /opt/homebrew/bin/gpg was invisible there, and the
+// provision script died with `gpg: command not found` (exit 127) even
+// though 设置 → Agent 服务器 → 检查环境 reported "✓ gpg".
+//
+// The ordering assertion matters as much as the presence check: the guard
+// is only useful if it runs BEFORE the first gpg invocation, and the guard
+// is only meaningful if the PATH export ran before it.
+func TestGPGScriptsWidenPath(t *testing.T) {
+	scripts := map[string]string{
+		"provision": buildGPGProvisionScript("/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com", ""),
+		"generate":  buildGPGGenerateScript("/tmp/g", "Name <n@e.com>"),
+		"verify":    buildGPGVerifyScript("/tmp/g", "/tmp/g/key.asc"),
+		"wrapper":   buildGPGWrapperScript("/tmp/g"),
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			pathIdx := strings.Index(script, gpgPathPreludeLine)
+			if pathIdx < 0 {
+				t.Fatalf("script does not widen PATH:\n%s", script)
+			}
+			guardIdx := strings.Index(script, "command -v gpg")
+			if guardIdx < 0 {
+				t.Fatalf("script has no gpg presence guard:\n%s", script)
+			}
+			// Every script's first gpg call is a `gpg --batch …`
+			// invocation (the wrapper's is `exec gpg --batch …`).
+			callIdx := strings.Index(script, "gpg --batch")
+			if callIdx < 0 {
+				t.Fatalf("script never invokes gpg:\n%s", script)
+			}
+			if !(pathIdx < guardIdx && guardIdx < callIdx) {
+				t.Errorf("expected order PATH export < gpg guard < gpg call, got %d/%d/%d\n%s",
+					pathIdx, guardIdx, callIdx, script)
+			}
+		})
+	}
+}
+
+// TestClassifyGitSignFailure_GpgCommandNotFound pins the wording gap
+// that made the original failure unreadable: /bin/sh says
+// "gpg: command not found", which the classifier's "gpg: not found"
+// pattern never matched — the user got the generic "exit=127" wording
+// instead of "缺少 gpg，请点安装依赖".
+func TestClassifyGitSignFailure_GpgCommandNotFound(t *testing.T) {
+	want := "❌ Agent 服务器缺少 gpg，请到「设置 → Agent 服务器」点「安装依赖」"
+	for _, stderr := range []string{
+		"/Users/edy/.nova/tmp/nova-agent-2590862383.sh: line 7: gpg: command not found",
+		"sh: 1: gpg: command not found",
+		"GPG: COMMAND NOT FOUND",
+	} {
+		if got := classifyGitSignFailure(stderr); got != want {
+			t.Errorf("classifyGitSignFailure(%q) = %q, want %q", stderr, got, want)
+		}
+	}
+}
+
+// TestGPGMissingGuard_FailsFastWithActionableHint runs the guard on its
+// own with a PATH that cannot contain gpg and asserts it produces the
+// actionable Chinese hint + exit 127 — instead of the shell's raw
+// "gpg: command not found", which is what users used to see.
+//
+// The guard is exercised standalone (without the PATH prelude) so the
+// outcome is deterministic on every host: with the prelude in place the
+// widened PATH may legitimately contain a real gpg.
+func TestGPGMissingGuard_FailsFastWithActionableHint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh is not available on Windows")
+	}
+	home := t.TempDir()
+	emptyBin := t.TempDir()
+	scriptPath := filepath.Join(home, "guard.sh")
+	script := gpgMissingGuard("GPG 私钥导入") + "echo REACHED\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
+		t.Fatalf("write guard script: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", scriptPath)
+	cmd.Env = []string{"HOME=" + home, "PATH=" + emptyBin}
+	out, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("guard did not fail the script (err=%v)\noutput:\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 127 {
+		t.Errorf("guard exit code = %d, want 127 (command-not-found convention)", exitErr.ExitCode())
+	}
+	text := string(out)
+	if !strings.Contains(text, "未找到 gpg 可执行文件") {
+		t.Errorf("guard did not print the actionable hint:\n%s", text)
+	}
+	if !strings.Contains(text, "brew install gnupg") {
+		t.Errorf("guard hint does not tell the user how to install gpg:\n%s", text)
+	}
+	if strings.Contains(text, "gpg: command not found") {
+		t.Errorf("guard should replace the raw shell wording, got:\n%s", text)
+	}
+	if strings.Contains(text, "REACHED") {
+		t.Errorf("script continued past the guard:\n%s", text)
+	}
+}
+
+// TestGPGWrapperScript_FindsGpgOutsideDefaultPath is the behavioural
+// half of the fix: a gpg installed in $HOME/.local/bin (the first entry
+// of the widened PATH) must be found by the wrapper even though the
+// process' own PATH does not contain it.
+//
+// Before the fix the wrapper called a bare `exec gpg`, so git — which
+// spawns it outside our SSH exec channel — could not find a gpg living
+// outside sshd's default PATH, and every signed commit failed.
+func TestGPGWrapperScript_FindsGpgOutsideDefaultPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh is not available on Windows")
+	}
+	home := t.TempDir()
+	emptyBin := t.TempDir()
+
+	// A fake gpg in the FIRST widened directory. It shadows any real gpg
+	// further down the PATH, so the assertion holds on every host.
+	fakeBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	fakeGpg := filepath.Join(fakeBin, "gpg")
+	if err := os.WriteFile(fakeGpg, []byte("#!/bin/sh\necho \"FAKE-GPG-CALLED\"\n"), 0700); err != nil {
+		t.Fatalf("write fake gpg: %v", err)
+	}
+
+	scriptPath := filepath.Join(home, "wrapper.sh")
+	script := buildGPGWrapperScript(filepath.Join(home, "gnupg"))
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", scriptPath)
+	cmd.Env = []string{"HOME=" + home, "PATH=" + emptyBin}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed (err=%v)\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "FAKE-GPG-CALLED") {
+		t.Errorf("wrapper did not resolve the gpg outside the default PATH:\n%s", out)
+	}
+}
+
+// TestGPGProvisionScript_FailsFastWhenGpgMissing reproduces the reported
+// failure end to end: the provision script is executed with the narrow
+// PATH an SSH exec channel provides, and it must fail with our own hint
+// (exit 127) rather than the shell's "gpg: command not found".
+//
+// Skipped on hosts that really have gpg inside one of the widened
+// directories — there the script legitimately finds it and the missing-gpg
+// branch is unreachable. The guard's own behaviour is covered
+// unconditionally by TestGPGMissingGuard_FailsFastWithActionableHint.
+func TestGPGProvisionScript_FailsFastWhenGpgMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh is not available on Windows")
+	}
+	home := t.TempDir()
+	gnupgHome := filepath.Join(home, "gnupg")
+	scriptPath := filepath.Join(home, "provision.sh")
+	script := buildGPGProvisionScript(gnupgHome, filepath.Join(home, "wt"), filepath.Join(home, "base"), "Name", "n@e.com", "")
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
+		t.Fatalf("write provision script: %v", err)
+	}
+
+	// Can the widened PATH of THIS host resolve gpg? If yes the missing
+	// branch is unreachable here and the test has nothing to prove.
+	wideDirs := []string{
+		filepath.Join(home, ".local", "bin"),
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
+		"/usr/bin",
+		"/bin",
+	}
+	for _, dir := range wideDirs {
+		if fi, err := os.Stat(filepath.Join(dir, "gpg")); err == nil && !fi.IsDir() {
+			t.Skipf("gpg is installed in %s on this host; the missing-gpg branch cannot be simulated", dir)
+		}
+	}
+
+	cmd := exec.Command("/bin/sh", scriptPath)
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("provision script did not fail (err=%v)\noutput:\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 127 {
+		t.Errorf("provision exit code = %d, want 127", exitErr.ExitCode())
+	}
+	text := string(out)
+	if !strings.Contains(text, "未找到 gpg 可执行文件") {
+		t.Errorf("provision script did not print the actionable hint:\n%s", text)
+	}
+	if strings.Contains(text, "gpg: command not found") {
+		t.Errorf("provision script still emits the raw shell wording:\n%s", text)
 	}
 }

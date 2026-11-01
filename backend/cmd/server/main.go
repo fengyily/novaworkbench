@@ -262,6 +262,13 @@ func main() {
 	// /api/code-reviews/{id}/attachments is all that's needed.
 	reviewAttachmentSvc := service.NewCodeReviewAttachmentService(database)
 	reviewAttachmentH := handler.NewAttachmentHandler(reviewAttachmentSvc)
+	// Authorized directories: the directories the user granted Claude read
+	// access to for a requirement. Handed to the claude CLI as --add-dir,
+	// which is what keeps a plan-mode stage from stalling on a path outside
+	// its working directory. Metadata in requirement_dirs; the directories
+	// themselves stay where they are on disk.
+	requirementDirSvc := service.NewRequirementDirService(database)
+	requirementDirH := handler.NewRequirementDirHandler(requirementDirSvc, attachmentSvc)
 	// Persisted Review sessions — owner of the attachments above, carrier of
 	// the user-written 改动目标 description, landing spot for the graded
 	// (P0/P1/P3) report.
@@ -328,6 +335,7 @@ func main() {
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
+	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
 	// its Create handler can dispatch the optional 启动计划 (immediate wizard
 	// run / scheduled task) atomically. See requirement_launch.go and
@@ -407,6 +415,11 @@ func main() {
 	// attachment handler below — wiring order: handler builds first,
 	// wizard then SetAttachmentSvc.
 	wizardH.SetAttachmentSvc(attachmentSvc)
+	// Authorized-directory service: the directories the user granted Claude
+	// read access to for a requirement. The wizard passes them to the claude
+	// CLI as --add-dir (and names them in the prompt) so a plan-mode stage
+	// can read them without a permission decision nobody is there to make.
+	wizardH.SetRequirementDirSvc(requirementDirSvc)
 	// Design revision service: persistence for the 「重新生成技术方案」 flow
 	// (see req_11e485759f583db8). The wizard freezes the current plan into
 	// design_revisions BEFORE a regenerate run starts, and the
@@ -416,6 +429,13 @@ func main() {
 	// the routes register handlers that return 500 "service unavailable".
 	designRevSvc := service.NewDesignRevisionService(database)
 	wizardH.SetDesignRevisionSvc(designRevSvc)
+	// requirement_qa_turns — the 阶段答疑 (stage Q&A) threads. The wizard
+	// handler owns the write path (fork a QA session off the design /
+	// coding session, run the turn, persist the answer); the service owns
+	// the turn rows. Nil-safe: without it the Q&A endpoints answer
+	// "service not enabled".
+	qaSvc := service.NewRequirementQAService(database)
+	wizardH.SetRequirementQASvc(qaSvc)
 	issueMonH := handler.NewIssueMonitorHandler(issueMonSvc, projectSvc)
 	issueMonSemSize := 4
 	if env := os.Getenv("NOVA_ISSUE_MONITOR_CONCURRENCY"); env != "" {
@@ -781,6 +801,13 @@ func main() {
 	mux.HandleFunc("PUT /api/requirements/{id}/marks", reqH.UpdateMarks)
 	// SetParent nests a requirement under a master requirement (one level).
 	mux.HandleFunc("PUT /api/requirements/{id}/parent", reqH.SetParent)
+	// References: the requirements this one points at for design context.
+	// GET returns the resolved set (direct + inherited from the master
+	// requirement); PUT replaces the direct set in one call. The referenced
+	// requirements' bodies are injected into the design prompt server-side —
+	// they are never part of either response.
+	mux.HandleFunc("GET /api/requirements/{id}/references", reqH.GetReferences)
+	mux.HandleFunc("PUT /api/requirements/{id}/references", reqH.SetReferences)
 	// PromoteFromIdea: turns a finished idea-discussion thread into a new
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.
@@ -788,6 +815,14 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)
+	// 阶段答疑 (stage Q&A) — a read-only Q&A thread forked off the
+	// requirement's design / coding session. The POST that asks the
+	// question lives under /api/wizard (it dispatches a background job);
+	// the three read/mutate endpoints live here next to the other
+	// requirement-scoped data.
+	mux.HandleFunc("GET /api/requirements/{id}/qa-chat/{stage}", wizardH.ListStageQA)
+	mux.HandleFunc("DELETE /api/requirements/{id}/qa-chat/{stage}", wizardH.ResetStageQA)
+	mux.HandleFunc("DELETE /api/requirements/{id}/qa-chat/{stage}/turns/{tid}", wizardH.DeleteStageQATurn)
 	mux.HandleFunc("GET /api/requirements/{id}/coding-chat", reqH.GetCodingChat)
 	mux.HandleFunc("PUT /api/requirements/{id}/coding-chat", reqH.SaveCodingChat)
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
@@ -802,6 +837,11 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/attachments/{att_id}/content", attachmentH.Content)
 	mux.HandleFunc("PUT /api/requirements/{id}/attachments/{att_id}", attachmentH.UpdateDescription)
 	mux.HandleFunc("DELETE /api/requirements/{id}/attachments/{att_id}", attachmentH.Delete)
+	// Authorized directories — the directories Claude may read for this
+	// requirement (handed to the CLI as --add-dir).
+	mux.HandleFunc("POST /api/requirements/{id}/dirs", requirementDirH.Add)
+	mux.HandleFunc("GET /api/requirements/{id}/dirs", requirementDirH.List)
+	mux.HandleFunc("DELETE /api/requirements/{id}/dirs/{dir_id}", requirementDirH.Delete)
 	// Wiki archive / unarchive — distinct from the regular archive above
 	// (which is bound to status='done' + design_docs). WikiArchive
 	// accepts status ∈ {designed, done} and writes source_type='wiki_doc'
@@ -830,6 +870,12 @@ func main() {
 	// Three-role stage-gate: analyst → architect → developer.
 	mux.HandleFunc("POST /api/wizard/analyst-chat", wizardH.AnalystChat)
 	mux.HandleFunc("POST /api/wizard/developer-chat", wizardH.DeveloperChat)
+	// 阶段答疑 (stage Q&A) — asks one question against the requirement's
+	// design / coding session. The handler forks a dedicated QA session
+	// (so the production session stays untouched), dispatches the turn as
+	// a background job and returns {job_id, turn_id}; the answer streams
+	// through the shared GET /api/wizard/jobs/{id}/stream channel.
+	mux.HandleFunc("POST /api/wizard/qa-chat", wizardH.AskStageQA)
 	mux.HandleFunc("POST /api/wizard/architect-design", wizardH.ArchitectDesign)
 	// Design-doc import — bypasses Claude / JobStore / SSE so the user can
 	// paste or upload an externally-generated Markdown plan and land
@@ -851,6 +897,11 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
 	mux.HandleFunc("POST /api/wizard/adjust-coding", wizardH.AdjustCoding)
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
+	// 继续设计 — resumes an interrupted architect-design session (--resume
+	// design_session_id) and asks Claude to finish the plan. Recovery path
+	// for backend restarts / killed runs / proxy errors; the counterpart of
+	// continue-coding. Reuses the shared job-stream SSE endpoint.
+	mux.HandleFunc("POST /api/wizard/continue-design", wizardH.ContinueDesign)
 	// "立即生成方案并开发" — chains architect-design + start-coding back-to-back
 	// with per-stage model / Claude-config / Agent-server / branch / split_tasks
 	// overrides. Mirrors scheduled design_and_coding but writes no

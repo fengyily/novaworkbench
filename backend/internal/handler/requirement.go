@@ -22,7 +22,7 @@ type RequirementHandler struct {
 	// wizardH / schedSvc power the optional 启动计划 (launch spec) on Create —
 	// dispatchLaunch (requirement_launch.go) needs both to dispatch an
 	// immediate wizard run or to insert a scheduled_tasks row.
-	wizardH *WizardHandler
+	wizardH  *WizardHandler
 	schedSvc *service.ScheduledTaskService
 }
 
@@ -64,9 +64,9 @@ func (h *RequirementHandler) healStaleJobs(req *model.Requirement) {
 		return
 	}
 	type pending struct {
-		val    string
-		clear  func(id, jobID string) error
-		field  *string
+		val   string
+		clear func(id, jobID string) error
+		field *string
 	}
 	checks := []pending{
 		{req.DesignJobID, h.svc.UpdateDesignJob, &req.DesignJobID},
@@ -348,6 +348,60 @@ func (h *RequirementHandler) SetParent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
+// GetReferences returns the requirement's resolved reference set: the
+// references the user picked directly plus the ones inherited from its master
+// requirement. The response carries the display fields (title / status / kind
+// / project) the picker and the detail-page chip row need, but NOT the
+// referenced requirements' bodies — those are injected into the design prompt
+// server-side and never leave the backend.
+func (h *RequirementHandler) GetReferences(w http.ResponseWriter, r *http.Request) {
+	items, err := h.svc.ListReferences(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrRequirementNotFound) {
+			writeError(w, 404, "NOT_FOUND", "Requirement not found")
+			return
+		}
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
+// SetReferences replaces the requirement's **direct** reference set.
+// Body shape: {"references": [{"requirement_id": "req_x", "note": "..."}]}.
+//
+// The whole set is replaced in one call (same shape as the tags / marks /
+// parent endpoints) so the client never has to reason about diffs. The
+// response is the resolved set (direct + inherited), so the UI can refresh
+// its chips from a single round-trip.
+//
+// Errors are surfaced verbatim (same treatment as SET_PARENT_FAILED): the
+// only rejections are a self-reference and a target that no longer exists.
+func (h *RequirementHandler) SetReferences(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		References []model.RequirementReferenceInput `json:"references"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	items, err := h.svc.SetReferences(r.PathValue("id"), body.References)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrRequirementNotFound):
+			writeError(w, 404, "NOT_FOUND", "Requirement not found")
+		case errors.Is(err, service.ErrReferenceSelf):
+			writeError(w, 400, "INVALID", err.Error())
+		case errors.Is(err, service.ErrReferenceNotFound):
+			writeError(w, 400, "INVALID", err.Error())
+		default:
+			writeError(w, 400, "SET_REFERENCES_FAILED", err.Error())
+		}
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
 // Close force-closes a requirement from any non-archived state. Unlike
 // PATCH /status (which is gated by validTransitions and only reachable from
 // `developing` → `done` via the natural "开发完成" gate), Close lets the
@@ -470,7 +524,8 @@ func (h *RequirementHandler) Delete(w http.ResponseWriter, r *http.Request) {
 // Body: {"ids": ["req_a", "req_b"]}. Each id is deleted independently — one
 // failing id does not undo the others — so the response always reports both
 // counters and a partial failure is NOT an HTTP error:
-//   { "deleted": 2, "failed": [{ "id": "req_c", "message": "..." }] }
+//
+//	{ "deleted": 2, "failed": [{ "id": "req_c", "message": "..." }] }
 //
 // The id cap keeps a single request from monopolising the single-writer
 // SQLite pool for an unbounded amount of time.
@@ -560,7 +615,9 @@ func (h *RequirementHandler) GetChatHistory(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *RequirementHandler) SaveChatHistory(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Messages string `json:"messages"` }
+	var req struct {
+		Messages string `json:"messages"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return
@@ -588,7 +645,9 @@ func (h *RequirementHandler) GetCodingChat(w http.ResponseWriter, r *http.Reques
 // frontend calls this after each completed turn so the conversation survives
 // a page refresh; the message array is the full developer-chat history.
 func (h *RequirementHandler) SaveCodingChat(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Messages string `json:"messages"` }
+	var req struct {
+		Messages string `json:"messages"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return

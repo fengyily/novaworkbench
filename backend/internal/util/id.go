@@ -5,9 +5,10 @@ import (
 	"fmt"
 )
 
-// NewID returns "<prefix>_<8 hex chars>" from crypto/rand. The optional nBytes
-// overrides the default 8-byte length; pass 0 to keep the default. With an
-// empty prefix the result is a bare hex string (used for session tokens).
+// NewID returns "<prefix>_<16 hex chars>" from crypto/rand (8 bytes hex-
+// encoded). The optional nBytes overrides the default 8-byte length; pass 0
+// to keep the default. With an empty prefix the result is a bare hex string
+// (used for session tokens).
 func NewID(prefix string, nBytes ...int) string {
 	n := 8
 	if len(nBytes) > 0 && nBytes[0] > 0 {

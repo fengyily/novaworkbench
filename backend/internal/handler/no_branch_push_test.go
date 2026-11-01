@@ -13,37 +13,41 @@ import (
 	"github.com/novaworkbench/backend/internal/store"
 )
 
-// TestPushBaseRefspecArgs pins the two push shapes.
+// TestPushBaseRefspecArgs pins the push shape used by the no-branch mode.
 //
-// The detached shape is the one the no-branch mode relies on: `HEAD:refs/heads/<base>`
-// advances the base branch without creating anything, and it must NOT carry
-// `-u` — a detached HEAD cannot have an upstream and git refuses with
-// "cannot set up tracking information".
+// The refspec form (`HEAD:refs/heads/<base>`) is the ONLY shape: it advances
+// the base branch without creating anything, and it must NOT carry `-u` —
+// a detached HEAD cannot have an upstream and git refuses with "cannot set up
+// tracking information".
+//
+// It is also the only shape that survives the coding agent checking out a
+// branch of its own inside the isolated worktree (req_1a42496198026380,
+// 2026-10-27): `push origin <base>` would push the LOCAL base branch instead
+// of the agent's commits, while `HEAD:refs/heads/<base>` pushes whatever HEAD
+// points at.
 func TestPushBaseRefspecArgs(t *testing.T) {
-	detached := pushBaseRefspecArgs(true, "main")
+	got := pushBaseRefspecArgs("main")
 	want := []string{"push", "origin", "HEAD:refs/heads/main"}
-	if len(detached) != len(want) {
-		t.Fatalf("detached args = %v, want %v", detached, want)
+	if len(got) != len(want) {
+		t.Fatalf("args = %v, want %v", got, want)
 	}
 	for i := range want {
-		if detached[i] != want[i] {
-			t.Fatalf("detached args = %v, want %v", detached, want)
+		if got[i] != want[i] {
+			t.Fatalf("args = %v, want %v", got, want)
 		}
 	}
-	for _, a := range detached {
+	for _, a := range got {
 		if a == "-u" {
-			t.Fatalf("detached push must not set an upstream (-u): %v", detached)
+			t.Fatalf("the no-branch push must not set an upstream (-u): %v", got)
 		}
 	}
 
-	branch := pushBaseRefspecArgs(false, "main")
-	wantBranch := []string{"push", "-u", "origin", "main"}
-	if len(branch) != len(wantBranch) {
-		t.Fatalf("branch args = %v, want %v", branch, wantBranch)
-	}
-	for i := range wantBranch {
-		if branch[i] != wantBranch[i] {
-			t.Fatalf("branch args = %v, want %v", branch, wantBranch)
+	// A different base is honored verbatim.
+	other := pushBaseRefspecArgs("develop")
+	wantOther := []string{"push", "origin", "HEAD:refs/heads/develop"}
+	for i := range wantOther {
+		if other[i] != wantOther[i] {
+			t.Fatalf("args = %v, want %v", other, wantOther)
 		}
 	}
 }

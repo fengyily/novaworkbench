@@ -41,7 +41,13 @@ package handler
 // 'preflight 失败（unrecognized_model）'.
 // 0.4.3: /v1/health reports worktreeRoot so the backend can detect a worker
 // started with a stale NOVA_AGENT_WORKTREE_ROOT and relaunch it before a run.
-const agentWorkerVersion = "0.4.3"
+// 0.4.4: /v1/run accepts addDirs — directories the session is granted read
+// access to via the CLI's --add-dir flag. Without it a plan-mode run on the
+// agent host cannot read anything outside its working directory (the
+// permission decision has nobody to make it in a non-interactive run), so
+// the architect stage would stall on the agent host while working fine
+// locally. Older workers silently drop the field, hence the bump.
+const agentWorkerVersion = "0.4.4"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -91,6 +97,8 @@ const agentWorkerServerMJS = `// nova-agent-worker — HTTP/NDJSON bridge betwee
 //                       source of auth / base URL / model pinning).
 //   overrideSettingSources (legacy) → --setting-sources project,local
 //                       (drop only the user source).
+//   addDirs        → --add-dir <dir>... (directories the session is granted
+//                       read access to; the paths are resolved on THIS host)
 //
 // Two reliability layers:
 //   1) Preflight — before invoking claude we spawn 'claude --print ping'
@@ -442,13 +450,27 @@ app.post('/v1/run', async (req, res) => {
   // Real-run entry log — preflight already passed, just record the boundary.
   console.error('[nova-agent-worker] exec: ' + realRendered);
   res.write(JSON.stringify({ type: 'log', content: '执行命令: ' + realRendered }) + '\n');
-  if (typeof res.flush === 'function') res.flush();
+  // For resume runs the prompt travels via stdin (see buildClaudeArgs +
+  // anthropics/claude-code#4521 / #5187); surface that in the job panel so
+  // the operator can tell a "no -p in argv" log line from a regression.
+  const stdinPrompt = !!opts.resume;
+  if (stdinPrompt) {
+    res.write(JSON.stringify({
+      type: 'log',
+      content: 'prompt 经 stdin 投递（resume 模式，-p 位置参数会被 CLI 丢弃）',
+    }) + '\n');
+    if (typeof res.flush === 'function') res.flush();
+  }
   let proc;
   try {
     proc = spawn(claudeCmd.cmd, args, {
       cwd: opts.workDir,
       env: claudeCmd.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // resume: stdin must be piped so we can write the prompt after spawn
+      // (CLI ignores '-p' once --resume is set; see anthropics/claude-code
+      // #4521 / #5187). Non-resume runs keep stdin closed — same as the
+      // historical behaviour.
+      stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
     // spawn() can throw synchronously when the binary is not found (rare
@@ -467,6 +489,55 @@ app.post('/v1/run', async (req, res) => {
 
   let stderr = '';
   proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+  // resume+fork path: pipe the prompt through stdin. claude CLI ignores '-p'
+  // when combined with --fork-session --resume (anthropics/claude-code#4521 /
+  // #5187), so we feed the same prompt via stdin instead. The forked session
+  // daemon picks up the prompt from the PTY its bg-pty-host parent created;
+  // ending the stdin write closes our half of the pipe so claude sees EOF.
+  // Failure policy: a write error here is fatal for the run — better to
+  // surface it than let the forked session silently exit with no prompt.
+  if (stdinPrompt) {
+    try {
+      // Attach the error listener BEFORE write/end so an EPIPE on the very
+      // first chunk (the parent claude exits before we get there) still
+      // surfaces instead of throwing an unhandled 'error' on the stream.
+      proc.stdin.on('error', (err) => {
+        console.error('[nova-agent-worker] stdin write failed: ' + (err && err.message || err));
+        res.write(JSON.stringify({
+          type: 'error',
+          errorCategory: 'stdin_prompt_failed',
+          error: 'stdin 写入失败：' + (err && err.message || String(err)),
+          stderr: stderr || '',
+          code: -1,
+        }) + '\n');
+        try { proc.kill('SIGKILL'); } catch (_) { /* already dead */ }
+        res.end();
+      });
+      proc.stdin.write(opts.prompt, (err) => {
+        // Async write callback — fires once the prompt has been flushed to
+        // the kernel pipe (or rejected). Closing stdin here is the standard
+        // pattern for "deliver one shot, then EOF". Errors that surface only
+        // asynchronously (after end()) are caught by the listener above.
+        if (err) {
+          console.error('[nova-agent-worker] stdin async write failed: ' + err.message);
+        }
+      });
+      proc.stdin.end();
+    } catch (e) {
+      console.error('[nova-agent-worker] stdin write threw: ' + (e && e.message || e));
+      try { proc.kill('SIGKILL'); } catch (_) { /* already dead */ }
+      res.write(JSON.stringify({
+        type: 'error',
+        errorCategory: 'stdin_prompt_failed',
+        error: 'stdin 写入抛出：' + (e && e.message || String(e)),
+        stderr: stderr || '',
+        code: -1,
+      }) + '\n');
+      res.end();
+      return;
+    }
+  }
   proc.stdout.on('data', (chunk) => {
     // claude emits one JSON object per line; forward verbatim so the Go
     // parser can json.Unmarshal each line directly. Flush after every
@@ -987,6 +1058,7 @@ function buildRunRequest(body) {
     claudeConfigId,
     claudeBin,
     extraPaths,
+    addDirs,
   } = body;
 
   if (!workDir) {
@@ -1053,6 +1125,13 @@ function buildRunRequest(body) {
     // joins the newline-separated DB column before sending).
     claudeBin: typeof claudeBin === 'string' ? claudeBin : '',
     extraPaths: typeof extraPaths === 'string' ? extraPaths : '',
+    // Directories the session is granted read access to via the CLI's
+    // --add-dir flag. The paths are interpreted on THIS host (the agent
+    // server), so a grant made for a local run means nothing here unless
+    // the same path exists on the agent host — the CLI ignores unknown
+    // --add-dir paths, so a stale grant degrades to "no access" rather
+    // than failing the run.
+    addDirs: Array.isArray(addDirs) ? addDirs.filter((d) => typeof d === 'string' && d) : [],
     settingSources,
   };
 }
@@ -1148,8 +1227,23 @@ function truncate(s, n) {
 // --permission-mode / --dangerously-skip-permissions per the CLI's flag
 // parser. We follow the same ordering as gateway.go so a regression in one
 // doesn't slip past the other.
+//
+// Prompt transport: when resume is set (regardless of explicit fork), the
+// prompt is delivered via stdin instead of the '-p <prompt>' positional.
+// The Claude CLI's daemonized '--resume <id>' path silently drops '-p' —
+// observed both with and without '--fork-session' — the forked/continued
+// session starts but receives no prompt and the run ends with an empty
+// result (anthropics/claude-code#4521 / #5187, plus our own ps-top
+// observation of 'claude bg-pty-host ... -- claude.exe --session-id
+// <new-uuid> --fork-session --resume <orig.jsonl>' carrying no '-p' even
+// when the Go side passed Fork:false). Without '--resume' the CLI honours
+// '-p' normally, so we only switch delivery channels on resume runs.
 function buildClaudeArgs(opts, settingsArg) {
-  const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose'];
+  const args = [];
+  if (!opts.resume) {
+    args.push('-p', opts.prompt);
+  }
+  args.push('--output-format', 'stream-json', '--verbose');
   // Setting-sources always present so the user can't accidentally land on
   // the CLI default (which loads ~/.claude/settings.json over process env
   // and would silently shadow the platform's auth). The default "" drops
@@ -1210,6 +1304,20 @@ function buildClaudeArgs(opts, settingsArg) {
   }
   if (opts.disallowedTools.length > 0) {
     args.push('--disallowedTools', opts.disallowedTools.join(' '));
+  }
+
+  // --add-dir grants the session read access to directories outside its
+  // working directory. It is a VARIADIC option (the CLI takes
+  // '--add-dir <dir>...'), so it must be the LAST flag in argv — anything
+  // after it would be swallowed as another directory value.
+  //
+  // This is what unblocks the plan-mode stages: in plan mode a read of a
+  // path outside the working directory needs a permission decision, and a
+  // non-interactive run has nobody to make it. The grant also widens the
+  // session's search scope so Glob / Grep cover the granted trees.
+  if (opts.addDirs.length > 0) {
+    args.push('--add-dir');
+    args.push(...opts.addDirs);
   }
 
   return args;

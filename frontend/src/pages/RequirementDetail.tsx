@@ -1,16 +1,18 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, type DesignRevision, defaultBranchName, type RequirementReference } from '../api/client';
 import { configIdForModel } from '../utils/modelConfig';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
+import StageQAChat from '../components/StageQAChat';
 import ModelSelect from '../components/ModelSelect';
 import RequirementEditForm from '../components/RequirementEditForm/RequirementEditForm';
 import SubTaskPanel from '../components/SubTaskPanel';
 import AttachmentPanel from '../components/AttachmentPanel';
+import DirectoryPanel from '../components/DirectoryPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
@@ -1813,6 +1815,21 @@ export default function RequirementDetail() {
     return () => { alive = false; };
   }, [req?.id, req?.project_id, req?.parent_id]);
   const hasChildReqs = !!req && projectReqs.some(x => x.parent_id === req.id);
+
+  // ── Referenced requirements (read-only header chips) ────────────────────
+  // The requirements this one points at for design context. The backend
+  // injects each referenced requirement's description + existing plan into the
+  // architect's prompt; the header only surfaces the chip row so the user can
+  // see (and jump to) what informed the design.
+  const [refs, setRefs] = useState<RequirementReference[]>([]);
+  useEffect(() => {
+    if (!req?.id) { setRefs([]); return; }
+    let alive = true;
+    requirementsApi.getReferences(req.id)
+      .then(rows => { if (alive) setRefs(rows || []); })
+      .catch(() => { if (alive) setRefs([]); });
+    return () => { alive = false; };
+  }, [req?.id]);
   const handleParentChange = async (parentId: string) => {
     if (!req) return;
     setParentSaving(true);
@@ -2276,6 +2293,39 @@ export default function RequirementDetail() {
     } catch (err: any) {
       setDesignLines([{ type: 'error', content: err.message }]);
       setDesigning(false);
+    }
+  };
+
+  // 继续设计 — recovery for an INTERRUPTED design run (backend restart, killed
+  // claude process, upstream 504, stalled stream). Mirrors ContinueCoding:
+  // resume the SAME design session (--resume) instead of regenerate, which
+  // would fork a brand-new conversation and freeze the partial plan as a
+  // history version.
+  //
+  // The backend owns the execution environment (model / Claude config / Agent
+  // server / base branch), so the toolbar pickers do NOT travel with this
+  // request: resuming is defined as "keep running the round that was
+  // interrupted", and switching hosts mid-conversation can leave the session
+  // file behind on the other machine. Only the designer-context toggle is
+  // forwarded — it shapes the system prompt and cannot affect whether
+  // --resume finds the conversation.
+  const runContinueDesign = async () => {
+    if (!id || designing) return;
+    // Same immediate-feedback prologue as runArchitectDesign: flip the working
+    // state before the round-trip so the button cannot be double-submitted
+    // while the request is in flight.
+    setDesigning(true);
+    setDesignLines([]);
+    setDesignError(false);
+    setKnowledgeItems([]);
+    setKnowledgeEmpty(false);
+    try {
+      const { job_id } = await wizardApi.continueDesign(id, !useRoleContextDesign);
+      streamDesignJob(job_id);
+    } catch (err: any) {
+      setDesignLines([{ type: 'error', content: err.message }]);
+      setDesigning(false);
+      setDesignError(true);
     }
   };
 
@@ -3109,6 +3159,12 @@ export default function RequirementDetail() {
   // Design (architect) stream state. While the job runs the panel stays open;
   // once finished it collapses behind the "Thinking process" toggle.
   const designProcessActive = designing || !!req.design_job_id;
+  // 继续设计 is offered only when a previous design run left a resumable
+  // session behind AND no run is live. status=designing IS the interruption
+  // signal: a successful run auto-promotes to designed, and every terminal
+  // failure path clears design_job_id while keeping design_session_id.
+  const canContinueDesign =
+    req.status === 'designing' && !!req.design_session_id && !designing && !req.design_job_id;
   // Keep the panel open while the job runs OR when the last run errored, so
   // the error line stays visible instead of collapsing behind the toggle.
   const designPanelOpen = designProcessActive || designError || showDesignProcess;
@@ -3281,7 +3337,13 @@ export default function RequirementDetail() {
             <div className="preflight-header">
               <div className="preflight-eyebrow">{t('requirements.detail2.regenerateEyebrow')}</div>
               <h3 className="preflight-title">{t('requirements.detail2.regenerateConfirmTitle')}</h3>
-              <p className="preflight-subtitle">{t('requirements.detail2.regenerateConfirmBody')}</p>
+              {/* When the interrupted run produced no plan there is nothing to
+                  freeze, so the default "current plan will be kept as a
+                  history version" copy would promise a version that will never
+                  appear. Use the empty-state wording instead. */}
+              <p className="preflight-subtitle">{t(hasDesign
+                ? 'requirements.detail2.regenerateConfirmBody'
+                : 'requirements.detail2.regenerateConfirmBodyEmpty')}</p>
             </div>
 
             {/* Flight strip — single DESIGN leg + GIT base mirror. Keeps
@@ -4017,6 +4079,29 @@ export default function RequirementDetail() {
               .map(x => <option key={x.id} value={x.id}>{x.title}</option>)}
           </select>
         </label>
+        {/* Referenced requirements — read-only chip row next to the master
+            picker. Each chip links to the referenced requirement so the user
+            can jump to what informed this design. An inherited chip (origin
+            = parent) is badged so it's clear the master requirement supplied
+            it, not the user. */}
+        {refs.length > 0 && (
+          <span className="req-ref-header" aria-label={t('requirements.references.detailLabel')}>
+            <span className="req-ref-header-label">{t('requirements.references.detailLabel')}</span>
+            {refs.map(r => (
+              <Link
+                key={`${r.requirement_id}-${r.origin}`}
+                to={`/requirements/${r.requirement_id}`}
+                className={`req-ref-header-chip${r.origin === 'parent' ? ' is-inherited' : ''}`}
+                title={r.note || r.title || r.requirement_id}
+              >
+                {r.title || r.requirement_id}
+                {r.origin === 'parent' && (
+                  <span className="req-ref-header-origin">{t('requirements.references.originParent')}</span>
+                )}
+              </Link>
+            ))}
+          </span>
+        )}
         {/* Dev source: Agent Server (with server name + model) or local dev.
             Written when the coding stage starts; not rendered for
             requirements that have not entered coding. */}
@@ -4597,6 +4682,15 @@ export default function RequirementDetail() {
           needs the requirement id. */}
       <AttachmentPanel ownerId={req.id} />
 
+      {/* Authorized read directories — the directory-shaped sibling of the
+          attachment panel above. Files get copied into NovaWorkbench's store;
+          a directory stays where it is and the backend hands the path to the
+          claude CLI as --add-dir. That's what keeps the plan-mode architect
+          stage from stalling on a path outside its working directory (a
+          non-interactive run has nobody to approve the permission request).
+          Same lifetime as the attachments: every stage reads the same set. */}
+      <DirectoryPanel requirementId={req.id} />
+
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
           so we render it standalone — no outer "Analysis" card around it, which
@@ -5165,6 +5259,21 @@ export default function RequirementDetail() {
                   {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
                 </button>
               )}
+              {/* 「继续设计」 — recovery for an interrupted run. Rendered next to
+                  「重新生成方案」 so the two run-level recoveries read as one
+                  pair: continue the interrupted thread vs. start a brand-new
+                  one. Only appears while the stage is still `designing` with a
+                  resumable session and no live job (see canContinueDesign). */}
+              {hasDesign && canContinueDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={runContinueDesign}
+                  disabled={!!busy || designing}
+                  title={t('requirements.detail2.continueDesignTitle')}
+                >
+                  <IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.continueDesignBtn')}
+                </button>
+              )}
               {/* 「重新生成方案」 — available from the moment a plan exists.
                   designing = a partial in-flight plan the user wants to throw
                   away; designed = the finished plan they want a second take
@@ -5370,12 +5479,47 @@ export default function RequirementDetail() {
                 {/* Wizard-stage CTA — unified to `btn btn-sm` per the
                     page-wide button unification (one visual family
                     everywhere). Visual primacy comes from being the
-                    leftmost action, not from a btn-primary treatment. */}
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
-                  {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
-                    ? <><IconHourglass size={13} className="btn-icon" />...</>
-                    : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
-                </button>
+                    leftmost action, not from a btn-primary treatment.
+                    A non-empty design_session_id means a previous run was
+                    started and interrupted, so the label flips to
+                    「继续设计」 and the click resumes that thread instead of
+                    starting a fresh one (the backend would resume it either
+                    way, but the continuation prompt tells Claude to finish
+                    what it started rather than redo the exploration). */}
+                {req.design_session_id ? (
+                  <button
+                    className="btn btn-sm"
+                    onClick={runContinueDesign}
+                    disabled={!!busy || designing}
+                    title={t('requirements.detail2.continueDesignTitle')}
+                  >
+                    <IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.continueDesignBtn')}
+                  </button>
+                ) : (
+                  <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
+                    {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
+                      ? <><IconHourglass size={13} className="btn-icon" />...</>
+                      : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
+                  </button>
+                )}
+                {/* 重新生成方案 — the "start over" option stays available even
+                    when the interrupted run produced NO plan. The backend
+                    accepts regenerate for status=designing, and with an empty
+                    design_docs the revision snapshot is a no-op, so this
+                    re-forks the analyst session cleanly instead of resuming
+                    the interrupted one. Gated on design_session_id: with no
+                    prior run, 生成技术方案 above is already the fresh-start
+                    path and two identical-looking buttons would confuse. */}
+                {req.design_session_id && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => requestRegenerateDesign()}
+                    disabled={!!busy || designing}
+                    title={t('requirements.detail2.regenerateBtnTitle')}
+                  >
+                    <IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}
+                  </button>
+                )}
                 {/* Roll back to the analyst stage. The backend allows
                     designing → analyzing; this is the recovery path when the
                     user advanced with a failed/incomplete analysis.
@@ -5588,6 +5732,23 @@ export default function RequirementDetail() {
                 usage={designUsage}
                 onUsage={setDesignUsage}
               />
+              )}
+              {/* 阶段答疑 — a read-only Q&A thread about the design. It forks a
+                  dedicated session off the design session, so asking a question
+                  never touches the design conversation the refine/apply chat
+                  above resumes. */}
+              {reqKind !== 'idea' && (
+                <StageQAChat
+                  requirementId={req.id}
+                  requirementTitle={req.title}
+                  stage="design"
+                  stageSessionId={req.design_session_id}
+                  model={architectModel}
+                  defaultModel={architectDefaultModel}
+                  onModelChange={setArchitectModel}
+                  claudeConfigId={architectConfigId}
+                  onClaudeConfigChange={setArchitectConfigId}
+                />
               )}
             </>
           )}
@@ -6306,6 +6467,25 @@ export default function RequirementDetail() {
                 </button>
               </div>
             </div>
+          )}
+
+          {/* 阶段答疑 — a read-only Q&A thread about the implementation. It
+              forks a dedicated session off the coding session, so the answers
+              never mix into the coding conversation the 「追加调整」 composer
+              above resumes — that composer DOES overwrite coding_session_id,
+              this one never touches it. */}
+          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && (
+            <StageQAChat
+              requirementId={req.id}
+              requirementTitle={req.title}
+              stage="coding"
+              stageSessionId={req.coding_session_id}
+              model={developerModel}
+              defaultModel={developerDefaultModel}
+              onModelChange={onDeveloperModelChange}
+              claudeConfigId={developerConfigId}
+              onClaudeConfigChange={onDeveloperConfigChange}
+            />
           )}
 
           {req.status === 'developing' && !coding && (

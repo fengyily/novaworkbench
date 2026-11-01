@@ -42,6 +42,8 @@
 //                       source of auth / base URL / model pinning).
 //   overrideSettingSources (legacy) → --setting-sources project,local
 //                       (drop only the user source).
+//   addDirs        → --add-dir <dir>... (directories the session is granted
+//                       read access to; the paths are resolved on THIS host)
 //
 // Two reliability layers:
 //   1) Preflight — before invoking claude we spawn 'claude --print ping'
@@ -410,7 +412,7 @@ app.post('/v1/run', async (req, res) => {
       cwd: opts.workDir,
       env: claudeCmd.env,
       // resume: stdin must be piped so we can write the prompt after spawn
-      // (CLI ignores `-p` once --resume is set; see anthropics/claude-code
+      // (CLI ignores '-p' once --resume is set; see anthropics/claude-code
       // #4521 / #5187). Non-resume runs keep stdin closed — same as the
       // historical behaviour.
       stdio: [stdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
@@ -433,7 +435,7 @@ app.post('/v1/run', async (req, res) => {
   let stderr = '';
   proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
-  // resume+fork path: pipe the prompt through stdin. claude CLI ignores `-p`
+  // resume+fork path: pipe the prompt through stdin. claude CLI ignores '-p'
   // when combined with --fork-session --resume (anthropics/claude-code#4521 /
   // #5187), so we feed the same prompt via stdin instead. The forked session
   // daemon picks up the prompt from the PTY its bg-pty-host parent created;
@@ -1001,6 +1003,7 @@ function buildRunRequest(body) {
     claudeConfigId,
     claudeBin,
     extraPaths,
+    addDirs,
   } = body;
 
   if (!workDir) {
@@ -1067,6 +1070,13 @@ function buildRunRequest(body) {
     // joins the newline-separated DB column before sending).
     claudeBin: typeof claudeBin === 'string' ? claudeBin : '',
     extraPaths: typeof extraPaths === 'string' ? extraPaths : '',
+    // Directories the session is granted read access to via the CLI's
+    // --add-dir flag. The paths are interpreted on THIS host (the agent
+    // server), so a grant made for a local run means nothing here unless
+    // the same path exists on the agent host — the CLI ignores unknown
+    // --add-dir paths, so a stale grant degrades to "no access" rather
+    // than failing the run.
+    addDirs: Array.isArray(addDirs) ? addDirs.filter((d) => typeof d === 'string' && d) : [],
     settingSources,
   };
 }
@@ -1164,15 +1174,15 @@ function truncate(s, n) {
 // doesn't slip past the other.
 //
 // Prompt transport: when resume is set (regardless of explicit fork), the
-// prompt is delivered via stdin instead of the `-p <prompt>` positional.
-// The Claude CLI's daemonized `--resume <id>` path silently drops `-p` —
-// observed both with and without `--fork-session` — the forked/continued
+// prompt is delivered via stdin instead of the '-p <prompt>' positional.
+// The Claude CLI's daemonized '--resume <id>' path silently drops '-p' —
+// observed both with and without '--fork-session' — the forked/continued
 // session starts but receives no prompt and the run ends with an empty
 // result (anthropics/claude-code#4521 / #5187, plus our own ps-top
-// observation of `claude bg-pty-host ... -- claude.exe --session-id
-// <new-uuid> --fork-session --resume <orig.jsonl>` carrying no `-p` even
-// when the Go side passed Fork:false). Without `--resume` the CLI honours
-// `-p` normally, so we only switch delivery channels on resume runs.
+// observation of 'claude bg-pty-host ... -- claude.exe --session-id
+// <new-uuid> --fork-session --resume <orig.jsonl>' carrying no '-p' even
+// when the Go side passed Fork:false). Without '--resume' the CLI honours
+// '-p' normally, so we only switch delivery channels on resume runs.
 function buildClaudeArgs(opts, settingsArg) {
   const args = [];
   if (!opts.resume) {
@@ -1239,6 +1249,20 @@ function buildClaudeArgs(opts, settingsArg) {
   }
   if (opts.disallowedTools.length > 0) {
     args.push('--disallowedTools', opts.disallowedTools.join(' '));
+  }
+
+  // --add-dir grants the session read access to directories outside its
+  // working directory. It is a VARIADIC option (the CLI takes
+  // '--add-dir <dir>...'), so it must be the LAST flag in argv — anything
+  // after it would be swallowed as another directory value.
+  //
+  // This is what unblocks the plan-mode stages: in plan mode a read of a
+  // path outside the working directory needs a permission decision, and a
+  // non-interactive run has nobody to make it. The grant also widens the
+  // session's search scope so Glob / Grep cover the granted trees.
+  if (opts.addDirs.length > 0) {
+    args.push('--add-dir');
+    args.push(...opts.addDirs);
   }
 
   return args;

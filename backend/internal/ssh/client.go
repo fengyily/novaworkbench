@@ -722,6 +722,191 @@ func (c *Client) SyncDirDownMapped(remoteDir, localDir string) error {
 //	if errors.Is(err, ssh.ErrRemoteDirMissing) { ... }
 var ErrRemoteDirMissing = errors.New("ssh: remote directory missing")
 
+// ErrRemoteFileMissing is returned by DownloadFileMapped when the requested
+// remote file does not exist. It is the file-level counterpart of
+// ErrRemoteDirMissing: the Agent-server session down-sync asks for one
+// specific `<session-id>.jsonl` at a time, so "this session isn't there" must
+// be distinguishable from "the transfer broke".
+//
+// Identify it via errors.Is:
+//
+//	if errors.Is(err, ssh.ErrRemoteFileMissing) { ... }
+var ErrRemoteFileMissing = errors.New("ssh: remote file missing")
+
+// ListRemoteDirs returns the names of the sub-directories directly under
+// remoteDir. It is the discovery primitive behind the Agent-server session
+// lookup: the remote claude CLI keys its transcripts under
+// $HOME/.claude/projects/<slug-of-cwd>/, and the slug we compute locally can
+// drift from the one the CLI actually used (worktree root changed, symlinked
+// /tmp, worker HOME differs) — listing the directory lets us FIND the real
+// one instead of guessing it.
+//
+// A missing remoteDir yields (nil, nil): "there is nothing to look at" is a
+// normal state, not an error. Files (non-directories) are skipped.
+func (c *Client) ListRemoteDirs(remoteDir string) ([]string, error) {
+	if c == nil || c.conn == nil {
+		return nil, errors.New("ssh: client not connected")
+	}
+	if remoteDir == "" {
+		return nil, errors.New("ssh: empty remote dir")
+	}
+	expanded, xerr := c.expandHome(remoteDir)
+	if xerr != nil {
+		return nil, xerr
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return nil, err
+	}
+	defer sftpCli.Close()
+	entries, rerr := sftpCli.ReadDir(expanded)
+	if rerr != nil {
+		if isRemoteNotExist(rerr) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("ssh: readdir %s: %w", expanded, rerr)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// DownloadFileMapped downloads a single remote file to localPath, creating the
+// local parent directory as needed.
+//
+// Unlike GetFile it reports a MISSING remote file as the typed
+// ErrRemoteFileMissing sentinel instead of a generic SFTP error, so the
+// Agent-server session down-sync can count "this session isn't on the remote"
+// separately from "the transfer failed".
+//
+// The transfer lands on a sibling ".part" file that is renamed into place
+// only after the copy completed: a session transcript is resumed with
+// --resume, so a truncated file that LOOKS complete would silently corrupt
+// the next conversation instead of failing loudly.
+//
+// A leading "~" / "~/" in remoteFile is expanded against the remote user's
+// $HOME (pkg/sftp does not understand "~").
+func (c *Client) DownloadFileMapped(remoteFile, localPath string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remoteFile == "" || localPath == "" {
+		return errors.New("ssh: empty download path")
+	}
+	expanded, xerr := c.expandHome(remoteFile)
+	if xerr != nil {
+		return xerr
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	if _, serr := sftpCli.Stat(expanded); serr != nil {
+		if isRemoteNotExist(serr) {
+			return ErrRemoteFileMissing
+		}
+		return fmt.Errorf("ssh: sftp stat %s: %w", expanded, serr)
+	}
+	if dir := filepath.Dir(localPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ssh: mkdir local %s: %w", dir, err)
+		}
+	}
+	tmp := localPath + ".part"
+	if err := downloadFile(sftpCli, expanded, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, localPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("ssh: rename %s: %w", localPath, err)
+	}
+	return nil
+}
+
+// ListRemoteFilesUnder returns the full paths of the files named fileName
+// that live directly inside one of root's sub-directories.
+//
+// It is implemented as ONE remote `ls -1` round-trip (the glob is expanded by
+// the remote shell), which matters because the alternative — stat-ing every
+// candidate directory — needs a fresh SFTP session per candidate and gets
+// slow enough to be noticeable on a host with dozens of project dirs.
+//
+// A missing root (or no match) yields (nil, nil): "nothing found" is a normal
+// state here, not an error.
+func (c *Client) ListRemoteFilesUnder(ctx context.Context, root, fileName string) ([]string, error) {
+	if c == nil || c.conn == nil {
+		return nil, errors.New("ssh: client not connected")
+	}
+	if root == "" || fileName == "" {
+		return nil, errors.New("ssh: empty list path")
+	}
+	expanded, xerr := c.expandHome(root)
+	if xerr != nil {
+		return nil, xerr
+	}
+	var buf bytes.Buffer
+	// The root and the file name are quoted (they may contain spaces); the
+	// middle "/*/" is deliberately NOT quoted so the remote shell expands it
+	// into one glob entry per sub-directory. A non-matching glob makes ls
+	// complain on stderr and exit non-zero — we only care about stdout.
+	cmd := "ls -1 " + shellQuote(expanded) + "/*/" + shellQuote(fileName) + " 2>/dev/null"
+	if _, err := c.Exec(ctx, cmd, "", nil, &buf, nil); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+// DownloadDirMapped downloads a remote directory tree into localDir, keeping
+// only .jsonl / .md files (the same filter the whole-directory sync uses) and
+// creating the local directory structure as needed.
+//
+// A missing remote directory yields the ErrRemoteDirMissing sentinel so the
+// caller can tell "the remote has no sub-agent transcript folder for this
+// session" (normal) from "the transfer broke". The local directory is NOT
+// created in that case — an empty folder per session would just be noise in
+// the local claude projects tree.
+func (c *Client) DownloadDirMapped(remoteDir, localDir string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remoteDir == "" || localDir == "" {
+		return errors.New("ssh: empty download path")
+	}
+	expanded, xerr := c.expandHome(remoteDir)
+	if xerr != nil {
+		return xerr
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	if _, serr := sftpCli.Stat(expanded); serr != nil {
+		if isRemoteNotExist(serr) {
+			return ErrRemoteDirMissing
+		}
+		return fmt.Errorf("ssh: sftp stat %s: %w", expanded, serr)
+	}
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		return fmt.Errorf("ssh: mkdir local %s: %w", localDir, err)
+	}
+	return walkAndDownload(sftpCli, expanded, localDir)
+}
+
 // sftp opens a new SFTP session on the underlying SSH connection. The caller
 // must Close it. Returns nil + error on transport failure.
 func (c *Client) sftp() (*sftp.Client, error) {

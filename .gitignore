@@ -1,5 +1,10 @@
 node_modules/
-dist/
+
+# 忽略所有 dist 目录的内容
+**/dist/*
+!backend/web/dist/
+!backend/web/dist/.gitkeep
+
 .env
 *.log
 .nova/

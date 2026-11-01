@@ -155,6 +155,78 @@ export const requirements = {
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.
+  // qaChat — the stage Q&A panel (StageQAChat.tsx): a read-only thread that
+  // asks the design / coding session "why did you do it this way". The
+  // answers live in a forked session; the production session is untouched.
+  qaChat: {
+    title: 'Design / dev Q&A',
+    expandBtn: 'Expand Q&A',
+    collapseBtn: 'Collapse',
+    hint: 'Ask about this stage’s design or implementation. Answers run in a separate session, so the original conversation stays untouched.',
+    loading: 'Loading Q&A…',
+    empty: 'No questions yet.',
+    questionTag: 'Q',
+    answerTag: 'A',
+    running: 'Answering…',
+    failed: 'Q&A failed',
+    asking: 'Answering…',
+    askBtn: 'Ask',
+    placeholder: 'e.g. why a turn table instead of a transcript table?\nEnter to send  ·  Shift+Enter for a new line',
+    deleteTitle: 'Delete this Q&A turn',
+    deleteConfirm: 'Delete this Q&A turn?',
+    resetBtn: 'Clear',
+    resetTitle: 'Clear this stage’s Q&A thread',
+    resetConfirm: 'Clear every Q&A turn of this stage?',
+    refreshBtn: 'Refresh',
+    refreshTitle: 'Re-read the Q&A thread',
+    execError: 'Q&A run failed',
+    freshBadge: 'Not resumed from the original session (answered from the plan document)',
+    threadRotated: 'Context updated',
+    driftBadge: 'Context updated',
+    driftHint: 'This stage was re-run after the Q&A thread was created. The next question forks from the new session.',
+    // Export — the thread as a standalone document. The label is used both as
+    // the H1 suffix and as the filename suffix so the .md and .pdf of one
+    // thread sort together.
+    exportBtn: 'Export',
+    exportTitleAttr: 'Export this stage’s answered Q&A as a document',
+    exportDisabledTitle: 'No answered Q&A yet — nothing to export',
+    exportMd: 'Export Markdown (.md)',
+    exportPdf: 'Export PDF',
+    exportBusy: 'Generating PDF…',
+    exportFailed: 'Export failed: ',
+    exportTitleDesign: 'Design Q&A',
+    exportTitleCoding: 'Dev Q&A',
+    exportStageDesign: 'Design',
+    exportStageCoding: 'Development',
+    exportMetaRequirement: 'Requirement',
+    exportMetaStage: 'Stage',
+    exportMetaTurns: 'Turns',
+    exportMetaTime: 'Exported at',
+    exportToc: 'Contents',
+    exportFreshNote: 'Not resumed from the original session (answered from the plan document)',
+    exportRotated: 'Context updated',
+    // 目录 / 视图切换 — the question index. One component, two presentations:
+    // a drawer above the thread in 全局 mode, a permanent left rail in 分栏
+    // mode. The index is built from the question text the backend already
+    // stores, so nothing here needs a new field.
+    viewModeLabel: 'View',
+    viewModeGlobal: 'All',
+    viewModeSplit: 'Split',
+    viewModeTitle: 'Switch view: scroll through everything / split list and detail',
+    indexTitle: 'Contents',
+    indexToggle: 'Contents',
+    indexCollapse: 'Hide contents',
+    indexCount: '{{count}} questions',
+    indexFilterPlaceholder: 'Filter questions…',
+    indexFilterEmpty: 'No matching question',
+    indexEmpty: 'No question yet',
+    indexNum: 'Q{{n}}',
+    indexRunning: 'Answering',
+    indexError: 'Failed',
+    prevTurn: 'Previous question',
+    nextTurn: 'Next question',
+    turnCounter: 'Question {{current}} / {{total}}',
+  },
   detail2: {
     // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge
     // in the design section; the full SHA is in the title. Hidden when empty.
@@ -466,6 +538,12 @@ export const requirements = {
     processToggleShow: '▶ Show thinking process',
     regenerateBtn: 'Regenerate plan',
     regenerateBtnTitle: 'Regenerate the design plan on a brand-new session; earlier refinement turns are not inherited',
+    // 继续设计 — recovery entry for an interrupted run (backend restart,
+    // killed process, 504, dropped stream). Sits next to "Regenerate plan":
+    // this one resumes the same session, that one starts a brand-new one and
+    // freezes the old plan as a history version.
+    continueDesignBtn: 'Continue design',
+    continueDesignTitle: 'Resume the interrupted design session (--resume) and let Claude pick up where it left off instead of starting over; reuses the saved model and execution environment (role defaults when none were saved)',
     // 重新生成 confirm dialog (req_11e485759f583db8): shown after the
     // user clicks "Regenerate plan". The body explains that the
     // current plan will be FROZEN as a history version (not destroyed)
@@ -474,6 +552,9 @@ export const requirements = {
     // avoids the analysis stage — it has been removed from the flow.
     regenerateConfirmTitle: 'Regenerate the design plan?',
     regenerateConfirmBody: 'The current plan will be frozen as a history version (you can switch back via the version dropdown). A brand-new session will generate a new plan; the existing design session + refinement turns will not be inherited.',
+    // Interrupted run with no plan yet: nothing can be frozen, so the default
+    // copy must not promise a history version that will never appear.
+    regenerateConfirmBodyEmpty: 'There is no plan to freeze yet; a brand-new session will generate one. The existing design session + refinement turns will not be inherited.',
     regenerateConfirmYes: 'Regenerate',
     regenerateConfirmCancel: 'Cancel',
     // 「重新生成」 preflight dialog — borrows the DesignCodingImmediateModal
@@ -795,6 +876,25 @@ export const requirements = {
     insertRefHint: 'Insert reference at cursor',
     refInsert: '[Attachment: {{name}}]',
   },
+  dirs: {
+    sectionTitle: '📂 Authorized directories',
+    sectionHint: 'Once authorized, Claude can read these directories directly — the plan-mode design stage no longer stalls on a permission prompt.',
+    pathPlaceholder: 'Absolute directory path, e.g. ~/workspace/specs',
+    labelPlaceholder: 'Note (optional)',
+    addBtn: 'Authorize',
+    empty: 'No authorized directories yet',
+    hostNote: 'The path resolves on the machine running Claude: a local run uses this host, an Agent server uses that server. The path is not checked when you authorize it.',
+    missing: 'not on this host',
+    missingHint: 'Not found on this host. If Claude runs on an Agent server, check that the path exists there.',
+    autoBadge: 'Auto',
+    autoAttachment: 'Attachment directory (auto-authorized, Claude can read it directly)',
+    autoHint: 'This directory is authorized automatically on every Claude run — no need to add it manually, and it cannot be revoked here',
+    delete: 'Revoke',
+    deleteConfirm: 'Revoke read access to "{{path}}"?',
+    addFailed: 'Authorization failed: {{msg}}',
+    deleteFailed: 'Revoke failed: {{msg}}',
+    loadFailed: 'Load authorized directories failed: {{msg}}',
+  },
   tree: {
     expand: 'Expand sub-requirements',
     collapse: 'Collapse sub-requirements',
@@ -812,6 +912,31 @@ export const requirements = {
     parentNone: 'None',
     parentDisabledHint: 'This requirement has sub-requirements; move them out before assigning a parent',
     parentFailed: 'Failed to set parent: {{msg}}',
+  },
+  // Referenced requirements — the requirements this one points at for design
+  // context. The backend injects each referenced requirement's description +
+  // existing plan into the architect's prompt (the title is withheld — that
+  // one is for humans).
+  references: {
+    label: 'Referenced requirements',
+    hint: 'Their content and existing plans are injected as design context',
+    searchPlaceholder: 'Search requirement titles…',
+    loading: 'Loading…',
+    empty: 'No referenced requirements yet',
+    noMatch: 'No matching requirements',
+    add: 'Reference',
+    remove: 'Remove reference',
+    notePlaceholder: 'Why reference it? (included in the design context)',
+    noteLabel: 'Reference reason',
+    originDirect: 'Direct',
+    originParent: 'Inherited from parent',
+    limitReached: 'At most {{n}} requirements can be referenced',
+    moreResults: '{{n}} more — keep typing',
+    count: '{{n}}/{{max}} referenced',
+    hasDesign: 'Has a plan',
+    saveFailed: 'Failed to save referenced requirements: ',
+    detailLabel: 'Referenced requirements',
+    emptyDetail: 'No referenced requirements',
   },
 } as const;
 

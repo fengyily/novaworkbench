@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   projectsApi, runnerApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput, fmtCost, wizardApi,
+  usageApi, usageTotalInput, fmtCost, fmtNum, wizardApi,
   type Project, type RunStatus, type PlatformToken, type CommitStylePreview,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, priorityLabelKeys, kindOf, API_BASE, authedFetch,
@@ -1075,7 +1075,17 @@ export default function ProjectDetail() {
       {/* Child rows leave the gutter empty on purpose — the directory-tree
           connector is drawn on this cell by CSS. */}
       <td className="req-tree-col">{depth === 0 && showTree && renderReqTreeToggle(req, depth)}</td>
-      <td data-label={t('projects.detail.colId')} className="pr-c-id">{req.id}</td>
+      <td data-label={t('projects.detail.colId')} className="pr-c-id">
+        {/* The ID is a 20-char opaque handle ("req_" + 16 hex digits), wider
+            than the 104px column can hold. Without a clip wrapper the text
+            painted straight over the neighbouring Type cell — the priority
+            dot landed in the middle of the ID and the last hex digit stuck
+            out the far side. .pr-cell-clip truncates with an ellipsis
+            instead; the ellipsis is visual only, the DOM still carries the
+            full ID so it stays selectable/copyable, and `title` surfaces it
+            on hover. */}
+        <span className="pr-cell-clip" title={req.id}>{req.id}</span>
+      </td>
       <td data-label={t('projects.detail.colType')} className="pr-c-type">
         {/* Priority dot folded INTO the Type cell, ahead of the kind-badge.
             Why: the dedicated priority column was eating ~90px even when
@@ -1203,20 +1213,30 @@ export default function ProjectDetail() {
         })()}
       </td>
       <td data-label={t('projects.detail.colStatus')} className="pr-c-status">
-        <StatusChips req={req} />
-        {/* Breathing dot for any wizard job in flight on this requirement
-            (analyst/design/apply/coding). Set is populated by the 5s poll
-            of /api/wizard/active-jobs above. aria-label + title so screen
-            readers + hover explain the indicator (the dot has no text).
-            Rendered next to the status chip group; both are visible at once
-            because pulse indicates an active job, chip indicates stored status. */}
-        {activeReqIds.has(req.id) && (
-          <span
-            className="claude-pulse-dot is-work"
-            aria-label={t('projects.detail.claudePulseAria')}
-            title={t('projects.detail.claudePulseTitle')}
-          />
-        )}
+        {/* The chip group is an ORDERED tag string (source/plan → progress →
+            pending-confirm), so it has to read as one line. .status-chips
+            defaults to flex-wrap: wrap, which let a 3-chip row break onto a
+            second line and double that row's height — the one row in the
+            table with a different rhythm from every other. The clip box
+            pins the group to a single line and clips the tail only in the
+            pathological case where the column is squeezed below the chips'
+            intrinsic width. */}
+        <span className="pr-status-clip">
+          <StatusChips req={req} />
+          {/* Breathing dot for any wizard job in flight on this requirement
+              (analyst/design/apply/coding). Set is populated by the 5s poll
+              of /api/wizard/active-jobs above. aria-label + title so screen
+              readers + hover explain the indicator (the dot has no text).
+              Rendered next to the status chip group; both are visible at once
+              because pulse indicates an active job, chip indicates stored status. */}
+          {activeReqIds.has(req.id) && (
+            <span
+              className="claude-pulse-dot is-work"
+              aria-label={t('projects.detail.claudePulseAria')}
+              title={t('projects.detail.claudePulseTitle')}
+            />
+          )}
+        </span>
       </td>
       {/* Agent server column: which remote execution target the requirement
           was developed on. Empty = local. The joined name comes from the
@@ -1236,14 +1256,30 @@ export default function ProjectDetail() {
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
-          return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
+          // The raw pair ("33,712,420 / 19,821,388") is 23 characters wide —
+          // far past the 104px column, so it painted straight over the Cost
+          // cell and the two numbers were unreadable on top of each other.
+          // The column now carries the MAGNITUDE ("34M / 20M"), which is what
+          // the eye actually compares row to row; the exact counts move into
+          // the hover title. fmtNum is the same compact renderer the
+          // sub-task TokenStrip already uses, so the reading habit is
+          // consistent across the app.
+          const inp = usageTotalInput(u);
+          const out = u.output_tokens;
+          return (
+            <span className="pr-cell-clip" title={`${inp.toLocaleString()} / ${out.toLocaleString()}`}>
+              {`${fmtNum(inp)} / ${fmtNum(out)}`}
+            </span>
+          );
         })()}
       </td>
       <td data-label={t('projects.detail.colCost')} className="pr-c-num pr-c-cost">
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
-          return fmtCost(u.costs);
+          // Same guard as the Token cell: a multi-currency cost ("¥123.45 +2")
+          // must not bleed into the timestamp column next to it.
+          return <span className="pr-cell-clip" title={fmtCost(u.costs)}>{fmtCost(u.costs)}</span>;
         })()}
       </td>
       <td

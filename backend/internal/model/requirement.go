@@ -201,6 +201,18 @@ type Requirement struct {
 	// Server「<名称>」" without a second round-trip. Empty for local design runs
 	// or when the server row was deleted. omitempty keeps Create responses clean.
 	DesignAgentServerName string `json:"design_agent_server_name,omitempty"`
+	// SessionServerID records WHERE the requirement's Claude session files
+	// (the .jsonl transcripts) physically live right now. It is NOT the same
+	// thing as AgentServerID (which records "where the last development ran"):
+	// switching Agent Servers overwrites AgentServerID, while SessionServerID
+	// keeps pointing at the host that still holds the transcript until the
+	// session is actually pulled back to the local machine.
+	//
+	// Empty = local / unknown (legacy rows, locally-developed requirements).
+	// The Agent-server up-sync reads it to fetch a missing session from the
+	// previous host before pushing it to the current one — that's what makes
+	// "换一台 Agent Server 也能继续会话" work.
+	SessionServerID string `json:"session_server_id"`
 	// DesignBaseSHA is the 40-char HEAD SHA of origin/<default_branch> captured
 	// at the moment the architect-design stage synced to it. Written by the
 	// design-stage prologue (right after the hard sync succeeds, BEFORE claude

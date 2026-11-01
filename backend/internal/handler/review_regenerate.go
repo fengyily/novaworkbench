@@ -227,6 +227,8 @@ func (h *ReviewHandler) runRegenerate(job *store.Job, rv *model.CodeReview, proj
 	history := h.followupHistoryCapped(rv.ID)
 	job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("♻️ 基于 %d 条追问重新生成 Review 报告...", len(history))})
 
+	// No --add-dir grant here — review runs with --dangerously-skip-permissions
+	// (see handler/attachment_grant.go for the requirement-side grant).
 	hasAttachments := attachManifestFor(h.attachSvc, rv.ID, "") != ""
 	spec := reviewTurnSpec{
 		scope:             "review-regenerate",

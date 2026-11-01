@@ -8,6 +8,8 @@
 // concatenated into the user's -p prompt verbatim and never parsed as code.
 package prompt
 
+import "strings"
+
 // GitCommitConvention is the mandatory tail block appended to every task
 // prompt that may drive the claude child to run `git commit` / `git push` /
 // `gh/glab/tea pr create`. It enforces two rules:
@@ -56,3 +58,36 @@ const GitCommitConvention = `## Git 提交与推送规范（强制遵守）
 - 所有 git 操作（提交 / 推送 / 创建 PR）都在当前工作目录内进行。系统已根据项目配置的「平台 Token」（设置 → 平台 Token）准备好本次运行的 git 认证凭据，直接 ` + "`git push origin <分支>`" + ` 即可完成认证。**切勿在命令中手写 token / 用户名 / 密码，也不要把任何凭据打印到输出**。
 - 提交信息只描述本次改动本身，遵循项目既有 commit 风格；严禁添加任何 AI 署名或协作者尾注，包括但不限于 ` + "`🤖 Generated with Claude Code`" + `、` + "`Co-Authored-By: Claude <...>`" + `、` + "`Co-authored-by: ...`" + ` 等 trailer。创建 PR 时同理，正文不得包含上述署名。
 - 若遇认证 / 权限失败，明确报告「凭据或权限问题」并停止，不要绕过、不要伪造提交者身份。`
+
+// BuildNoBranchConvention renders the contract block for a requirement that
+// develops directly on its base branch (the 「不创建分支」 mode).
+//
+// WHY THIS EXISTS
+//
+// The no-branch mode develops in an isolated worktree whose HEAD is DETACHED
+// (git refuses to check the same branch out in two worktrees, and the base
+// branch usually sits in the project directory). A detached HEAD looks
+// "broken" to a coding agent, so on 2026-10-27 the agent in
+// req_1a42496198026380 did the only thing that looked safe: it created a
+// branch of its own (`git checkout -b feat/1a42496198026380`), committed on
+// it, pushed it and opened a PR. The platform's own push stage then refused
+// to run ("当前 HEAD 在分支 …，拒绝推送") and the requirement could not
+// reach its base branch at all.
+//
+// So the contract has to be stated BEFORE the agent starts: no branch
+// creation, no push, no PR — the platform owns the delivery and pushes the
+// current HEAD straight onto the base branch.
+//
+// base is the branch the requirement develops against (requirements
+// .base_branch); an empty value falls back to "main".
+func BuildNoBranchConvention(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "main"
+	}
+	return `## 不创建分支模式（强制）
+- 本需求选择「直接在 base 分支上开发」。当前工作目录是本需求的**隔离 worktree**，HEAD 处于 **detached HEAD**（基于 ` + "`" + base + "`" + `）—— 这是正常状态，**没有任何分支被检出**，也不需要你创建分支。
+- **禁止创建 / 切换 / 重命名分支**：` + "`git checkout -b`" + `、` + "`git switch -c`" + `、` + "`git branch`" + `、` + "`git checkout <branch>`" + ` 一律不要执行；要查看历史请用 ` + "`git log`" + ` / ` + "`git show`" + `。
+- **禁止推送与创建 PR**（` + "`git push`" + ` / ` + "`gh pr create`" + ` 等）：提交完成后由平台把当前 HEAD **直接推送到 base 分支** ` + "`" + base + "`" + `，不会新建任何分支，也不需要你创建 PR。
+- 你要做的只有：完成代码修改 → ` + "`git commit`" + `（提交信息遵循上面的提交风格）→ 保持工作区干净。`
+}

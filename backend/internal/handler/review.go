@@ -672,6 +672,11 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 	// Attachment manifest → system prompt. Claude reads the files on demand
 	// via the absolute paths listed in the block (BuildManifest never inlines
 	// the bytes, so a 2 GB upload can't blow the context).
+	//
+	// No --add-dir grant is needed here: review runs with
+	// --dangerously-skip-permissions, so a read outside the working directory
+	// is already allowed. The requirement-side stages (analyst / architect /
+	// coding) do need the grant — see handler/attachment_grant.go.
 	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
 	systemPrompt := appendManifest(rolePrompt, manifest)
 

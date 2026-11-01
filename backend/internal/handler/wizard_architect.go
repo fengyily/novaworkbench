@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,19 @@ import (
 // watchdog meaningful: a genuinely dead proxy still gets killed and reported
 // instead of hanging the job forever.
 const architectStallTimeout = 10 * time.Minute
+
+// continueDesignPrompt is the ENTIRE task prompt for a continuation run
+// (POST /api/wizard/continue-design).
+//
+// It is deliberately one sentence. The run is a pure `--resume
+// <design_session_id>` (no --fork-session, no --session-id — see
+// prepareArchitectDesign's session decision and llm.StreamCmd), so the model
+// already has the requirement, the analysis and everything the interrupted run
+// had explored. Re-feeding the title, the "produce a complete plan" contract or
+// the persisted partial design_docs does not add context — it reads as a new
+// task and makes the model rewrite the plan from scratch, which is exactly the
+// regenerate behaviour this endpoint exists to avoid.
+const continueDesignPrompt = "继续。接着上次的进度继续完成方案设计，不要从头重来。"
 
 // importDesignMaxBytes caps the Markdown content size for PUT
 // /api/wizard/import-design (the JSON paste endpoint). 500 KB comfortably
@@ -85,8 +99,8 @@ const (
 // HTTP-driven and time-driven dispatches share one implementation of the
 // architect stage (no parallel maintenance).
 type designRunParams struct {
-	Req            *model.Requirement
-	ProjectPath    string
+	Req         *model.Requirement
+	ProjectPath string
 	// BaseBranch is the user-picked (or defaulted) base branch for the
 	// design stage. Resolution order: HTTP body / scheduler payload >
 	// project.DefaultBranch > "main". Forwarded into
@@ -94,10 +108,10 @@ type designRunParams struct {
 	// both into SyncDesignBase (so the hard sync gate runs against the
 	// user-chosen base) and into anchorWorktree (so the resulting
 	// worktree is rooted at origin/<base>).
-	BaseBranch     string
-	SourceSID      string
-	Fork           bool
-	SkipAnalysis   bool
+	BaseBranch   string
+	SourceSID    string
+	Fork         bool
+	SkipAnalysis bool
 	// Regenerate is true ONLY when the user explicitly clicked the
 	// "重新分析生成" CTA on a requirement that already has a designed
 	// plan. It widens the session decision (treat design_session_id as
@@ -111,11 +125,19 @@ type designRunParams struct {
 	// {regenerate: true}. All other prepareArchitectDesign call sites
 	// pass false explicitly so the compiler catches a forgotten wiring
 	// site.
-	Regenerate     bool
-	NewDesignSID   string
-	WorkDir        string
-	Prompt         string
-	SystemPrompt   string
+	Regenerate bool
+	// Continue marks a recovery run that resumes an interrupted design
+	// session. ONLY ContinueDesign sets it — and it does so AFTER
+	// prepareArchitectDesign returns, right before the exec goroutine
+	// starts, so the prepare signature and every other caller stay
+	// untouched. It changes the task prompt only: session resolution is
+	// already handled by the non-regenerate branch (resume
+	// design_session_id, no fork), and no revision snapshot is taken.
+	Continue     bool
+	NewDesignSID string
+	WorkDir      string
+	Prompt       string
+	SystemPrompt string
 	// SkipRoleContext — 「设计者上下文」开关的内部表示（取反式命名：
 	// 零值 false = 带上架构师 persona = 今天的默认行为）。
 	// true ⇒ system prompt 槽完全空置（不下发 --append-system-prompt），
@@ -128,6 +150,16 @@ type designRunParams struct {
 	// 远端执行时清单里是远端目录（resolveAttachDir 传了 agentServerID），
 	// 与文件实际同步到的位置一致。
 	AttachManifest string
+	// DirsManifest — 已授权读取目录清单（## 📂 已授权读取目录）。
+	// 与 AttachManifest 同构：勾选态拼在 persona 之后进 system prompt，
+	// 关闭态 system prompt 槽空置时改挂任务提示词。
+	DirsManifest string
+	// AddDirs — the granted directories themselves, handed to the claude
+	// CLI as `--add-dir <dir>...`. Empty when the user granted nothing.
+	// The plan-mode stage is the reason this exists: a read of a path
+	// outside the session's working directory needs a permission decision,
+	// and a non-interactive run has nobody to make it.
+	AddDirs        []string
 	Model          string // 已经应用请求体覆盖
 	ClaudeConfigID string
 	ReadKnowledge  bool
@@ -155,6 +187,21 @@ type designRunParams struct {
 	// this doubles as the "does this run need parent handling at all" flag
 	// for finalizeArchitectRun.
 	ParentBlock string
+	// ReferencedBlock is the pre-rendered 「关联需求上下文」 prompt block: the
+	// referenced requirements' descriptions + existing plans plus the output
+	// contract. Empty = this run has no usable references, and the prompt is
+	// then byte-identical to a requirement that never had the feature.
+	//
+	// Parallel to ParentBlock, not merged into it: the two blocks have
+	// different inputs (one master requirement vs. N referenced ones), different
+	// injected content (the parent block carries a title and an attachment
+	// manifest; this one carries neither) and different output contracts.
+	ReferencedBlock string
+	// ReferencedRefs holds the resolved references behind ReferencedBlock so
+	// finalizeArchitectRun can render the fallback appendix without a second
+	// lookup — and, more importantly, so the appendix describes exactly the
+	// references the prompt actually carried.
+	ReferencedRefs []model.RequirementReferenceContent
 }
 
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +254,110 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 	go h.execArchitectDesign(p, job, nil)
+}
+
+// ContinueDesign resumes an interrupted architect-design run.
+//
+// This is the recovery path for the states the pipeline cannot otherwise
+// leave: the backend restarted mid-run (the goroutine + claude subprocess are
+// gone but requirements.design_session_id survived), claude died on a proxy
+// 504, or the stall watchdog killed the process. In each case the design
+// session on disk still holds everything the run had explored, and
+// finalizeArchitectRun may even have persisted a PARTIAL plan — but the page
+// only offered 「重新生成方案」, which forks a brand-new conversation from the
+// analyst session and therefore throws that work away.
+//
+// The contract mirrors ContinueCoding (wizard_coding.go):
+//   - only status=designing may continue (designed/developing want a fresh
+//     plan → regenerate; draft/analyzing have no design run to resume);
+//   - a non-empty design_session_id is required — without it there is nothing
+//     to --resume;
+//   - the run resumes the SAME session with regenerate=false, so no revision
+//     snapshot is written and design_session_id is left untouched. On success
+//     finalizeArchitectRun overwrites design_docs with the completed plan and
+//     auto-promotes to designed, exactly like a normal design run.
+//
+// Execution environment comes from the requirement row (architect_model /
+// architect_config_id / design_agent_server_id / sync_mode / base_branch),
+// NOT from the request. Resuming is defined as "keep running the round that
+// was interrupted": switching Agent servers mid-conversation can leave the
+// session file behind on the other host, and a different base branch would
+// re-anchor the worktree under a conversation that explored the old one. A
+// user who wants a different environment should use 重新生成方案. The one
+// exception is skip_role_context: it only shapes the system prompt and cannot
+// affect whether --resume finds the session, so the page's current toggle is
+// honoured.
+//
+// read_knowledge is intentionally false — the knowledge pre-read is a
+// "before the run starts" choice and re-reading it on every recovery attempt
+// would silently inflate cost.
+//
+// POST /api/wizard/continue-design { requirement_id, skip_role_context } -> { job_id }
+func (h *WizardHandler) ContinueDesign(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RequirementID string `json:"requirement_id"`
+		// SkipRoleContext — same inverted switch as ArchitectDesign: true
+		// means "do not attach the architect persona".
+		SkipRoleContext bool `json:"skip_role_context"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	p, job, af := h.prepareContinueDesign(r.Context(), body.RequirementID, body.SkipRoleContext)
+	if writeIfAPIError(w, af) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
+	go h.execArchitectDesign(p, job, nil)
+}
+
+// prepareContinueDesign is the synchronous half of ContinueDesign, split out so
+// the validation / environment / flag decisions are unit-testable without
+// spawning the exec goroutine (which needs git and a real claude CLI).
+func (h *WizardHandler) prepareContinueDesign(ctx context.Context, requirementID string, skipRoleContext bool) (*designRunParams, *store.Job, *apiFailure) {
+	if strings.TrimSpace(requirementID) == "" {
+		return nil, nil, fail(400, "INVALID", "requirement_id is required")
+	}
+	req, err := h.reqSvc.Get(requirementID)
+	if err != nil {
+		return nil, nil, fail(404, "NOT_FOUND", "requirement not found")
+	}
+	// Wiki rows can also sit in status=designing (UpdateWikiDoc writes it) but
+	// their session lives in wiki_session_id and their body in wiki_docs. The
+	// design section is hidden for wiki in the UI; guard the API too so a
+	// stale client cannot resume the wrong pipeline.
+	if req.Kind == service.KindWiki {
+		return nil, nil, fail(400, "KIND_NOT_SUPPORTED",
+			"wiki-kind requirements do not support design continuation (use wiki generation)")
+	}
+	if req.Status != "designing" {
+		return nil, nil, fail(409, "INVALID_STATUS",
+			"仅设计中的需求可继续设计（当前状态: "+req.Status+"）；方案已完成或开发中请使用「重新生成方案」")
+	}
+	if strings.TrimSpace(req.DesignSessionID) == "" {
+		return nil, nil, fail(409, "NO_SESSION",
+			"无方案设计会话，无法续接，请重新生成方案")
+	}
+
+	// Persisted model: DefaultModelLabel is the UI sentinel for "role
+	// default", not a real --model value.
+	modelName := req.ArchitectModel
+	if modelName == DefaultModelLabel {
+		modelName = ""
+	}
+
+	p, job, af := h.prepareArchitectDesign(ctx, req.ID, modelName,
+		req.ArchitectConfigID, req.DesignAgentServerID, false,
+		req.SyncMode, req.BaseBranch, false, skipRoleContext)
+	if af != nil {
+		return nil, nil, af
+	}
+	// Set only after prepare succeeded, right before the caller starts the
+	// exec goroutine. Every other entry point leaves it false, so the
+	// continuation prompt can never leak into a first run / re-run.
+	p.Continue = true
+	return p, job, nil
 }
 
 // importDesignReq is the JSON body for PUT /api/wizard/import-design.
@@ -676,6 +827,11 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// silently falls back to local paths.
 	attachDir := h.resolveAttachDir(context.Background(), requirementID, agentServerID)
 	manifest := h.attachManifestFor(requirementID, attachDir)
+	// 已授权读取目录（--add-dir grants）。plan 模式下 claude 读工作目录
+	// 之外的路径需要一个「谁来批准」的判断，而 -p 非交互运行里没有人能批准
+	// —— 这正是方案设计阶段会卡住的原因。授权后目录直接可读，Glob/Grep 的
+	// 搜索范围也随之扩大。
+	dirsManifest := h.dirsManifestFor(requirementID)
 
 	// SystemPrompt 的组装：
 	//   skipRoleContext=false（默认）→ persona + 清单，与今天逐字节一致
@@ -688,6 +844,9 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	systemPrompt := rolePrompt
 	if manifest != "" {
 		systemPrompt = systemPrompt + "\n\n" + manifest
+	}
+	if dirsManifest != "" {
+		systemPrompt = systemPrompt + "\n\n" + dirsManifest
 	}
 	if skipRoleContext {
 		systemPrompt = ""
@@ -704,33 +863,60 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// view. Built here (synchronously, next to the attachment manifest above
 	// so both share the same resolveAttachDir semantics) but appended to the
 	// prompt inside prepareDesignWorkspace.
-	parent, parentBlock := h.buildParentBlock(context.Background(), req, agentServerID)
+	parent, parentBlock, parentAttachDir := h.buildParentBlock(context.Background(), req, agentServerID)
+
+	// Referenced requirements: the user pointed this requirement at other
+	// requirements whose content + existing plan should inform this design.
+	// Resolved here (synchronously, next to the parent block) so both share
+	// the same "degrade, never block" philosophy, but appended to the prompt
+	// inside prepareDesignWorkspace.
+	referencedBlock, referencedRefs := h.buildReferencedBlock(req)
+
+	// --add-dir 授权 = 用户手工授权的目录 + 本需求的附件目录 + （子需求时）
+	// 父需求的附件目录。
+	//
+	// 附件目录**必须**授权：附件清单指向的就是它，而 plan 模式下读工作目录
+	// 之外的路径需要一次权限裁决，非交互 (-p) 运行里没有人能批准 —— 这正是
+	// 「看不到附件内容」的根因。清单与授权由同一个 attachDir 派生，两边口径
+	// 不会漂移。
+	//
+	// 被引用的需求**不**产出授权：引用块只注入描述 + 方案（不含附件清单），
+	// 所以没有目录需要被授予，Agent Server 路径也没有额外的附件同步。
+	var parentGrant attachmentGrant
+	if parent != nil {
+		parentGrant = attachmentGrant{ownerID: parent.ID, dir: parentAttachDir}
+	}
+	addDirs := h.grantDirsFor(requirementID, attachDir, parentGrant)
 
 	return &designRunParams{
-		Req:           req,
-		ProjectPath:   projectPath,
-		BaseBranch:    effectiveBase,
-		SourceSID:     sourceSID,
-		Fork:          fork,
-		SkipAnalysis:  skipAnalysis,
-		Regenerate:    regenerate,
-		NewDesignSID:  newDesignSID,
-		Parent:        parent,
-		ParentBlock:   parentBlock,
+		Req:             req,
+		ProjectPath:     projectPath,
+		BaseBranch:      effectiveBase,
+		SourceSID:       sourceSID,
+		Fork:            fork,
+		SkipAnalysis:    skipAnalysis,
+		Regenerate:      regenerate,
+		NewDesignSID:    newDesignSID,
+		Parent:          parent,
+		ParentBlock:     parentBlock,
+		ReferencedBlock: referencedBlock,
+		ReferencedRefs:  referencedRefs,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
 		// thread so the SSE panel can surface the hard-sync phase events
 		// (see prepareDesignWorkspace for the full rationale).
-		WorkDir:        "",
-		Prompt:         "",
-		SystemPrompt:   systemPrompt,
+		WorkDir:         "",
+		Prompt:          "",
+		SystemPrompt:    systemPrompt,
 		SkipRoleContext: skipRoleContext,
 		AttachManifest:  manifest,
-		Model:          model,
-		ClaudeConfigID: claudeConfigID,
-		ReadKnowledge:  readKnowledge,
-		AgentServerID:  agentServerID,
-		SyncMode:       syncMode,
+		DirsManifest:    dirsManifest,
+		AddDirs:         addDirs,
+		Model:           model,
+		ClaudeConfigID:  claudeConfigID,
+		ReadKnowledge:   readKnowledge,
+		AgentServerID:   agentServerID,
+		SyncMode:        syncMode,
 	}, job, nil
 }
 
@@ -751,25 +937,62 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 // sub-requirement's own manifest uses, so an Agent-server run gets the parent's
 // files synced to that host under its own per-requirement subdirectory (owner
 // id is the parent's, so no collision with the sub-requirement's mirror).
-func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Requirement, agentServerID string) (*model.Requirement, string) {
+//
+// The third return value is that attachment directory. The caller's manifest
+// names it, so the caller has to grant it (--add-dir) as well — otherwise the
+// sub-requirement's plan-mode run can see the parent's files in the prompt
+// but not read them. It is returned rather than re-resolved so the sync
+// happens once and the grant can never drift from the manifest path.
+func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Requirement, agentServerID string) (*model.Requirement, string, string) {
 	if req == nil || strings.TrimSpace(req.ParentID) == "" {
-		return nil, ""
+		return nil, "", ""
 	}
 	parent, err := h.reqSvc.Get(req.ParentID)
 	if err != nil {
 		log.Printf("[architect-design] parent lookup failed for %s (parent=%s): %v — continuing without parent context", req.ID, req.ParentID, err)
-		return nil, ""
+		return nil, "", ""
 	}
 	if parent.ProjectID != req.ProjectID {
 		log.Printf("[architect-design] parent %s is in project %s but child %s is in %s — skipping parent context", parent.ID, parent.ProjectID, req.ID, req.ProjectID)
-		return nil, ""
+		return nil, "", ""
 	}
 	if strings.TrimSpace(parent.ParentID) != "" {
 		log.Printf("[architect-design] parent %s is itself a child (parent_id=%s) — nesting is one level deep, skipping parent context", parent.ID, parent.ParentID)
-		return nil, ""
+		return nil, "", ""
 	}
 	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
-	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir))
+	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir)), dir
+}
+
+// buildReferencedBlock renders the 「关联需求上下文」 prompt block for the
+// requirements this one references.
+//
+// Differences from buildParentBlock, and why:
+//
+//   - It injects the referenced requirements' **description + existing plan
+//     only**. No title, no project / status / kind, no attachment manifest —
+//     so unlike the parent block it needs no resolveAttachDir /
+//     attachManifestFor round-trip and produces no attachmentGrant. An Agent
+//     Server run therefore performs zero extra attachment syncs.
+//   - It handles N references, not one master requirement.
+//
+// Every failure path degrades to "no references" rather than erroring out,
+// for the same reason the parent block does: the references are reference
+// material. Their absence makes the design less informed but never wrong, so
+// blocking the stage would trade a soft problem for a hard one.
+func (h *WizardHandler) buildReferencedBlock(req *model.Requirement) (string, []model.RequirementReferenceContent) {
+	if req == nil || strings.TrimSpace(req.ID) == "" {
+		return "", nil
+	}
+	refs, err := h.reqSvc.ResolveReferenceContent(req.ID)
+	if err != nil {
+		log.Printf("[architect-design] reference lookup failed for %s: %v — continuing without referenced context", req.ID, err)
+		return "", nil
+	}
+	if len(refs) == 0 {
+		return "", nil
+	}
+	return promptpkg.BuildReferencedContextBlock(refs), refs
 }
 
 // parentTitle is the display name for the master requirement in job-log lines.
@@ -887,6 +1110,8 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// (the three branches: analyst-resume, fresh skip-analysis, and the
 	// DesignContextSummary handoff). Logic intentionally unchanged so
 	// wizard_architect_test.go's prompt-branch coverage keeps applying.
+	// A fourth branch (p.Continue) replaces the whole prompt with
+	// continueDesignPrompt — see the constant's doc comment.
 	//
 	// Plan-mode task prompt. When resuming/forking an existing conversation
 	// (analyst session present), the resumed thread already carries the
@@ -916,7 +1141,22 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、数据模型/数据库变更、实现风险及应对。"
-	if p.SkipAnalysis && p.SourceSID == "" {
+	if p.Continue {
+		// Continuation of an interrupted run (ContinueDesign is the only
+		// writer of p.Continue). The resumed design session already carries
+		// the requirement, the analysis and whatever the previous run had
+		// explored, so the prompt is deliberately just "继续" — anything
+		// more (title / plan contract / partial design_docs) makes the model
+		// rewrite the plan instead of picking up where it stopped.
+		prompt = continueDesignPrompt
+		// Same skip_role_context material as the resume branch: with the
+		// persona removed, the resumed session is the only source of truth
+		// about the requirement, and that assumption is exactly what the
+		// description backstop exists for.
+		if descBlock != "" {
+			prompt = descBlock + prompt
+		}
+	} else if p.SkipAnalysis && p.SourceSID == "" {
 		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
 		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
 			"制定具体可执行的技术实现方案（plan）。\n\n" +
@@ -930,6 +1170,11 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// 勾选态（默认）此块是 no-op，提示词与改动前逐字节一致。
 	if p.SkipRoleContext && p.AttachManifest != "" {
 		prompt = p.AttachManifest + "\n\n" + prompt
+	}
+	// 已授权读取目录清单前缀 —— 与附件清单同构，只在关闭态出现（勾选态它在
+	// system prompt 里）。
+	if p.SkipRoleContext && p.DirsManifest != "" {
+		prompt = p.DirsManifest + "\n\n" + prompt
 	}
 	// Context-compression handoff (fresh-session path only): when the
 	// design stage was previously compressed, the requirement carries a
@@ -959,6 +1204,16 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// execution without touching wizard_remote.go.
 	if p.ParentBlock != "" {
 		prompt += "\n\n" + p.ParentBlock
+	}
+	// Referenced requirements: append their description + existing plan plus
+	// the 「关联需求上下文」 output contract. Placed right after the parent
+	// block (and still before the kind-specific tail), so the block is
+	// guaranteed to be present no matter which branch built `prompt` —
+	// duplicating it into three branches would guarantee drift. Local and
+	// remote runs share p.Prompt, so this also covers Agent-server execution
+	// without touching wizard_remote.go.
+	if p.ReferencedBlock != "" {
+		prompt += "\n\n" + p.ReferencedBlock
 	}
 	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
 	// the user would normally have hidden this CTA in the frontend; we still
@@ -1047,6 +1302,16 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	}
 	prompt = llm.TranslateAtToSlash(prompt, llm.SlugsOf(archSkills))
 
+	// Phase lines. A continuation is labelled differently so the log itself
+	// tells the user the recovery resumed their previous session instead of
+	// starting over.
+	remotePhase := "📐 Agent 服务器 plan 模式下探索代码并制定技术方案..."
+	localPhase := "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."
+	if p.Continue {
+		remotePhase = "📐 Agent 服务器正在续接中断的方案设计会话，继续制定技术方案..."
+		localPhase = "📐 Claude 正在续接中断的方案设计会话，继续制定技术方案..."
+	}
+
 	var out claudeStreamOutcome
 	if p.AgentServerID != "" && h.agentSvrSvc != nil {
 		// Remote branch — plan-mode claude on the picked Agent server.
@@ -1054,7 +1319,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// sync / worker invocation / NDJSON parse; this exec body only
 		// owns the post-run persistence (UpdateDesign / UpdateArchitectModel
 		// / knowledge result event), same as the local branch below.
-		job.Append(store.LogLine{Type: "phase", Content: "📐 Agent 服务器 plan 模式下探索代码并制定技术方案..."})
+		job.Append(store.LogLine{Type: "phase", Content: remotePhase})
 		// RC-1: sourceSID 必须传「真实的来源会话」（fresh / 跳过分析路径下为空），
 		// 与开发阶段 wizard_coding.go 中 runRemoteCoding 的调用点保持一致。
 		// 若误传 sessionArg，fresh 运行会退化成 `--resume <刚铸的新 id>`（该会话
@@ -1075,6 +1340,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				claudeConfigID: claudeConfigID,
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
+				AddDirs:        p.AddDirs,
 				SyncMode:       p.SyncMode,
 				// 「设计者上下文」：把架构师 persona（+ 附件清单）透传给远端
 				// claude，与本地路径对齐。此前远端分支不设这个字段 ⇒ 远端既
@@ -1094,7 +1360,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// context.Background(): the HTTP request has already returned, so we
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns).
-		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
+		job.Append(store.LogLine{Type: "phase", Content: localPhase})
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
@@ -1106,6 +1372,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			Fork:           fork,
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
+			AddDirs:        p.AddDirs,
 		})
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
@@ -1213,23 +1480,23 @@ func (h *WizardHandler) finalizeArchitectRun(
 	// Persist the design session id (no-op when we already resumed an
 	// existing one). The strategy depends on the regenerate flag:
 	//
-//   - Non-regenerate: NewDesignSID was already stamped at run start so a
-//     mid-run crash can recover. If the CLI reported a different id
-//     (out.sessionID != newDesignSID && out.sessionID != sourceSID)
-//     correct it for safety. If neither value appeared, the session
-//     never established — drop the dangling pre-mint so the next run
-//     won't stale on first contact.
-//   - Regenerate: NewDesignSID was deliberately NOT persisted at run
-//     start — overwriting the user's old design_session_id mid-run would
-//     silently break their doc-refine chat if this run failed. So:
-//       * CLI reported an id → stamp it now (the run succeeded enough
-//         to either capture a real conversation or at least not crash,
-//         and the user wants to keep going in this new thread).
-//       * CLI reported nothing (crashed before system/init) → leave the
-//         old design_session_id alone entirely. The user keeps their
-//         doc-refine chat intact and can retry the regenerate.
-//     clearUnestablishedDesignSession above is gated by p.Regenerate
-//     for the same reason so the two paths don't contradict each other.
+	//   - Non-regenerate: NewDesignSID was already stamped at run start so a
+	//     mid-run crash can recover. If the CLI reported a different id
+	//     (out.sessionID != newDesignSID && out.sessionID != sourceSID)
+	//     correct it for safety. If neither value appeared, the session
+	//     never established — drop the dangling pre-mint so the next run
+	//     won't stale on first contact.
+	//   - Regenerate: NewDesignSID was deliberately NOT persisted at run
+	//     start — overwriting the user's old design_session_id mid-run would
+	//     silently break their doc-refine chat if this run failed. So:
+	//       * CLI reported an id → stamp it now (the run succeeded enough
+	//         to either capture a real conversation or at least not crash,
+	//         and the user wants to keep going in this new thread).
+	//       * CLI reported nothing (crashed before system/init) → leave the
+	//         old design_session_id alone entirely. The user keeps their
+	//         doc-refine chat intact and can retry the regenerate.
+	//     clearUnestablishedDesignSession above is gated by p.Regenerate
+	//     for the same reason so the two paths don't contradict each other.
 	if p.Regenerate {
 		if out.sessionID != "" {
 			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
@@ -1245,6 +1512,18 @@ func (h *WizardHandler) finalizeArchitectRun(
 	} else if out.sessionID != newDesignSID && out.sessionID != sourceSID {
 		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
+		}
+	}
+	// Where does the design transcript live now? The column is the pointer the
+	// Agent-server up-sync uses to pull a session back when this machine has
+	// no copy — so it must name the host that actually holds the file.
+	//
+	// The coding stage owns the column once it runs (the coding session is
+	// the one that has to survive a server switch), so the design stage only
+	// claims it while it is still empty.
+	if p.AgentServerID != "" && p.Req != nil && p.Req.SessionServerID == "" {
+		if perr := h.reqSvc.UpdateSessionServer(id, p.AgentServerID); perr != nil {
+			log.Printf("[architect-design] failed to persist session_server_id for %s: %v", id, perr)
 		}
 	}
 
@@ -1309,6 +1588,22 @@ func (h *WizardHandler) finalizeArchitectRun(
 	if p.ParentBlock != "" && !promptpkg.HasParentContextSection(planMarkdown) {
 		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「主需求关联上下文」章节，已自动追加附录（主需求：" + parentTitle(p.Parent) + "）"})
 		if fallback := promptpkg.BuildParentContextFallback(p.Parent); fallback != "" {
+			planMarkdown = planMarkdown + "\n\n" + fallback
+		}
+	}
+
+	// Same backstop for the 「关联需求上下文」 contract. A prompt is a soft
+	// guarantee and downstream (coding / sub-task split) reads ONLY this
+	// requirement's design_docs — so a plan that skipped the section would
+	// silently lose the referenced requirements' decisions with nothing
+	// downstream able to notice. Append the machine-written appendix so the
+	// referenced context is at least present and traceable.
+	//
+	// Deliberately not a re-run: a second claude invocation to "fix" the
+	// omission would double the token cost of a run that mostly succeeded.
+	if p.ReferencedBlock != "" && !promptpkg.HasReferencedContextSection(planMarkdown) {
+		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「关联需求上下文」章节，已自动追加附录（" + strconv.Itoa(len(p.ReferencedRefs)) + " 个关联需求）"})
+		if fallback := promptpkg.BuildReferencedContextFallback(p.ReferencedRefs); fallback != "" {
 			planMarkdown = planMarkdown + "\n\n" + fallback
 		}
 	}

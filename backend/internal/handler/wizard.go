@@ -95,6 +95,12 @@ type WizardHandler struct {
 	// stages simply skip the manifest block when nil (no behavior change
 	// vs pre-feature).
 	attachSvc *service.AttachmentService
+	// dirSvc handles the directories the user authorized Claude to read for
+	// a requirement (the --add-dir grants). Wired from main.go via
+	// SetRequirementDirSvc. nil before the wire up — the wizard stages
+	// simply skip the grant (and the prompt block) when nil, which keeps
+	// pre-feature behavior byte-identical.
+	dirSvc *service.RequirementDirService
 	// designRevSvc handles the design_revisions table — the versioned
 	// history of each requirement's design plan. Wired after construction
 	// from main.go via SetDesignRevisionSvc because the wizard handler
@@ -105,6 +111,13 @@ type WizardHandler struct {
 	// working (a deployment that doesn't need regenerating can leave it
 	// nil without affecting any first-run path).
 	designRevSvc *service.DesignRevisionService
+	// qaSvc handles the requirement_qa_turns table — the 阶段答疑 (stage Q&A)
+	// threads hanging off a requirement's design / coding session. Wired
+	// after construction from main.go via SetRequirementQASvc (same pattern
+	// as the design-revision service: the wizard handler sits in a
+	// constructor cycle with the services it consumes). nil disables just
+	// the Q&A endpoints; every other wizard feature keeps working.
+	qaSvc *service.RequirementQAService
 }
 
 func NewWizardHandler(database *db.DB, projectSvc projectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
@@ -168,6 +181,53 @@ func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 	h.attachSvc = svc
 }
 
+// SetRequirementDirSvc injects the service holding the directories the user
+// authorized Claude to read for a requirement. The wizard's stages hand
+// those paths to the claude CLI as `--add-dir` so a plan-mode run can read
+// them without a permission decision nobody is there to make.
+//
+// Passing nil disables the grant (the stages then spawn claude exactly as
+// they did before the feature existed).
+func (h *WizardHandler) SetRequirementDirSvc(svc *service.RequirementDirService) {
+	h.dirSvc = svc
+}
+
+// addDirsFor returns the directories granted to a requirement, ready to be
+// passed to the claude CLI as `--add-dir`. Nil when nothing is granted or
+// the service isn't wired — callers pass the result through unconditionally.
+func (h *WizardHandler) addDirsFor(reqID string) []string {
+	return resolveAddDirs(h.dirSvc, reqID)
+}
+
+// grantDirsFor merges the directories the user authorized for a requirement
+// with the directory the stage's attachment manifest points at, and returns
+// the combined list to hand to the claude CLI as `--add-dir`.
+//
+// attachDir MUST be the very same value the same stage passes to
+// attachManifestFor — that identity is the whole point: the manifest tells
+// Claude "the file is at X", and the grant makes X readable. If the two drift
+// apart the attachment stays invisible (in plan mode the read outside the
+// working directory needs a permission decision that a non-interactive `-p`
+// run has nobody to make). Pass "" for "the local NovaWorkbench attachment
+// root" — attachGrantDirs resolves it exactly the way attachManifestFor's own
+// empty-value fallback does.
+//
+// extra carries grants for other owners — e.g. the master requirement's
+// attachment directory while designing a sub-requirement.
+func (h *WizardHandler) grantDirsFor(reqID, attachDir string, extra ...attachmentGrant) []string {
+	grants := make([]attachmentGrant, 0, len(extra)+1)
+	grants = append(grants, attachmentGrant{ownerID: reqID, dir: attachDir})
+	grants = append(grants, extra...)
+	return attachGrantDirs(h.addDirsFor(reqID), h.attachSvc, grants...)
+}
+
+// dirsManifestFor renders the granted directories as a prompt block so
+// Claude knows they exist and were authorized for this requirement.
+// Empty string when nothing is granted.
+func (h *WizardHandler) dirsManifestFor(reqID string) string {
+	return dirsManifestFor(h.dirSvc, reqID)
+}
+
 // SetDesignRevisionSvc injects the DesignRevisionService used by the
 // 「重新生成技术方案」 flow (wizard_architect.go) and the design-revisions
 // REST handlers (wizard_design_revision.go). Called from main.go AFTER
@@ -177,6 +237,15 @@ func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 // the new handler registers.
 func (h *WizardHandler) SetDesignRevisionSvc(svc *service.DesignRevisionService) {
 	h.designRevSvc = svc
+}
+
+// SetRequirementQASvc injects the RequirementQAService used by the 阶段答疑
+// (stage Q&A) endpoints (wizard_qa.go). Called from main.go AFTER
+// NewWizardHandler because the service participates in the wizard→service
+// dependency cycle. Passing nil is safe: the Q&A endpoints then answer
+// "service not enabled" while every other wizard feature keeps working.
+func (h *WizardHandler) SetRequirementQASvc(svc *service.RequirementQAService) {
+	h.qaSvc = svc
 }
 
 // attachManifestFor returns the attachment manifest markdown for a

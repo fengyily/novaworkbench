@@ -104,6 +104,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_attach_req_sha
 	ON requirement_attachments(requirement_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_ra_req ON requirement_attachments(requirement_id);
 
+-- Directories the user authorized Claude to read for a requirement. Unlike
+-- requirement_attachments (which copies file bytes into NovaWorkbench's own
+-- store), a row here points at a directory that stays where it is on disk and
+-- is granted to the claude session via the CLI's --add-dir flag. The
+-- plan-mode architect stage needs this: without the grant, a read of a path
+-- outside the session's working directory needs a permission decision that
+-- nobody is there to make in a non-interactive run.
+--
+-- path holds the NORMALIZED absolute path (see service.NormalizeDirPath):
+-- a leading tilde is expanded, the path is made absolute and cleaned.
+-- Symlinks are not resolved. The unique pair is on (requirement_id, path)
+-- so granting the same directory twice is a no-op rather than a second row.
+CREATE TABLE IF NOT EXISTS requirement_dirs (
+	id              TEXT PRIMARY KEY,
+	requirement_id  TEXT NOT NULL,
+	path            TEXT NOT NULL,
+	label           TEXT NOT NULL DEFAULT '',
+	added_by        TEXT NOT NULL DEFAULT '',
+	added_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_reqdir_req_path
+	ON requirement_dirs(requirement_id, path);
+CREATE INDEX IF NOT EXISTS idx_rd_req ON requirement_dirs(requirement_id);
+
 CREATE TABLE IF NOT EXISTS knowledge (
 	id TEXT PRIMARY KEY,
 	project_id TEXT NOT NULL,
@@ -152,6 +177,44 @@ CREATE TABLE IF NOT EXISTS coding_chats (
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
+
+-- 阶段答疑对话 (Stage Q&A Chat) — 针对「方案设计会话」/「开发会话」的独立答疑线程。
+--
+-- 一行一问一答(turn 表)而不是整段转录表,原因有二:
+--   1. 答疑由后端 job 化执行(goroutine 后台跑),答案必须由后端落库 —— 用户发问后
+--      关掉浏览器,答案不能丢。refinement_chats / coding_chats 那种「前端 PUT 整段
+--      转录」的形态与此冲突。
+--   2. status / job_id(刷新重连句柄) / resumed(降级按轮发生)天然是 per-turn 字段。
+--
+-- 会话元数据记在每一轮行上,不另设线程表:
+--   session_id        —— 本轮实际运行的 QA 会话 id(首问 fork 时预铸)
+--   source_session_id —— fork 时的源会话快照(requirements.design_session_id /
+--                       coding_session_id)。源会话重跑后 id 失配即被检出 → 自动
+--                       重新 fork,旧问答保留展示。
+--   resumed           —— 1=续接了 QA 会话上下文 / 0=降级为全新会话(源会话失效)。
+--
+-- 关键不变式:本表 session_id 是答疑流程唯一写入的会话列 —— requirements 的
+-- design_session_id / coding_session_id 全程只读,答疑零污染。
+CREATE TABLE IF NOT EXISTS requirement_qa_turns (
+	id                TEXT PRIMARY KEY,
+	requirement_id    TEXT NOT NULL,
+	stage             TEXT NOT NULL DEFAULT 'design',
+	question          TEXT NOT NULL DEFAULT '',
+	answer            TEXT NOT NULL DEFAULT '',
+	status            TEXT NOT NULL DEFAULT 'running',
+	job_id            TEXT NOT NULL DEFAULT '',
+	model             TEXT NOT NULL DEFAULT '',
+	session_id        TEXT NOT NULL DEFAULT '',
+	source_session_id TEXT NOT NULL DEFAULT '',
+	resumed           INTEGER NOT NULL DEFAULT 0,
+	created_by        TEXT NOT NULL DEFAULT '',
+	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	finished_at       DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+-- 线程视图恒为「某个需求的某个阶段的全部轮次,按时间正序」。
+CREATE INDEX IF NOT EXISTS idx_qa_req_stage ON requirement_qa_turns(requirement_id, stage, created_at);
 
 CREATE TABLE IF NOT EXISTS project_run_configs (
 	id           TEXT PRIMARY KEY,
@@ -974,6 +1037,14 @@ var alterColumns = []string{
 	// errors on already-migrated DBs (sqlite/mysql/pg), so this is safe to
 	// ship before all deployments have caught up.
 	`ALTER TABLE requirements ADD COLUMN design_agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Which Agent server currently holds this requirement's Claude session
+	// files (the .jsonl transcripts). Distinct from agent_server_id, which
+	// records "where the last development run happened" and is OVERWRITTEN
+	// when the user switches servers — this one keeps pointing at the host
+	// that still has the transcript, so the up-sync can pull it back before
+	// pushing it to the new target (跨 Agent Server 续接会话). Empty = local /
+	// unknown; legacy rows read as empty and simply can't be recovered.
+	`ALTER TABLE requirements ADD COLUMN session_server_id TEXT NOT NULL DEFAULT ''`,
 	// Merged "design_and_coding" scheduled task: per-stage model / agent-server
 	// binding for the developer half of the chained run. coding_model mirrors
 	// the design-stage model column (empty = role default resolved at dispatch
@@ -1105,6 +1176,24 @@ var alterColumns = []string{
 	// top level. Distinct from source_requirement_id (promotion provenance).
 	// No FK and no index (TEXT index would need VARCHAR on MySQL).
 	`ALTER TABLE requirements ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+	// 引用需求：方案设计阶段注入的「关联需求上下文」。JSON 数组字符串，形如
+	// [{"requirement_id":"req_x","note":"复用其鉴权中间件"}]，空 = "[]"。
+	//
+	// 与 parent_id（主/子层级，仅一层同项目）、source_requirement_id（转需求
+	// 溯源）三者语义互斥：这一列表达的是「本需求参考了哪些别的需求」，允许
+	// 跨项目，且不构成层级。
+	//
+	// 之所以用 JSON 列而不是 join 表：新表需要额外的 service / handler /
+	// 路由 / 删除清理 / copyOrder 维护，而 SQLite 从不开 PRAGMA
+	// foreign_keys，ON DELETE CASCADE 不生效；JSON 列随 requirements 行一起
+	// 被 db.Migrate 复制，跨库迁移零成本。被引用需求被删后的「悬空引用」在
+	// 解析阶段直接跳过，不做跨方言的 JSON 数组 UPDATE。
+	//
+	// TEXT NOT NULL DEFAULT '[]' 兼容 SQLite / MySQL / Postgres 三方言：
+	// mysqlTextDefault 会把 MySQL 上的 TEXT DEFAULT '[]' 转成 DEFAULT ('[]')，
+	// 与 tags / marks 完全同款。isIgnorableDDLError 吞掉"duplicate column"
+	// 以便历史库平滑升级。
+	`ALTER TABLE requirements ADD COLUMN referenced_requirements TEXT NOT NULL DEFAULT '[]'`,
 	// Per-stage context compression (analyst / architect / coding). When the
 	// user clicks "压缩上下文", the wizard handler asks Claude to summarize the
 	// current session via --resume and stores the result here, then clears the
@@ -1579,7 +1668,9 @@ var (
 	// bare TEXT column. sub_task_id was missing until 2026-10-24, which made
 	// `CREATE TABLE sub_task_thinking` fail on MySQL (TEXT PRIMARY KEY
 	// without a prefix length), while SQLite/Postgres silently accepted it.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
+	// `stage` joined the list with requirement_qa_turns (indexed as part of
+	// idx_qa_req_stage) — the same trap, one column further down.
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

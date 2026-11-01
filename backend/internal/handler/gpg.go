@@ -41,6 +41,27 @@ import (
 //     even then only if the file is non-empty (an unprotected key
 //     must not see `--passphrase-file <empty>`).
 
+// gpgMissingGuard emits a fail-fast guard for scripts that shell out to
+// gpg.
+//
+// `command -v` is POSIX-portable and, inside an `if !` condition, is
+// exempt from `set -e` — so a missing gpg produces ONE actionable line
+// instead of a raw `gpg: command not found` from the shell (which is what
+// users saw when the Agent Server's gpg lived outside sshd's default
+// PATH). The exit code stays 127 ("command not found") so the caller's
+// exit-code handling keeps its meaning.
+//
+// `scope` names the operation that failed ("GPG 私钥导入" …) so the user
+// knows WHICH step needs gpg. It is always a compile-time literal from
+// this package, never user input.
+func gpgMissingGuard(scope string) string {
+	return "if ! command -v gpg >/dev/null 2>&1; then\n" +
+		"  echo \"[nova-gpg] " + scope + "：未找到 gpg 可执行文件（PATH=$PATH）。" +
+		"请在目标主机安装 GnuPG（macOS: brew install gnupg；Linux: apt install gnupg）\" >&2\n" +
+		"  exit 127\n" +
+		"fi\n"
+}
+
 // buildGPGProvisionScript emits the shell script that, on the target
 // host (local or remote), imports the previously-uploaded armored
 // private key into a per-run GNUPGHOME and wires the given worktree's
@@ -73,10 +94,12 @@ func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail, sta
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	b.WriteString(shellPathPrelude)
 	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
 	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
 	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
 	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	b.WriteString(gpgMissingGuard("GPG 私钥导入"))
 	// Import is non-interactive; --pinentry-mode loopback + --batch is
 	// the documented way to skip the pinentry prompt entirely on
 	// ancient gpg 2.0.x.
@@ -251,10 +274,12 @@ func buildGPGGenerateScript(gnupgHome, uid string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	b.WriteString(shellPathPrelude)
 	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
 	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
 	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
 	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	b.WriteString(gpgMissingGuard("GPG 密钥生成"))
 	// `default default never` = gpg's own default algorithm/usage with no
 	// expiry date. We don't pin an algorithm so the key stays whatever the
 	// installed gpg considers current (ed25519 on 2.2+), which is what
@@ -288,10 +313,12 @@ func buildGPGVerifyScript(gnupgHome, armoredKeyPath string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	b.WriteString(shellPathPrelude)
 	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
 	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
 	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
 	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	b.WriteString(gpgMissingGuard("GPG 私钥校验"))
 	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --import " + shellQuoteSingle(armoredKeyPath) + "\n")
 	b.WriteString(gpgKeyInfoSnippet())
 	b.WriteString("if [ -z \"$keyid\" ]; then\n")
@@ -372,7 +399,14 @@ func buildGPGWrapperScript(gnupgHome string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
+	// The wrapper is spawned by GIT (as gpg.program), not by our SSH exec
+	// channel — so it inherits whatever PATH the committing process had.
+	// On an Agent Server that PATH is sshd's narrow default, where a
+	// Homebrew/system gpg is invisible. It therefore has to carry its own
+	// PATH contract.
+	b.WriteString(shellPathPrelude)
 	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	b.WriteString(gpgMissingGuard("GPG 签名 wrapper"))
 	b.WriteString("if [ -s \"$GNUPGHOME/passphrase\" ]; then\n")
 	b.WriteString("  exec gpg --batch --no-tty --pinentry-mode loopback --passphrase-file \"$GNUPGHOME/passphrase\" \"$@\"\n")
 	b.WriteString("fi\n")
@@ -575,6 +609,10 @@ func classifyGitSignFailure(stderr string) string {
 		return "❌ 未找到可用的 GPG 私钥，请确认已在「设置 → 平台 Token」保存正确的私钥"
 
 	case strings.Contains(s, "gpg: not found"),
+		// /bin/sh spells the same condition "gpg: command not found"
+		// (macOS/Linux) — the wording carries an extra word, so the
+		// "gpg: not found" pattern above never matches it.
+		strings.Contains(s, "gpg: command not found"),
 		strings.Contains(s, "executable file not found"),
 		strings.Contains(s, "no such file or directory") && strings.Contains(s, "gpg"):
 		return "❌ Agent 服务器缺少 gpg，请到「设置 → Agent 服务器」点「安装依赖」"

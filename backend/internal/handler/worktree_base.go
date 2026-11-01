@@ -96,6 +96,22 @@ func ensureDetachedWorktreeCore(projectPath, reqID, baseBranch string, logf func
 			if logf != nil {
 				logf("🌿 隔离 worktree 已从分支 " + cur + " 脱钩（detached HEAD），未创建新分支")
 			}
+			// The branch this requirement owns is now a leftover: the
+			// no-branch mode's whole promise is that no branch exists for
+			// this requirement. HEAD still points at the very same commit
+			// (we detached in place), so the safe delete (`-d`, which refuses
+			// anything not merged) cannot lose work. A branch that belongs to
+			// ANOTHER requirement is left alone.
+			if requirementOwnedBranch(cur, reqID) {
+				if out, derr := gitRun(wtPath, "branch", "-d", cur); derr != nil {
+					log.Printf("[no-branch] %s: 残留分支 %s 未删除（可忽略）: %s", reqID, cur, strings.TrimSpace(out+" "+derr.Error()))
+					if logf != nil {
+						logf("ℹ️ 残留分支 " + cur + " 未删除（可能被其它 worktree 占用），如需清理请手动执行: git branch -D " + cur)
+					}
+				} else if logf != nil {
+					logf("🧹 已删除不创建分支模式下的残留本地分支: " + cur)
+				}
+			}
 		}
 		// Best-effort fast-forward onto the base line. A worktree that already
 		// carries local commits cannot fast-forward — keep the current HEAD and
@@ -214,6 +230,36 @@ func resolveCodingWorktreeMode(noBranch bool, branchName, reqID string) string {
 	return codingModeInPlace
 }
 
+// requirementOwnedBranch reports whether a local branch name belongs to the
+// given requirement — i.e. it is the requirement's own dev branch.
+//
+// Two shapes are recognized:
+//
+//	<prefix>/req_<id>   — the current convention (anchorWorktree /
+//	                      resolveImmediateBranch derive it from req.ID)
+//	<prefix>/<id>       — the older convention that stripped the "req_"
+//	                      prefix (still present in long-lived repos, e.g.
+//	                      feat/1a42496198026380)
+//
+// Anything else (a shared branch, a release branch, another requirement's
+// branch) is NOT owned by the requirement and must never be deleted by the
+// no-branch cleanup.
+func requirementOwnedBranch(branch, reqID string) bool {
+	branch = strings.TrimSpace(branch)
+	reqID = strings.TrimSpace(reqID)
+	if branch == "" || reqID == "" {
+		return false
+	}
+	if strings.HasSuffix(branch, "/"+reqID) {
+		return true
+	}
+	if trimmed := strings.TrimPrefix(reqID, "req_"); trimmed != reqID && trimmed != "" &&
+		strings.HasSuffix(branch, "/"+trimmed) {
+		return true
+	}
+	return false
+}
+
 // resolveNoBranchWorkDir returns the directory where a no-branch
 // requirement's code actually lives.
 //
@@ -244,17 +290,22 @@ func resolveNoBranchWorkDir(reqRow *model.Requirement, projectPath string) strin
 // pushBaseRefspecArgs builds the git arguments that push the current HEAD
 // onto the base branch.
 //
-// A detached HEAD cannot carry an upstream, so `-u` is only added on the
-// branch-shaped path — `git push -u` on a detached HEAD fails with "cannot
-// set up tracking information".
+// The refspec form (`HEAD:refs/heads/<base>`) is the ONLY shape the no-branch
+// mode uses, and it is deliberately unconditional:
 //
-//	detached  → ["push", "origin", "HEAD:refs/heads/<base>"]
-//	branch    → ["push", "-u", "origin", "<base>"]
-func pushBaseRefspecArgs(detached bool, base string) []string {
-	if detached {
-		return []string{"push", "origin", "HEAD:refs/heads/" + base}
-	}
-	return []string{"push", "-u", "origin", base}
+//   - A detached HEAD cannot carry an upstream, so `git push -u` fails with
+//     "cannot set up tracking information" — the `-u` flag is never added.
+//   - When the coding agent left a branch checked out inside the isolated
+//     worktree (it happens: a detached HEAD looks broken, so the agent runs
+//     `git checkout -b` — req_1a42496198026380, 2026-10-27), `push origin
+//     <base>` would push the LOCAL base branch instead of the agent's
+//     commits. The refspec form pushes whatever HEAD points at, whatever
+//     branch happens to be checked out.
+//
+// Either way only refs/heads/<base> moves on the remote — no branch is
+// created, on either side.
+func pushBaseRefspecArgs(base string) []string {
+	return []string{"push", "origin", "HEAD:refs/heads/" + base}
 }
 
 // resolveBaseBranch resolves the base branch of a requirement.

@@ -235,8 +235,9 @@
 /* The status column's width now lives with the other column rules
    (`.pr-table .pr-c-status`) — the cell also holds the claude-pulse-dot
    (active wizard job indicator), which is small enough not to need its
-   own rule. `.status-chips` owns its internal flex-wrap so a 3-chip row
-   on a tight viewport wraps instead of overflowing. */
+   own rule. The chip group is pinned to ONE line here (see
+   `.pr-c-status .status-chips` below); `.status-chips` itself stays
+   wrappable because the global requirements list shares the class. */
 
 .pr-branch {
   font-family: var(--font-mono, monospace);
@@ -279,20 +280,53 @@
 
    Hiding by column class rather than trimming widths is deliberate: a
    trimmed column still costs min-content, whereas a hidden one returns
-   its full width to the title. */
+   its full width to the title.
+
+   Width note: pinning the status chip group to one line and giving the
+   ID a readable 12-character prefix costs the table ~70px (ID 84→104,
+   status 152→~213 for a 3-chip row). The two numeric columns pay 16px of
+   it back through their tighter gutter, but the title — the column that
+   is actually scanned — keeps its 300px cap instead of being squeezed to
+   absorb the rest. */
 .pr-table .pr-c-id {
-  width: 84px;
-  max-width: 84px;
+  /* A requirement ID is "req_" + 16 hex digits = 20 monospace characters
+     (~132px at 11px), so the old 84px ceiling could never hold it. Because
+     `max-width` pins the column and a <td>'s overflow defaults to visible,
+     the surplus text was PAINTED OVER the neighbouring Type cell — the
+     priority dot landed inside the ID and one hex digit stuck out past it.
+     The cell content is now wrapped in `.pr-cell-clip`, which ellipsis-
+     truncates instead of overflowing, and the column grew to 104px
+     (content box 80px ≈ 12 characters) so a useful prefix still reads. */
+  width: 104px;
+  max-width: 104px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-muted);
 }
 .pr-table .pr-c-type { width: 112px; }
-.pr-table .pr-c-status { min-width: 152px; }
+.pr-table .pr-c-status {
+  /* The chip group is an ordered tag string (源/方案 → 进度 → 待确认). Three
+     chips need ~186px of content, but this column was floored at 152px and
+     `.status-chips` defaults to flex-wrap: wrap — so a 3-chip row broke
+     onto a second line and doubled that row's height, breaking the table's
+     row rhythm. `nowrap` on the group makes the column's intrinsic width
+     follow the widest chip row (≈210px including padding) on its own, so
+     no magic number is hard-coded and a chip-label change re-flows itself.
+     The floor stays at 152px for rows that carry fewer chips. */
+  min-width: 152px;
+}
+.pr-table .pr-c-status .status-chips { flex-wrap: nowrap; }
 .pr-table .pr-c-agent { width: 128px; }
 .pr-table .pr-c-num {
   width: 104px;
   max-width: 104px;
+  /* Tighter side padding than the other cells: these are dense data columns
+     and the default 12px gutter bought nothing but width — the column is
+     capped anyway. 8px keeps the widest compact pair ("3.0M / 8.6M",
+     79px) and the widest single-currency cost ("¥1,936.30", 65px) inside
+     their cells without an ellipsis, and pays back 8px of table width. */
+  padding-left: 8px;
+  padding-right: 8px;
   font-family: var(--font-mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -336,6 +370,17 @@
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status-cell clip box. The chip group (inline-flex) and the active-job
+   pulse dot (inline-block) share one line inside it, so the column can be
+   squeezed to its floor without either of them spilling into the Agent
+   server column. `display: block` (not inline-block) keeps the two
+   inline-level children on the same text line. */
+.pr-status-clip {
+  display: block;
+  overflow: hidden;
   white-space: nowrap;
 }
 
@@ -631,6 +676,16 @@
      rule sets a max-width that no longer applies. */
   .pr-list { overflow-x: visible; }
   .pr-title { max-width: none; }
+
+  /* Card mode gives the status cell a full-width row, so the chip group has
+     room to breathe and there is no row-height rhythm to protect — undo the
+     desktop nowrap here. A clipped chip would hide a status the user came
+     to read, which is worse than a two-line chip group on a phone. */
+  .pr-table .pr-c-status .status-chips { flex-wrap: wrap; }
+  .pr-status-clip {
+    overflow: visible;
+    white-space: normal;
+  }
 
   /* The detail-tabs container scrolls horizontally so 7 tabs don't crowd
      into a 360px-wide phone. Tab buttons get taller touch targets. */
@@ -1031,6 +1086,12 @@
   text-overflow: ellipsis;
   vertical-align: middle;
 }
+
+/* Inside the project requirements table the tag must stay inside its own
+   cell: the Agent column is 128px wide while the tag's own cap was 160px,
+   so a long machine name used to paint over the Token column next to it.
+   The full name is on the tag's `title` tooltip. */
+.pr-table .pr-c-agent .agent-server-tag { max-width: 100%; }
 
 /* Row-level hierarchy styles live in RequirementTreeToggle.css so both
    requirement tables share them; only the drag states are page-specific. */

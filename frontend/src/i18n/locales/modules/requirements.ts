@@ -152,6 +152,77 @@ export const requirements = {
     designStageLabel: '方案模型与执行环境',
     designLaunchError: '需求已创建，但方案生成失败：{{error}}',
   },
+  // qaChat — 阶段答疑面板 (StageQAChat.tsx)：针对「方案设计会话」/「开发会话」
+  // 的独立答疑线程。答疑跑在从原会话 fork 出来的独立会话里，不写回原会话。
+  qaChat: {
+    title: '方案 / 开发答疑',
+    expandBtn: '展开答疑',
+    collapseBtn: '收起',
+    hint: '针对本阶段的方案 / 实现提问。答疑在独立会话中进行，不会影响原会话的上下文。',
+    loading: '加载答疑记录…',
+    empty: '还没有答疑记录。',
+    questionTag: '问',
+    answerTag: '答',
+    running: '正在回答…',
+    failed: '答疑失败',
+    asking: '回答中…',
+    askBtn: '提问',
+    placeholder: '例如：为什么这里用 turn 表而不是转录表？\nEnter 发送  ·  Shift+Enter 换行',
+    deleteTitle: '删除这条答疑',
+    deleteConfirm: '删除这条答疑记录？',
+    resetBtn: '清空',
+    resetTitle: '清空本阶段的答疑记录',
+    resetConfirm: '确定清空本阶段的所有答疑记录吗？',
+    refreshBtn: '刷新',
+    refreshTitle: '重新拉取答疑记录',
+    execError: '答疑执行出错',
+    freshBadge: '未续接原会话（基于方案原文作答）',
+    threadRotated: '上下文已更新',
+    driftBadge: '上下文已更新',
+    driftHint: '该阶段在答疑线程建立之后被重新执行过。下一轮提问会从新的会话重新 fork。',
+    // Export — the thread as a standalone document. The label is used both as
+    // the H1 suffix and as the filename suffix so the .md and .pdf of one
+    // thread sort together.
+    exportBtn: '导出',
+    exportTitleAttr: '把本阶段已完成的答疑导出为文档',
+    exportDisabledTitle: '还没有已完成的答疑，暂无可导出内容',
+    exportMd: '导出 Markdown (.md)',
+    exportPdf: '导出 PDF',
+    exportBusy: '生成 PDF…',
+    exportFailed: '导出失败：',
+    exportTitleDesign: '方案设计答疑',
+    exportTitleCoding: '开发实现答疑',
+    exportStageDesign: '方案设计',
+    exportStageCoding: '开发实现',
+    exportMetaRequirement: '需求',
+    exportMetaStage: '阶段',
+    exportMetaTurns: '问答轮次',
+    exportMetaTime: '导出时间',
+    exportToc: '目录',
+    exportFreshNote: '未续接原会话（基于方案原文作答）',
+    exportRotated: '上下文已更新',
+    // 目录 / 视图切换 — the question index. One component, two presentations:
+    // a drawer above the thread in 全局 mode, a permanent left rail in 分栏
+    // mode. The index is built from the question text the backend already
+    // stores, so nothing here needs a new field.
+    viewModeLabel: '视图',
+    viewModeGlobal: '全局',
+    viewModeSplit: '分栏',
+    viewModeTitle: '切换视图：全局浏览 / 分栏浏览',
+    indexTitle: '目录',
+    indexToggle: '目录',
+    indexCollapse: '收起目录',
+    indexCount: '共 {{count}} 问',
+    indexFilterPlaceholder: '筛选问题…',
+    indexFilterEmpty: '没有匹配的问题',
+    indexEmpty: '还没有提问',
+    indexNum: 'Q{{n}}',
+    indexRunning: '回答中',
+    indexError: '失败',
+    prevTurn: '上一个问题',
+    nextTurn: '下一个问题',
+    turnCounter: '问题 {{current}} / {{total}}',
+  },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.
@@ -488,6 +559,10 @@ export const requirements = {
     processToggleShow: '▶ 思考过程',
     regenerateBtn: '重新生成方案',
     regenerateBtnTitle: '以全新会话重新生成技术方案，此前的微调对话不会被继承',
+    // 继续设计 — 中断后的恢复入口(后端重启/进程被杀/504/流中断)。与「重新生成
+    // 方案」并列:前者续接同一会话继续做,后者另起一个全新会话并冻结旧方案。
+    continueDesignBtn: '继续设计',
+    continueDesignTitle: '续接上次中断的方案设计会话（--resume），让 Claude 接着上次的进度继续，不从头重来；沿用上次保存的模型与执行环境（未保存时使用角色默认）',
     // 重新生成确认弹窗 (req_11e485759f583db8): 用户点 "重新生成方案" 后
     // 看到的对话框,清楚说明旧方案会被冻结成历史版本而不是丢掉,避免「以
     // 为旧方案没了」的误操作。Cancel + Confirm 两个按钮,文案比浏览器原生
@@ -495,6 +570,9 @@ export const requirements = {
     // 流程中移除,提了反而让人以为按钮属于已被下线的分析功能。
     regenerateConfirmTitle: '确认重新生成技术方案?',
     regenerateConfirmBody: '当前方案将被冻结为历史版本(可在版本下拉切回),并以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
+    // 中断后尚未产出方案时点「重新生成方案」——没有可冻结的东西,文案不能承诺
+    // 会多出一个历史版本。
+    regenerateConfirmBodyEmpty: '当前还没有可冻结的方案,将以全新会话重新生成一份技术方案。此前的微调对话不会被继承。',
     regenerateConfirmYes: '确认重新生成',
     regenerateConfirmCancel: '取消',
     // 「重新生成」preflight 弹窗 — 沿用 DesignCodingImmediateModal 的
@@ -861,6 +939,25 @@ export const requirements = {
     insertRefHint: '插入引用到光标位置',
     refInsert: '[附件：{{name}}]',
   },
+  dirs: {
+    sectionTitle: '📂 已授权目录',
+    sectionHint: '授权后 Claude 可直接读取这些目录;方案设计（plan 模式）不会卡在权限询问上',
+    pathPlaceholder: '目录绝对路径,例如 ~/workspace/specs',
+    labelPlaceholder: '备注(可选)',
+    addBtn: '授权目录',
+    empty: '暂无授权目录',
+    hostNote: '路径在运行 Claude 的那台机器上生效:本地执行 = 本机路径;Agent 服务器 = 该服务器上的路径。授权时不做存在性校验',
+    missing: '本机未找到',
+    missingHint: '本机未找到该目录。若在 Agent 服务器上执行,请确认该路径在服务器上存在',
+    autoBadge: '自动授权',
+    autoAttachment: '附件目录(自动授权,Claude 可直接读取)',
+    autoHint: '该目录随每次 Claude 运行自动授权,无需手工添加,也不能在此撤销',
+    delete: '撤销授权',
+    deleteConfirm: '撤销对「{{path}}」的读取授权?',
+    addFailed: '授权失败:{{msg}}',
+    deleteFailed: '撤销失败:{{msg}}',
+    loadFailed: '加载授权目录失败:{{msg}}',
+  },
   tree: {
     expand: '展开子需求',
     collapse: '收起子需求',
@@ -878,6 +975,29 @@ export const requirements = {
     parentNone: '无',
     parentDisabledHint: '该需求有子需求，请先将子需求移出后再设置主需求',
     parentFailed: '设置主需求失败：{{msg}}',
+  },
+  // 「引用需求」—— 本需求参考的其它需求。方案设计时，这些需求的描述 + 既有
+  // 方案会作为上下文注入到架构师提示词里（标题不会注入，那是给人看的）。
+  references: {
+    label: '引用需求',
+    hint: '方案设计时会把这些需求的描述与既有方案作为上下文注入',
+    searchPlaceholder: '搜索需求标题…',
+    loading: '加载中…',
+    empty: '还没有引用需求',
+    noMatch: '没有匹配的需求',
+    add: '引用',
+    remove: '移除引用',
+    notePlaceholder: '为什么引用它？（会写进方案上下文）',
+    noteLabel: '引用原因',
+    originDirect: '直接引用',
+    originParent: '继承自主需求',
+    limitReached: '最多引用 {{n}} 个需求',
+    moreResults: '还有 {{n}} 条，请继续输入关键词',
+    count: '已引用 {{n}}/{{max}}',
+    hasDesign: '已有方案',
+    saveFailed: '引用需求保存失败：',
+    detailLabel: '引用需求',
+    emptyDetail: '未引用其它需求',
   },
 } as const;
 

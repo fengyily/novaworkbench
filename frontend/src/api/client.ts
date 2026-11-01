@@ -118,6 +118,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   // + redirecting) on 401.
   const res = await authedFetch(url, { ...options, headers });
 
+  // 204 carries no body. `res.json()` would throw a SyntaxError on the empty
+  // payload, and the caller would report a failure for a request that
+  // actually succeeded — the DELETE handlers that answer 204 (QA turn/thread,
+  // attachments, reviews, agent servers, issue monitors) all fell into that
+  // trap. Treat it as a successful empty result instead.
+  if (res.status === 204) return undefined as T;
+
   const json: APIResponse<T> = await res.json();
 
   if (!json.success || json.error) {
@@ -515,6 +522,57 @@ export const attachmentsApi = {
   // belong to this owner.
   delete: (resource: AttachmentResource, ownerId: string, attId: string) =>
     api.delete<{ status: string }>(`/api/${resource}/${ownerId}/attachments/${attId}`),
+};
+
+// A directory the user authorized Claude to read for one requirement. The
+// server normalizes the path (tilde expansion, absolute + clean), so `path`
+// here is always the resolved absolute path — the same string the claude
+// CLI receives as `--add-dir` and the prompt shows. The server does NOT
+// check that the path exists: the claude session may run on an Agent
+// server, where the path resolves differently (see below).
+export interface RequirementDir {
+  id: string;
+  requirement_id: string;
+  path: string;
+  label: string;
+  added_by: string;
+  added_at: string;           // ISO 8601
+  /** Synthetic row: this directory is auto-authorized on every claude run
+   *  (the requirement's attachment directory) and cannot be revoked here. */
+  auto?: boolean;
+  /** Why the auto row exists — currently only "attachment". */
+  reason?: string;
+}
+
+// Granted directories for a requirement. Unlike attachments these are NOT
+// uploaded — the directory stays where it is on disk and the backend hands
+// the path to the claude CLI as `--add-dir`, which is what lets a plan-mode
+// stage read it without a permission decision nobody is there to make.
+//
+// The path is interpreted on the machine that runs claude: for a local run
+// that's this host; for an Agent-server run it's the agent host.
+export const requirementDirsApi = {
+  // Returns [] when the requirement has no grants (never null). Each row
+  // carries `exists_locally`: whether the directory is present on THIS
+  // host. It says nothing about the agent host — a grant missing here may
+  // still be exactly what a remote run needs.
+  list: (requirementId: string) =>
+    api.get<RequirementDir[]>(`/api/requirements/${requirementId}/dirs`),
+
+  // Grant a directory. `path` may be absolute or start with "~/" — the
+  // server expands and normalizes it. The path is NOT validated against
+  // the local filesystem (the claude session may run elsewhere); only the
+  // filesystem root is rejected.
+  add: (requirementId: string, path: string, label?: string) =>
+    api.post<RequirementDir>(`/api/requirements/${requirementId}/dirs`, {
+      path,
+      label: label ?? '',
+    }),
+
+  // Revoke a grant. 204 on success, 404 if the row doesn't belong to this
+  // requirement.
+  delete: (requirementId: string, dirId: string) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/dirs/${dirId}`),
 };
 
 // Sub-tasks: manually-triggered child agents that fork a requirement's main
@@ -1078,6 +1136,42 @@ export interface Requirement {
   launch_error?: string;
 }
 
+/**
+ * RequirementReference is one entry of a requirement's reference set — the
+ * requirements this one points at so their content + existing plan inform the
+ * design.
+ *
+ * The display fields (title / status / kind / project) exist for the UI only
+ * (picker candidates, detail-page chips). The backend injects **only** the
+ * referenced requirement's description + plan into the design prompt — the
+ * title is deliberately withheld, so it must not be relied on for anything
+ * model-facing.
+ */
+export interface RequirementReference {
+  // The referenced requirement's id (req_*), not the referencing row's id.
+  requirement_id: string;
+  // The user's "why am I referencing this" note. Injected into the design
+  // prompt as the relevance signal.
+  note: string;
+  // 'direct' = picked by the user on this requirement; 'parent' = inherited
+  // from the master requirement (a child inherits its master's set).
+  origin: 'direct' | 'parent';
+  title: string;
+  status: string;
+  kind?: Kind;
+  project_id: string;
+  project_name: string;
+  // The referenced requirement already has a plan — the UI hints that its
+  // content can be reused as-is.
+  has_design: boolean;
+}
+
+/** The write shape of a reference: only the id + the note are user-authored. */
+export interface RequirementReferenceInput {
+  requirement_id: string;
+  note: string;
+}
+
 // LaunchSpec is the optional execution plan attached to a POST /api/requirements
 // request. When omitted, Create behaves exactly as today (insert row + return).
 // When supplied, the backend resolves the flow → task-type mapping (see
@@ -1349,6 +1443,20 @@ export const requirementsApi = {
   // server enforces same-project / one-level rules and returns 400 otherwise.
   setParent: (id: string, parentId: string) =>
     api.put<Requirement>(`/api/requirements/${id}/parent`, { parent_id: parentId }),
+  // Read the resolved reference set: the references the user picked directly
+  // plus the ones inherited from the master requirement. The display fields
+  // (title / status / kind / project) come back for the UI; the referenced
+  // requirements' bodies do NOT — those are injected into the design prompt
+  // server-side.
+  getReferences: (id: string) =>
+    api.get<RequirementReference[]>(`/api/requirements/${id}/references`),
+  // Replace the **direct** reference set in one call. The response is the
+  // resolved set (direct + inherited), so the UI refreshes its chips from a
+  // single round-trip. Only the id + note are sent — the origin is derived
+  // server-side, and an inherited entry must never be written back as a
+  // direct one.
+  setReferences: (id: string, references: RequirementReferenceInput[]) =>
+    api.put<RequirementReference[]>(`/api/requirements/${id}/references`, { references }),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>
@@ -1703,6 +1811,24 @@ export const wizardApi = {
     fd.append('file', file);
     return api.upload<{ content: string }>('/api/wizard/import-design-file', fd);
   },
+  /**
+   * 继续设计 — resume an INTERRUPTED architect-design run (--resume
+   * requirements.design_session_id) and ask Claude to finish the plan instead
+   * of regenerating from scratch. The backend takes the execution environment
+   * from the requirement row (model / Claude config / Agent server / base
+   * branch), so only the designer-context toggle travels in the body. Returns
+   * a job id; the caller streams it through the shared
+   * GET /api/wizard/jobs/{id}/stream channel (same as architect-design).
+   *
+   * 409 INVALID_STATUS when the requirement is not in `designing` (designed /
+   * developing must use 重新生成方案), 409 NO_SESSION when there is no design
+   * session to resume, 400 KIND_NOT_SUPPORTED for wiki rows.
+   */
+  continueDesign: (requirementId: string, skipRoleContext: boolean) =>
+    api.post<{ job_id: string }>('/api/wizard/continue-design', {
+      requirement_id: requirementId,
+      skip_role_context: skipRoleContext,
+    }),
   // ── 重新生成 + 版本历史 ──────────────────────────────────────────────────
   // Parallel to codeReviewsApi.regenerate / listRevisions / getRevision /
   // restoreRevision. The list endpoint also returns the requirement's
@@ -1999,6 +2125,53 @@ export function parseReviewFindings(review: Pick<CodeReview, 'findings_json'> | 
   }
 }
 
+// ── 阶段答疑 (Stage Q&A Chat) ──────────────────────────────────────────────
+
+/**
+ * Which production conversation a Q&A thread asks about: the 方案设计会话
+ * (design) or the 开发会话 (coding).
+ */
+export type QAStage = 'design' | 'coding';
+
+export type QATurnStatus = 'running' | 'done' | 'error';
+
+/**
+ * One question-and-answer turn of a stage Q&A thread.
+ *
+ * The thread is persisted server-side (one row per turn), so it survives a
+ * page refresh and a backend restart — the live SSE stream is memory-only
+ * and is used just for progress feedback.
+ *
+ * `answer` doubles as the failure message when status is 'error', so the
+ * thread shows what went wrong instead of an empty bubble.
+ */
+export interface RequirementQATurn {
+  id: string;
+  requirement_id: string;
+  stage: QAStage;
+  question: string;
+  answer: string;
+  status: QATurnStatus;
+  /** JobStore id of this turn's run — lets the UI re-attach to the SSE
+   *  stream after a refresh while the turn is still running. */
+  job_id: string;
+  model: string;
+  /** The Q&A session this turn ran in. */
+  session_id: string;
+  /** The stage session this thread was forked from. A mismatch against the
+   *  requirement's current stage session means the stage was re-run and the
+   *  next question forks again — the UI renders a divider there. */
+  source_session_id: string;
+  /** true when the turn continued a session that held the forked context.
+   *  false means the answer came from a degraded run seeded with the plan
+   *  document — still useful, but shallower. */
+  resumed: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
 /**
  * Decodes CodeReview.goal_checks_json. Empty is the normal case for reports
  * written before the evidence table was part of the contract, and for models
@@ -2127,6 +2300,39 @@ export const codeReviewsApi = {
     severities?: ('P0' | 'P1' | 'P3')[];
     priority?: string;
   }) => api.post<Requirement[]>(`/api/code-reviews/${reviewId}/issues`, body),
+};
+
+// ── 阶段答疑 (Stage Q&A Chat) ──────────────────────────────────────────────
+//
+// A read-only Q&A thread forked off the requirement's design / coding
+// session. Asking returns a JobStore id streamed through the SAME channel
+// every other wizard job uses (GET /api/wizard/jobs/{id}/stream) — the Q&A
+// never opens a second SSE protocol.
+//
+// The answer is NOT reconstructed from the stream: the backend persists every
+// turn, so the UI re-reads the thread on job_done and the live stream is
+// only progress feedback.
+export const qaChatApi = {
+  /** The thread of one stage, oldest first. */
+  list: (requirementId: string, stage: QAStage) =>
+    api.get<RequirementQATurn[]>(`/api/requirements/${requirementId}/qa-chat/${stage}`),
+  /** Asks one question. Returns the job id to stream and the turn id. */
+  ask: (requirementId: string, stage: QAStage, question: string, body?: { model?: string; claude_config_id?: string }) =>
+    api.post<{ job_id: string; turn_id: string }>('/api/wizard/qa-chat', {
+      requirement_id: requirementId,
+      stage,
+      question,
+      ...(body?.model ? { model: body.model } : {}),
+      ...(body?.claude_config_id ? { claude_config_id: body.claude_config_id } : {}),
+    }),
+  /** Clears the whole thread of one stage. */
+  reset: (requirementId: string, stage: QAStage) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/qa-chat/${stage}`),
+  /** Removes one turn. */
+  removeTurn: (requirementId: string, stage: QAStage, turnId: string) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/qa-chat/${stage}/turns/${turnId}`),
+  /** SSE channel for a Q&A job — shared with every other wizard job. */
+  streamJobUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
 };
 
 // Platform tokens

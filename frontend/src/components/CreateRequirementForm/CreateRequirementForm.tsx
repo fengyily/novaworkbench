@@ -25,7 +25,8 @@ import { useTranslation } from 'react-i18next';
 import RichDescriptionEditor, { type RichDescriptionEditorHandle } from '../RichDescriptionEditor/RichDescriptionEditor';
 import AttachmentPanel from '../AttachmentPanel';
 import LaunchPlanSection from './LaunchPlanSection';
-import { ApiError, kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
+import RequirementReferencePicker from '../RequirementReferencePicker/RequirementReferencePicker';
+import { ApiError, kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement, type RequirementReference } from '../../api/client';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import PdfUploadDialog from '../PdfUploadDialog';
@@ -161,6 +162,23 @@ export function CreateRequirementForm({
   // re-fetch so the BASE default always reflects the user's current
   // selection.
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+
+  // Referenced requirements — the other requirements this one is related to.
+  // At design time the backend injects each referenced requirement's
+  // description + existing plan into the architect's prompt.
+  //
+  // The references are written AFTER the row exists (the form pre-creates a
+  // draft on mount, so the id is already known — but a draft that was
+  // deleted mid-flight forces the POST fallback path, and only then is the
+  // final id known). Both paths converge on the same `created` variable, so
+  // one call site covers them.
+  const [refs, setRefs] = useState<RequirementReference[]>([]);
+
+  // Set once the row has been committed. A retry after a partial failure
+  // (e.g. the reference write failed) must UPDATE that row — without this,
+  // a form that never got a pre-created draft would POST a second
+  // requirement on every retry.
+  const [committedId, setCommittedId] = useState<string | null>(null);
 
   // Cross-project mode: pick the first project as a sensible default so the
   // submit button isn't disabled on first paint.
@@ -341,7 +359,7 @@ export function CreateRequirementForm({
       // Create path: legacy flow for forms that don't have a draft (e.g.
       // an edit-mode form that pre-loaded an existingRequirementId but is
       // somehow missing the live state — defensive fallback).
-      const targetId = existingRequirementId || pendingReqId;
+      const targetId = existingRequirementId || committedId || pendingReqId;
       const resolvedPriority = kind === 'idea' ? 'medium' : priority;
       let created: Requirement;
       if (targetId) {
@@ -389,6 +407,29 @@ export function CreateRequirementForm({
       }
       // Once we've committed the row, the unmount cleanup is a no-op.
       setDraftTouched(true);
+      // Remember the committed row so a retry updates it instead of creating
+      // a second one (the reference write below can fail on its own).
+      setCommittedId(created.id);
+      // Persist the reference set. The requirement itself is already saved,
+      // so a failure here is only a partial success — and onCreated closes
+      // the panel and navigates away, which would swallow an inline error.
+      // Navigation is NOT blocked (the requirement is real and the launch
+      // plan may already be running), but the user is told with an alert —
+      // the same treatment the launch-dispatch failure gets — and can add the
+      // references from the detail page / edit panel.
+      if (refs.some(r => r.origin === 'direct')) {
+        try {
+          await requirementsApi.setReferences(
+            created.id,
+            refs
+              .filter(r => r.origin === 'direct')
+              .map(r => ({ requirement_id: r.requirement_id, note: r.note })),
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-alert
+          window.alert(t('requirements.references.saveFailed') + errorMessage(err));
+        }
+      }
       onCreated(created);
     } catch (err: any) {
       setError(errorMessage(err));
@@ -575,6 +616,22 @@ export function CreateRequirementForm({
           )}
         </div>
       )}
+
+      {/* Step 3b — Referenced requirements. Placed between the priority
+          group and the workflow picker: the reference set is part of "what
+          is this requirement about", while the workflow picker is "how do we
+          execute it" — the latter stays closest to the submit button. */}
+      <div className="form-group">
+        <label>{t('requirements.references.label')}</label>
+        <small className="form-hint">{t('requirements.references.hint')}</small>
+        <RequirementReferencePicker
+          value={refs}
+          onChange={setRefs}
+          projectId={projectId || undefined}
+          excludeIds={pendingReqId ? [pendingReqId] : undefined}
+          disabled={saving}
+        />
+      </div>
 
       {showFlow && (
         <div className="form-group">

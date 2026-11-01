@@ -415,6 +415,11 @@ type SubTaskRunner struct {
 	// SetAttachmentSvc so we don't have to grow NewSubTaskRunner's already
 	// long parameter list.
 	attachSvc *service.AttachmentService
+	// dirSvc holds the directories the user authorized Claude to read for the
+	// parent requirement (the --add-dir grants). Wired from main via
+	// SetRequirementDirSvc; nil keeps every child on the pre-feature
+	// behavior (no grant, no prompt block).
+	dirSvc *service.RequirementDirService
 	// runSem caps the number of claude CLI subprocesses that may be alive
 	// at once ACROSS ALL PROJECTS — the process-wide OOM ceiling. Buffered
 	// channel used as a counting semaphore: every Run acquires a slot on entry
@@ -515,6 +520,17 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // construct SubTaskRunner by hand working unchanged.
 func (r *SubTaskRunner) SetAttachmentSvc(svc *service.AttachmentService) {
 	r.attachSvc = svc
+}
+
+// SetRequirementDirSvc injects the service holding the directories the user
+// authorized Claude to read for a requirement. The child sub-task inherits
+// the grant (and the prompt block naming the directories), so a child that
+// needs to check a log directory can actually reach it.
+//
+// Passing nil disables both — the child then sees exactly the prompt and
+// the CLI argv it saw before the feature existed.
+func (r *SubTaskRunner) SetRequirementDirSvc(svc *service.RequirementDirService) {
+	r.dirSvc = svc
 }
 
 // NewPendingSubTask is a convenience that performs the three pre-Run writes
@@ -1074,6 +1090,15 @@ func (r *SubTaskRunner) Run(
 		prompt += "\n" + m
 		job.Append(store.LogLine{Type: "message", Content: "📎 已注入需求附件清单，AI 可直接 Read 查看。"})
 	}
+	// 已授权读取目录清单（--add-dir grants）。子任务继承父需求的授权，
+	// 这样需要翻日志 / 规格目录的子任务不必等用户再授权一次。附件目录一并授权：
+	// 上面注入的清单指向的就是它，不授权则子任务读不到附件。
+	addDirs := attachGrantDirs(resolveAddDirs(r.dirSvc, req.ID), r.attachSvc,
+		attachmentGrant{ownerID: req.ID, dir: attachDir})
+	if m := dirsManifestFor(r.dirSvc, req.ID); m != "" {
+		prompt += "\n" + m
+		job.Append(store.LogLine{Type: "message", Content: "📂 已授权读取 " + fmt.Sprintf("%d", len(addDirs)) + " 个目录，AI 可直接读取。"})
+	}
 	// Bare ("新会话（裸 claude）") path: skip --resume, skip parent context
 	// injection, skip the executor role system prompt — invoke claude with
 	// only the user's free-text body. Takes priority over freshSession so
@@ -1215,8 +1240,19 @@ func (r *SubTaskRunner) Run(
 			usage:          subUsage,
 			FreshSession:   freshSession,
 			Bare:           bare,
+			AddDirs:        addDirs,
 		})
 		// v0.5.x: 远端 Agent 服务器路径暂未接入 phase tracker；保持单一 artifact 落库。
+		// Persist the session id the CLI actually reported. The local path
+		// does the same inside runLocalSubTaskAttempt; without it the row
+		// keeps the pre-minted id, which is not guaranteed to be the file
+		// that ended up on disk — and "继续执行" would then resume a
+		// transcript that exists nowhere.
+		if out.sessionID != "" && out.sessionID != newSID {
+			if perr := r.subTaskSvc.UpdateSession(st.ID, out.sessionID, sourceSID); perr != nil {
+				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
+			}
+		}
 		r.finishSubTask(st, job, out, modelName, startTime, nil)
 		return
 	}
@@ -1281,6 +1317,7 @@ func (r *SubTaskRunner) Run(
 			adjust /*forkFlag*/, false,
 			freshSession, bare,
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
+			addDirs,
 		)
 	} else {
 		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
@@ -1327,6 +1364,7 @@ func (r *SubTaskRunner) Run(
 				/*forkFlag*/ true,
 				freshSession, bare,
 				workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
+				addDirs,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -1376,6 +1414,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	credEnv []string,
 	tracker *phaseTracker,
 	hardTimeout time.Duration,
+	addDirs []string,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -1420,6 +1459,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		ForkSessionID: newSID,
 		ExtraEnv:      credEnv,              // HTTPS git creds + committer identity
 		IdleTimeout:   subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
+		AddDirs:       addDirs,
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
