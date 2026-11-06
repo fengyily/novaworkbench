@@ -976,7 +976,7 @@ func (r *SubTaskRunner) Run(
 	// wizard's anchorWorktree uses (origin/<base> → HEAD → existing branch),
 	// including the project's platform-token credential injection.
 	if workDir == "" && !req.NoBranch && projPath != "" {
-		branch := branchPrefixForKind(req.Kind) + "/" + req.ID
+		branch := requirementBranchName(req.Kind, req.ID)
 		base := req.BaseBranch
 		if base == "" && proj != nil {
 			base = proj.DefaultBranch

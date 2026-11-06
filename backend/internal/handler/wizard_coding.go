@@ -821,7 +821,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if reqRow != nil {
 			kind = reqRow.Kind
 		}
-		p.BranchName = branchPrefixForKind(kind) + "/" + p.RequirementID
+		p.BranchName = requirementBranchName(kind, p.RequirementID)
 		job.Append(store.LogLine{Type: "message", Content: "🌿 调用方未传 branch_name，已从需求 ID 派生默认分支: " + p.BranchName})
 		log.Printf("[start-coding] %s: derived default branch_name=%s (caller omitted it)", p.RequirementID, p.BranchName)
 	}

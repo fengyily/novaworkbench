@@ -400,18 +400,6 @@ func (h *WizardHandler) immediateCodingCallback(reqID string) *runCallbacks {
 	}
 }
 
-// branchPrefixForKind returns the conventional branch prefix for a
-// requirement kind: "fix" for issues, "feat" for everything else
-// (requirement / idea / legacy empty). Used by resolveImmediateBranch and
-// anchorWorktree so the dev branch matches the change type the user
-// declared when creating the requirement.
-func branchPrefixForKind(kind string) string {
-	if kind == service.KindIssue {
-		return "fix"
-	}
-	return "feat"
-}
-
 // resolveImmediateBranch returns the explicit body field when set, else
 // falls back to "<prefix>/<id stripped of req_ prefix>" where the prefix
 // is "fix" for issues and "feat" otherwise — the convention used by the
@@ -428,7 +416,7 @@ func resolveImmediateBranch(explicit, reqID, kind string) string {
 	// coding stages share the same req id, so both resolve to the same branch
 	// and the coding stage reuses the design worktree (EnsureWorktree is
 	// idempotent per req+branch) instead of colliding.
-	return branchPrefixForKind(kind) + "/" + reqID
+	return requirementBranchName(kind, reqID)
 }
 
 // resolveImmediateBase returns the explicit body field when set, else

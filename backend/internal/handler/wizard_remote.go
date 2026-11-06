@@ -314,7 +314,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	wtPath := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
 	branch := in.req.BranchName
 	if branch == "" {
-		branch = "requirement-" + in.reqRow.ID
+		branch = requirementBranchName(in.reqRow.Kind, in.reqRow.ID)
 	}
 	// baseBranch fallback chain: UI-provided BaseBranch > project.DefaultBranch
 	// > literal "main". Mirrors the local execStartCoding chain so the remote
@@ -826,13 +826,13 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	}
 	baseRepo := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/base"
 	wtPath := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
-	// branch defaults to requirement-<id> when the caller did not pin one.
-	// Architect passes "" → falls back to the default (the branch label is
-	// unused for the plan-mode run; git worktree still needs a name to
-	// attach to).
+	// branch defaults to the requirement's canonical branch name when the
+	// caller did not pin one. Architect passes "" → falls back to the default
+	// (the branch label is unused for the plan-mode run; git worktree still
+	// needs a name to attach to).
 	branch := in.branch
 	if branch == "" {
-		branch = "requirement-" + in.reqRow.ID
+		branch = requirementBranchName(in.reqRow.Kind, in.reqRow.ID)
 	}
 	// baseBranch fallback chain: caller-provided baseBranch > project.DefaultBranch
 	// > literal "main". Mirrors the local execStartCoding chain so the remote

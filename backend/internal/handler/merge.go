@@ -1950,7 +1950,7 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 		// started in branch mode (or went through the design stage before
 		// the no_branch choice was made) can still have a leftover
 		// feat/<reqID> branch. Drop it by its derived name.
-		designBranch := branchPrefixForKind(reqRow.Kind) + "/" + reqRow.ID
+		designBranch := requirementBranchName(reqRow.Kind, reqRow.ID)
 		if _, err := gitRun(dir, "branch", "-D", designBranch); err != nil {
 			log.Printf("[worktree-cleanup] %s: 清理设计阶段分支 %s 失败（可忽略）: %v", reqRow.ID, designBranch, err)
 		}
