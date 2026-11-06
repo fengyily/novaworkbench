@@ -936,6 +936,10 @@ export interface Requirement {
   parent_id?: string;
   // Derived by List only: number of non-archived children.
   child_count?: number;
+  // Derived by List only: how many stage-Q&A turns (方案/开发答疑) this
+  // requirement has been asked, across both stages. A correlated sub-select
+  // on the server, never a physical column.
+  qa_turn_count?: number;
   // SourceReviewID points at the code_reviews row that seeded this
   // requirement via the Review "create issue" action. Distinct from
   // source_requirement_id (which is for idea→requirement promotion) and
@@ -1390,6 +1394,16 @@ export const requirementsApi = {
   create: (data: {
     project_id: string;
     description: string;
+    // title: an explicit title skips the backend's LLM title distillation
+    // (Create only distills when the title is empty). The quick-create
+    // popover sends the first line of the user's text so a sub-requirement
+    // can be created without an LLM round-trip.
+    title?: string;
+    // parent_id: nest the new requirement under a master (one level, same
+    // project). The server writes it in the SAME insert, so the child row
+    // and its hierarchy link are atomic — creating first and attaching
+    // afterwards would leave an orphan top-level row when the attach failed.
+    parent_id?: string;
     priority?: string;
     kind?: Kind;
     skip_analysis?: boolean;

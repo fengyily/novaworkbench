@@ -33,6 +33,12 @@ type Requirement struct {
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`
 	DesignSessionID     string `json:"design_session_id"`
+	// QATurnCount is a read-only derived count of stage-Q&A turns across both
+	// stages (design + coding), populated by List only. Mirrors ChildCount:
+	// a correlated sub-select, never a physical column — the count is a fact
+	// about the requirement_qa_turns rows, so persisting a second copy would
+	// only add a value that can drift.
+	QATurnCount int `json:"qa_turn_count"`
 	// DesignRevisionNo is which version of the design plan the requirement
 	// currently holds (0 = no design yet, 1 = first run, 2 = first regenerate,
 	// …). Matches the rev_no of the newest design_revisions row. Read paths
@@ -379,6 +385,16 @@ type CreateRequirementReq struct {
 	// Validated in service.RequirementService (must point to an existing row in
 	// the same project).
 	SourceRequirementID string `json:"source_requirement_id"`
+
+	// ParentID nests the new requirement under a master requirement (one level
+	// only, same project). Empty = top level. Validated by
+	// RequirementService.validateParentTarget — the same rules the
+	// PUT /api/requirements/{id}/parent path enforces, so "create a child" and
+	// "attach an existing requirement" can never disagree about what a valid
+	// master is. Accepted at creation time so the child row and its parent
+	// link land in ONE insert; creating first and attaching afterwards would
+	// leave an orphan top-level row behind whenever the second call failed.
+	ParentID string `json:"parent_id"`
 
 	// Launch: optional execution plan attached at creation time. When set,
 	// the handler dispatches the run synchronously (Mode=="immediate") or
