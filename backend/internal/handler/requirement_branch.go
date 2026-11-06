@@ -1,8 +1,9 @@
-// Package handler — requirement branch naming: the single source of truth
-// for "which branch does this requirement develop on?".
+// Package handler — requirement branch naming and base-branch resolution:
+// the single source of truth for "which branch does this requirement
+// develop on, and what is it based on?".
 //
-// The convention is fixed: every requirement that enters development lands
-// on exactly one branch, derived from its kind and id:
+// The branch-name convention is fixed: every requirement that enters
+// development lands on exactly one branch, derived from its kind and id:
 //
 //	requirement / idea / wiki / legacy → feat/req_<id>
 //	issue                            → fix/req_<id>
@@ -17,7 +18,13 @@
 // missing one produced a branch the UI could not predict. Everything now
 // derives from requirementBranchName.
 //
-// The frontend mirrors this convention in api/client.ts
+// The same file also owns the BASE-branch resolution chain
+// (resolveEffectiveBase): which branch a run forks from. A child
+// requirement (parent_id set) bases itself on the branch its parent
+// requirement actually develops on; a requirement without a usable parent
+// branch falls back to the project's default branch.
+//
+// The frontend mirrors the branch-name convention in api/client.ts
 // (branchPrefixForKind / defaultBranchName) — the two MUST stay in sync;
 // push_pr_shell_fallback_test.go pins the Go side of that contract.
 package handler
@@ -25,6 +32,7 @@ package handler
 import (
 	"strings"
 
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
 
@@ -67,4 +75,139 @@ func isRequirementBranch(name string) bool {
 		}
 	}
 	return false
+}
+
+// resolveAutoBase resolves the base branch WITHOUT the caller's override —
+// i.e. tiers 2..6 of the resolution chain.
+//
+// The tiers, in order:
+//
+//  2. explicit    — the user picked this base last time and we remembered
+//     it (requirements.base_branch_source == "explicit").
+//  3. parent      — a child requirement bases itself on the branch its
+//     parent requirement actually develops on.
+//  4. requirement — this requirement's own previously persisted value, but
+//     ONLY when that value was not merely derived from the
+//     project default.
+//  5. project     — projects.default_branch.
+//  6. default     — the hard-coded "main" fallback.
+//
+// Tier 4 deliberately does NOT reuse a value whose source is "project",
+// "default" or empty (legacy rows). Those are DERIVED values: the project
+// default branch is a moving target, and freezing whatever happened to be
+// current when the row was written would silently ignore a later change of
+// projects.default_branch — old requirements would keep developing on a
+// branch the project no longer uses. The only value genuinely worth
+// remembering across runs is the user's own explicit choice, which tier 2
+// already covers.
+func resolveAutoBase(req *model.Requirement, projDefaultBranch, parentBranch string) (string, string) {
+	if req != nil {
+		if req.BaseBranchSource == model.BaseSourceExplicit && strings.TrimSpace(req.BaseBranch) != "" {
+			return req.BaseBranch, model.BaseSourceExplicit
+		}
+	}
+	if b := strings.TrimSpace(parentBranch); b != "" {
+		return b, model.BaseSourceParent
+	}
+	if req != nil {
+		if req.ParentID == "" && strings.TrimSpace(req.BaseBranch) != "" &&
+			req.BaseBranchSource != "" &&
+			req.BaseBranchSource != model.BaseSourceProject &&
+			req.BaseBranchSource != model.BaseSourceDefault {
+			return req.BaseBranch, model.BaseSourceRequirement
+		}
+	}
+	if b := strings.TrimSpace(projDefaultBranch); b != "" {
+		return b, model.BaseSourceProject
+	}
+	return "main", model.BaseSourceDefault
+}
+
+// resolveEffectiveBase is the full resolution chain: the caller's override
+// (tier 1) on top of resolveAutoBase's tiers 2..6.
+//
+// Tier 1 fires ONLY when the incoming value is non-empty AND differs from
+// the auto value. That comparison is what lets the frontend echo the
+// effective value back verbatim: the frontend seeds its BASE picker with
+// the backend-computed effective base, so an untouched picker sends back
+// exactly the auto value and is NOT mistaken for a deliberate choice. A
+// value the user actually edited always differs from auto and therefore
+// wins.
+//
+// Note that the auto value INCLUDES tier 2 (a persisted explicit choice).
+// If it did not, a requirement whose stored explicit base is "develop"
+// would see an incoming "main" (== the project default == auto) as "not
+// explicit", fall through to tier 2 and silently discard the user's edit.
+func resolveEffectiveBase(req *model.Requirement, projDefaultBranch, incoming, parentBranch string) (string, string) {
+	auto, autoSource := resolveAutoBase(req, projDefaultBranch, parentBranch)
+	in := strings.TrimSpace(incoming)
+	if in != "" && in != auto {
+		return in, model.BaseSourceExplicit
+	}
+	return auto, autoSource
+}
+
+// parentBranchBaseWith returns the branch the PARENT requirement actually
+// develops on, or "" when there is nothing to inherit.
+//
+// It reads parent.BranchName — the branch the parent really used — rather
+// than re-deriving feat/req_<parent> from the parent's kind. A parent that
+// never entered development has an EMPTY branch_name, and re-deriving
+// would hand back a branch that does not exist in git: the worktree would
+// then silently branch off HEAD (the wrong starting point) instead of
+// failing loudly.
+//
+// Every failure degrades to "" and never blocks the run:
+//   - no parent (nil row / empty parent_id)
+//   - the parent row was deleted, or the lookup failed
+//   - the parent runs in "develop on base" mode (no_branch) — it has no
+//     branch of its own to inherit
+//   - the parent has not entered development yet (empty branch_name)
+//
+// The lookup is injected so the rules stay a pure function and can be
+// unit-tested without a database.
+func parentBranchBaseWith(lookup func(string) (*model.Requirement, error), req *model.Requirement) string {
+	if req == nil || req.ParentID == "" {
+		return ""
+	}
+	if lookup == nil {
+		return ""
+	}
+	parent, err := lookup(req.ParentID)
+	if err != nil || parent == nil {
+		return ""
+	}
+	if parent.NoBranch {
+		return ""
+	}
+	if strings.TrimSpace(parent.BranchName) == "" {
+		return ""
+	}
+	return parent.BranchName
+}
+
+// parentBranchBase wires parentBranchBaseWith to the requirement service.
+// The DB read is isolated here so the rules themselves remain a pure
+// function.
+func (h *WizardHandler) parentBranchBase(req *model.Requirement) string {
+	if h == nil || h.reqSvc == nil {
+		return ""
+	}
+	return parentBranchBaseWith(h.reqSvc.Get, req)
+}
+
+// resolveEffectiveBaseFor is the one-call entry point every stage uses to
+// decide which base branch this run works from. It resolves the parent
+// branch, reads the project's default branch and runs the full chain.
+//
+// Safe against a nil req and a nil proj: a missing project simply means
+// "no project default" and a missing requirement means "nothing persisted
+// to reuse" — both degrade to the next tier instead of panicking.
+func (h *WizardHandler) resolveEffectiveBaseFor(req *model.Requirement, proj *model.Project, incoming string) (base, source string) {
+	parentBranch := h.parentBranchBase(req)
+	projDefault := ""
+	if proj != nil {
+		projDefault = proj.DefaultBranch
+	}
+	return resolveEffectiveBase(req, projDefault, incoming, parentBranch)
 }
