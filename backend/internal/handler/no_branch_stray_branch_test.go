@@ -89,8 +89,8 @@ func TestPushBaseWithStrayBranchOnWorktree(t *testing.T) {
 	if err := reqSvc.UpdateNoBranch(row.ID, true); err != nil {
 		t.Fatalf("UpdateNoBranch: %v", err)
 	}
-	if err := reqSvc.UpdateBaseBranch(row.ID, "main"); err != nil {
-		t.Fatalf("UpdateBaseBranch: %v", err)
+	if err := reqSvc.UpdateBaseBranchWithSource(row.ID, "main", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource: %v", err)
 	}
 	if err := reqSvc.UpdateWorktree(row.ID, "", wtPath); err != nil {
 		t.Fatalf("UpdateWorktree: %v", err)
@@ -254,8 +254,8 @@ func TestNoBranchPromptForbidsBranchCreation(t *testing.T) {
 	if err := reqSvc.UpdateNoBranch(row.ID, true); err != nil {
 		t.Fatalf("UpdateNoBranch: %v", err)
 	}
-	if err := reqSvc.UpdateBaseBranch(row.ID, "main"); err != nil {
-		t.Fatalf("UpdateBaseBranch: %v", err)
+	if err := reqSvc.UpdateBaseBranchWithSource(row.ID, "main", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource: %v", err)
 	}
 	fresh, err := reqSvc.Get(row.ID)
 	if err != nil {

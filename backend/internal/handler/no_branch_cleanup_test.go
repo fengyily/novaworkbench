@@ -172,8 +172,8 @@ func TestCleanupNoBranchRefusesUnpushedCommits(t *testing.T) {
 	if err := f.handler.reqSvc.UpdateNoBranch(f.row.ID, true); err != nil {
 		t.Fatalf("UpdateNoBranch: %v", err)
 	}
-	if err := f.handler.reqSvc.UpdateBaseBranch(f.row.ID, "main"); err != nil {
-		t.Fatalf("UpdateBaseBranch: %v", err)
+	if err := f.handler.reqSvc.UpdateBaseBranchWithSource(f.row.ID, "main", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource: %v", err)
 	}
 	if err := f.handler.reqSvc.UpdateWorktree(f.row.ID, "", wtPath); err != nil {
 		t.Fatalf("UpdateWorktree: %v", err)

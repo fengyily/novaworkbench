@@ -51,11 +51,17 @@ func remoteWorktreePaths(root, projectID, reqID string) (baseRepo, wtPath string
 
 // remoteBranchFor resolves the dev branch name the same way runRemoteCoding
 // does, so cleanup/push target the branch the coding run actually created.
+//
+// The fallback only fires for rows that never ran coding (branch_name is
+// empty) — every requirement that went through the coding stage has its
+// branch stamped by UpdateWorktree. Those rows now get the same
+// feat/req_<id> / fix/req_<id> name the local path uses, instead of the
+// old requirement-<id> label.
 func remoteBranchFor(reqRow *model.Requirement) string {
 	if reqRow.BranchName != "" {
 		return reqRow.BranchName
 	}
-	return "requirement-" + reqRow.ID
+	return requirementBranchName(reqRow.Kind, reqRow.ID)
 }
 
 // dialAgent opens an SSH connection to the Agent server identified by serverID.

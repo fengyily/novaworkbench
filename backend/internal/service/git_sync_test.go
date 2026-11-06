@@ -322,6 +322,152 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 	})
 }
 
+// TestSyncToOriginBase_MissingRemoteRef covers the "the remote does not have
+// this branch (yet)" branch of the Step C fetch triage.
+//
+// A child requirement inherits its parent's branch (feat/req_<parent>) as its
+// design baseline, and that branch routinely has NOT been pushed yet. The
+// gate must degrade to the local ref in that case instead of aborting the
+// whole design stage — while a genuine network / credential failure must
+// keep failing hard, because then we know nothing about the upstream.
+//
+// The decision matrix the triage implements:
+//
+//	remote-tracking ref present → the remote HAS the branch and the fetch
+//	                              died on network/credentials → hard fail
+//	neither side has the branch → there is no baseline to sync against →
+//	                              hard fail
+//	remote reachable but no such
+//	branch, local branch exists → degrade to the local ref
+//	remote unreachable          → we learned nothing about the upstream →
+//	                              hard fail
+//
+// The last two rows are the subtle ones: the local branch existing is NOT
+// enough to degrade, and neither is a failed fetch. Only a remote that
+// answers "I don't have that branch" proves the upstream baseline simply
+// has not been pushed yet.
+func TestSyncToOriginBase_MissingRemoteRef(t *testing.T) {
+	const baseBranch = "main"
+	upstreamDir := filepath.Join(t.TempDir(), "origin.git")
+	mustGit(t, "", "git", "init", "--bare", "--initial-branch="+baseBranch, upstreamDir)
+
+	// Seed the upstream so the cloned work tree has a real HEAD.
+	seedDir := filepath.Join(t.TempDir(), "seed")
+	mustGit(t, "", "git", "clone", upstreamDir, seedDir)
+	mustGit(t, seedDir, "git", "config", "user.email", "test@nova")
+	mustGit(t, seedDir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seedDir, "README.md"), []byte("init"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mustGit(t, seedDir, "git", "add", "README.md")
+	mustGit(t, seedDir, "git", "commit", "-m", "init")
+	mustGit(t, seedDir, "git", "push", "origin", "HEAD:"+baseBranch)
+
+	freshWorkdir := func(t *testing.T) string {
+		t.Helper()
+		work := filepath.Join(t.TempDir(), "work")
+		mustGit(t, "", "git", "clone", upstreamDir, work)
+		mustGit(t, work, "git", "config", "user.email", "test@nova")
+		mustGit(t, work, "git", "config", "user.name", "Test")
+		return work
+	}
+
+	// commitOnBranch creates a local-only branch with one commit — the
+	// shape of a parent requirement whose work has not been pushed yet.
+	commitOnBranch := func(t *testing.T, work, branch string) {
+		t.Helper()
+		mustGit(t, work, "git", "checkout", "-b", branch)
+		if err := os.WriteFile(filepath.Join(work, "parent.txt"), []byte("parent work"), 0644); err != nil {
+			t.Fatalf("write parent.txt: %v", err)
+		}
+		mustGit(t, work, "git", "add", "parent.txt")
+		mustGit(t, work, "git", "commit", "-m", "parent requirement work")
+	}
+
+	// svc is a zero-value *ProjectService — with projectID == "" the
+	// credential-injection block short-circuits, keeping these tests on the
+	// gate-only behaviour.
+	svc := &ProjectService{}
+
+	// (a) The remote does not have the branch, the local repo does → the
+	// gate degrades to the local ref instead of aborting the design stage.
+	t.Run("RemoteLacksRef_LocalRefExists_Continues", func(t *testing.T) {
+		work := freshWorkdir(t)
+		const parentBranch = "feat/req_P"
+		commitOnBranch(t, work, parentBranch)
+		// The branch deliberately stays local — the remote never saw it.
+
+		var logged []string
+		logf := func(s string) { logged = append(logged, s) }
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, parentBranch, 10*time.Second, logf)
+		if err != nil {
+			t.Fatalf("expected nil error when the remote merely lacks the branch, got: %v (res=%+v)", err, res)
+		}
+		if res.Skipped {
+			t.Fatalf("expected Skipped=false, got %+v", res)
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(res.BaseSHA) {
+			t.Fatalf("BaseSHA must be 40-char hex, got %q", res.BaseSHA)
+		}
+		// The recorded SHA must be the LOCAL branch tip — the remote has no
+		// such ref, so nothing else could have produced it.
+		localTip := mustGit(t, work, "git", "rev-parse", parentBranch)
+		if res.BaseSHA != localTip {
+			t.Fatalf("BaseSHA = %q, want the local branch tip %q", res.BaseSHA, localTip)
+		}
+		// The user must be told WHY the baseline is not origin/<base>.
+		combined := strings.Join(logged, "\n")
+		if !strings.Contains(combined, "尚未推送") {
+			t.Fatalf("logf must explain the local-baseline fallback, got: %s", combined)
+		}
+	})
+
+	// (b) Neither the remote nor the local repo has the branch → there is
+	// no baseline to sync against → the gate still fails hard.
+	t.Run("RemoteLacksRef_NoLocalRef_FetchFailed", func(t *testing.T) {
+		work := freshWorkdir(t)
+		const missing = "feat/req_missing"
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, missing, 10*time.Second, nil)
+		if err == nil {
+			t.Fatalf("expected FETCH_FAILED error, got nil (res=%+v)", res)
+		}
+		gate, ok := err.(*SyncGateError)
+		if !ok {
+			t.Fatalf("expected *SyncGateError, got %T: %v", err, err)
+		}
+		if gate.Code != SyncGateFetchFailed {
+			t.Fatalf("Code = %q, want %q", gate.Code, SyncGateFetchFailed)
+		}
+	})
+
+	// (c) The remote cannot be reached at all → we learned nothing about
+	// the upstream, so the gate must keep failing hard even though the
+	// local repo has the branch. This is the case the local-ref fallback
+	// must NOT swallow.
+	t.Run("RemoteUnreachable_LocalRefExists_StillFails", func(t *testing.T) {
+		work := freshWorkdir(t)
+		const parentBranch = "feat/req_P"
+		commitOnBranch(t, work, parentBranch)
+		// Point origin at a black hole: the fetch fails and the probe
+		// cannot tell whether the remote has the branch. Connection refused
+		// on port 1 is immediate, so the test stays fast.
+		mustGit(t, work, "git", "remote", "set-url", "origin", "https://127.0.0.1:1/dead.git")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		res, err := svc.SyncToOriginBase(ctx, "", work, parentBranch, 5*time.Second, nil)
+		if err == nil {
+			t.Fatalf("expected FETCH_FAILED error, got nil (res=%+v)", res)
+		}
+		gate, ok := err.(*SyncGateError)
+		if !ok {
+			t.Fatalf("expected *SyncGateError, got %T: %v", err, err)
+		}
+		if gate.Code != SyncGateFetchFailed {
+			t.Fatalf("Code = %q, want %q", gate.Code, SyncGateFetchFailed)
+		}
+	})
+}
+
 // TestSyncDesignBase_StampsSyncStatus exercises the ProjectService.SyncDesignBase
 // wrapper: a successful run must update projects.sync_status to "ok" and
 // record last_synced_commit, mirroring EnsureClonedAndSynced's stamp

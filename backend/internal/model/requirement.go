@@ -5,6 +5,28 @@ import (
 	"time"
 )
 
+// Base-branch provenance markers. These record WHERE a requirement's
+// base_branch came from, so the resolver can tell an explicit user choice
+// apart from a value that was merely derived (from the parent requirement
+// or from the project's default branch).
+//
+// They live in the model package because both the service layer (which
+// persists the marker) and the handler layer (which resolves it) need them,
+// and the handler layer must not import the service layer's constants for
+// this.
+const (
+	// BaseSourceExplicit — the user picked this base branch themselves.
+	BaseSourceExplicit = "explicit"
+	// BaseSourceParent — inherited from the parent requirement's branch.
+	BaseSourceParent = "parent"
+	// BaseSourceRequirement — reused this requirement's own previous value.
+	BaseSourceRequirement = "requirement"
+	// BaseSourceProject — the project's default_branch.
+	BaseSourceProject = "project"
+	// BaseSourceDefault — the hard-coded "main" fallback.
+	BaseSourceDefault = "default"
+)
+
 type Requirement struct {
 	ID                 string `json:"id"`
 	ProjectID          string `json:"project_id"`
@@ -240,6 +262,24 @@ type Requirement struct {
 	// Empty for legacy rows; the merge stage then falls back to
 	// project.DefaultBranch.
 	BaseBranch string `json:"base_branch"`
+	// BaseBranchSource records WHERE the persisted BaseBranch came from.
+	// The base_branch string alone cannot distinguish "the user deliberately
+	// chose develop" from "develop happened to be the project default at the
+	// time" — the two must behave differently once projects.default_branch
+	// changes. See the BaseSource* constants for the value set.
+	//
+	// Empty = a row written before this column existed (legacy row), which
+	// the resolver treats as "not explicit".
+	BaseBranchSource string `json:"base_branch_source"`
+	// BaseBranchEffective is the base branch this requirement WOULD use
+	// right now, computed by the resolver from the requirement row, the
+	// parent requirement and the project's default branch. NOT persisted —
+	// it is recomputed on every read.
+	//
+	// The frontend seeds its BASE picker with this value so the value it
+	// sends back round-trips as "not an explicit choice" instead of
+	// accidentally overriding the parent-inheritance rule.
+	BaseBranchEffective string `json:"base_branch_effective,omitempty"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored
