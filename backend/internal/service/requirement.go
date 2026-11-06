@@ -1291,33 +1291,28 @@ func (s *RequirementService) UpdateDesignBaseSHA(id, sha string) error {
 	return err
 }
 
-// UpdateBaseBranch stamps the resolved baseline branch onto the requirement.
-// Called from the design stage prologue (right after the explicit-vs-default
-// fallback chain resolves the value) so a later coding-stage run can pick
-// up the same base even when the user forgot to re-pick it on the coding
-// form, AND so the merge stage targets the PR at the user-chosen base
-// instead of project.DefaultBranch. The CODING stage calls it too, with the
-// base it actually resolved for this run — otherwise a base switched on the
-// "start coding" form would leave the push stage reading the design stage's
-// stale value, and the code would be developed against one branch but
-// pushed onto another. STAMP-IF-NON-EMPTY: empty input clears
-// the column (used when the user explicitly blanks the field), and a
-// non-empty input always overwrites — re-runs deliberately update the row
-// so a deliberate base switch flips the PR target on the next merge.
-func (s *RequirementService) UpdateBaseBranch(id, branch string) error {
-	_, err := s.db.Exec(
-		"UPDATE requirements SET base_branch = ?, updated_at = ? WHERE id = ?",
-		branch, time.Now(), id)
-	return err
-}
-
 // UpdateBaseBranchWithSource stamps the resolved baseline branch AND the
 // provenance of that branch onto the requirement in a single statement.
+//
+// Called from the design stage prologue (right after the resolver resolves
+// the value) so a later coding-stage run can pick up the same base even
+// when the user forgot to re-pick it on the coding form, AND so the merge
+// stage targets the PR at the user-chosen base instead of
+// project.DefaultBranch. The CODING stage calls it too, with the base it
+// actually resolved for this run — otherwise a base switched on the
+// "start coding" form would leave the push stage reading the design
+// stage's stale value, and the code would be developed against one branch
+// but pushed onto another.
 //
 // One statement, both columns: the resolver needs to know WHERE the stored
 // base came from ("the user chose develop" vs "develop was merely the
 // project default at the time"), and a two-statement write could leave the
 // two columns describing different resolutions if the second write failed.
+//
+// STAMP-IF-NON-EMPTY: empty input clears the column (used when the user
+// explicitly blanks the field), and a non-empty input always overwrites —
+// re-runs deliberately update the row so a deliberate base switch flips the
+// PR target on the next merge.
 //
 // source is one of the model.BaseSource* constants. An empty source clears
 // the marker, which is the legacy semantics — readers treat an empty

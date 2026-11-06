@@ -2,9 +2,12 @@ package handler
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
 )
 
 // TestRequirementBranchName pins the branch-name convention every
@@ -346,5 +349,101 @@ func TestResolveEffectiveBaseForNilSafe(t *testing.T) {
 	if base != "release/1.0" || source != model.BaseSourceExplicit {
 		t.Fatalf("resolveEffectiveBaseFor(req, nil, incoming) = (%q, %q), want (%q, %q)",
 			base, source, "release/1.0", model.BaseSourceExplicit)
+	}
+}
+
+// TestStageBaseResolutionBehavior pins the two behaviours the requirement
+// asks for, at the level the stages actually consume them: through
+// resolveEffectiveBaseFor, with a REAL parent row read out of the DB.
+//
+//  1. A plain requirement whose frontend echoes the project default back
+//     must NOT be recorded as an explicit choice — the base stays "main"
+//     and the source is "project". Recording it as "explicit" would freeze
+//     "main" on the requirement, and a later change of
+//     projects.default_branch would silently stop applying to it.
+//
+//  2. A child requirement whose frontend echoes the PARENT's branch back
+//     must be recorded as "parent", not "explicit". The value is the same
+//     either way, but the source is what tells the next run to re-derive
+//     the base from the parent instead of freezing today's answer.
+//
+// The persistence half is checked too: the stages write the resolved value
+// and its source together, and both must survive the round-trip.
+func TestStageBaseResolutionBehavior(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer d.Close()
+
+	const projID = "proj_1"
+	if _, err := d.Exec(`INSERT INTO projects (id, name, local_path, status, default_branch) VALUES (?, ?, ?, ?, ?)`,
+		projID, "P", "/tmp/p", "ready", "main"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	// The parent has actually developed, so it owns a real branch.
+	if _, err := d.Exec(`INSERT INTO requirements (id, project_id, title, kind, branch_name) VALUES (?, ?, ?, ?, ?)`,
+		"req_P", projID, "parent", "requirement", "feat/req_P"); err != nil {
+		t.Fatalf("insert parent: %v", err)
+	}
+	// The child points at the parent.
+	if _, err := d.Exec(`INSERT INTO requirements (id, project_id, title, kind, parent_id) VALUES (?, ?, ?, ?, ?)`,
+		"req_C", projID, "child", "requirement", "req_P"); err != nil {
+		t.Fatalf("insert child: %v", err)
+	}
+	// A standalone requirement with no parent.
+	if _, err := d.Exec(`INSERT INTO requirements (id, project_id, title, kind) VALUES (?, ?, ?, ?)`,
+		"req_S", projID, "standalone", "requirement"); err != nil {
+		t.Fatalf("insert standalone: %v", err)
+	}
+
+	reqSvc := service.NewRequirementService(d, nil)
+	h := &WizardHandler{reqSvc: reqSvc}
+	proj := &model.Project{ID: projID, DefaultBranch: "main"}
+
+	standalone, err := reqSvc.Get("req_S")
+	if err != nil {
+		t.Fatalf("get standalone: %v", err)
+	}
+	child, err := reqSvc.Get("req_C")
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+
+	// (1) Plain requirement, frontend echoes the project default back.
+	base, source := h.resolveEffectiveBaseFor(standalone, proj, "main")
+	if base != "main" || source != model.BaseSourceProject {
+		t.Fatalf("standalone: base = %q, source = %q, want (%q, %q)",
+			base, source, "main", model.BaseSourceProject)
+	}
+	if err := reqSvc.UpdateBaseBranchWithSource(standalone.ID, base, source); err != nil {
+		t.Fatalf("persist standalone base: %v", err)
+	}
+	reread, err := reqSvc.Get(standalone.ID)
+	if err != nil {
+		t.Fatalf("re-read standalone: %v", err)
+	}
+	if reread.BaseBranch != "main" || reread.BaseBranchSource != model.BaseSourceProject {
+		t.Fatalf("persisted standalone base = (%q, %q), want (%q, %q)",
+			reread.BaseBranch, reread.BaseBranchSource, "main", model.BaseSourceProject)
+	}
+
+	// (2) Child requirement, frontend echoes the parent's branch back.
+	base, source = h.resolveEffectiveBaseFor(child, proj, "feat/req_P")
+	if base != "feat/req_P" || source != model.BaseSourceParent {
+		t.Fatalf("child: base = %q, source = %q, want (%q, %q)",
+			base, source, "feat/req_P", model.BaseSourceParent)
+	}
+	if err := reqSvc.UpdateBaseBranchWithSource(child.ID, base, source); err != nil {
+		t.Fatalf("persist child base: %v", err)
+	}
+	reread, err = reqSvc.Get(child.ID)
+	if err != nil {
+		t.Fatalf("re-read child: %v", err)
+	}
+	if reread.BaseBranch != "feat/req_P" || reread.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("persisted child base = (%q, %q), want (%q, %q)",
+			reread.BaseBranch, reread.BaseBranchSource, "feat/req_P", model.BaseSourceParent)
 	}
 }

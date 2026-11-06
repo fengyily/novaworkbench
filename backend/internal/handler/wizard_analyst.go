@@ -129,7 +129,19 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		if projectPath == "" {
 			projectPath = proj.LocalPath
 		}
-		defaultBranch = proj.DefaultBranch
+		// The analyst stage is the FIRST stage that anchors a worktree, so
+		// its base decides what code the analyst actually reads. A child
+		// requirement must analyse against its PARENT's branch, not the
+		// project default — hence the shared resolver instead of the raw
+		// project.DefaultBranch.
+		//
+		// The analysis stage deliberately does NOT persist base_branch:
+		// the design / coding stages own that write. Persisting here would
+		// stamp a "project"-sourced value over a base the user had
+		// explicitly chosen on an earlier run.
+		if b, _ := h.resolveEffectiveBaseFor(requirement, proj, ""); b != "" {
+			defaultBranch = b
+		}
 	}
 
 	remote := req.AgentServerID != "" && h.agentSvrSvc != nil
@@ -383,7 +395,13 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 			if projectPath == "" {
 				projectPath = proj.LocalPath
 			}
-			defaultBranch = proj.DefaultBranch
+			// Same resolver as the analyst stage: a child requirement's
+			// coding chat resumes in the worktree rooted at its parent's
+			// branch, so the conversation stays anchored to the code the
+			// parent produced.
+			if b, _ := h.resolveEffectiveBaseFor(requirement, proj, ""); b != "" {
+				defaultBranch = b
+			}
 		}
 	}
 	if fork {

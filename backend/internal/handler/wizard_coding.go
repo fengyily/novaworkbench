@@ -474,34 +474,34 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 
 	// Resolve baseBranch early (used by both the worktree and legacy in-place
-	// paths below). Precedence: UI-provided p.BaseBranch > the design-stage
-	// stamp on the requirement row (reqRow.BaseBranch — keeps coding in
-	// sync with design when the user re-uses the design stage but forgets
-	// to re-pick a base on the coding form) > project's stored
-	// default_branch > literal "main". Loading the project here costs one
-	// extra Get that's almost always served by the page-load cache, and it
-	// lets us surface a one-line "本次使用的主分支: <name>" hint in the Job
-	// panel so the user knows exactly which base the worktree was branched
-	// off when an issue shows up later.
-	baseBranch := p.BaseBranch
-	if baseBranch == "" && reqRow != nil && reqRow.BaseBranch != "" {
-		baseBranch = reqRow.BaseBranch
+	// paths below) through the shared resolver
+	// (handler/requirement_branch.go). The chain is:
+	//   UI-provided p.BaseBranch (only when it differs from the auto value,
+	//   i.e. the user deliberately picked it) > a base the user picked on an
+	//   earlier run > the PARENT requirement's branch (child requirements) >
+	//   this requirement's own stored base > the project's default_branch >
+	//   the literal "main".
+	// The project row is fetched unconditionally because the resolver needs
+	// its default_branch as the last tier; the Get is almost always served by
+	// the page-load cache, and it lets us surface a one-line
+	// "本次使用的主分支: <name>" hint in the Job panel so the user knows
+	// exactly which base the worktree was branched off when an issue shows
+	// up later.
+	var proj *model.Project
+	projID := ""
+	if reqRow != nil {
+		projID = reqRow.ProjectID
 	}
+	if projID == "" {
+		projID = p.RequirementID // best-effort — may fail; falls through to "main"
+	}
+	if projID != "" {
+		proj, _ = h.projectSvc.Get(projID)
+	}
+	baseBranch, baseSource := h.resolveEffectiveBaseFor(reqRow, proj, p.BaseBranch)
 	if baseBranch == "" {
-		var projID string
-		if reqRow != nil {
-			projID = reqRow.ProjectID
-		} else {
-			projID = p.RequirementID // best-effort — may fail; falls through to "main"
-		}
-		if projID != "" {
-			if proj, perr := h.projectSvc.Get(projID); perr == nil && proj != nil && proj.DefaultBranch != "" {
-				baseBranch = proj.DefaultBranch
-			}
-		}
-		if baseBranch == "" {
-			baseBranch = "main"
-		}
+		baseBranch = "main"
+		baseSource = model.BaseSourceDefault
 	}
 	// Write the base branch this run actually uses back onto the requirement.
 	//
@@ -514,15 +514,17 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// something else. In no-branch mode the consequence is the worst one:
 	// code developed on top of A gets pushed straight onto B.
 	//
-	// UpdateBaseBranch overwrites unconditionally for a non-empty value
-	// (service/requirement.go) and baseBranch is guaranteed non-empty here
-	// (the chain above falls back to "main"), so an empty value can never
-	// clear the column.
+	// UpdateBaseBranchWithSource overwrites unconditionally for a non-empty
+	// value (service/requirement.go) and baseBranch is guaranteed non-empty
+	// here (the chain above falls back to "main"), so an empty value can
+	// never clear the column. The source marker travels with the value so
+	// the next run can tell a deliberate choice from a derived one.
 	if p.RequirementID != "" && baseBranch != "" {
-		if perr := h.reqSvc.UpdateBaseBranch(p.RequirementID, baseBranch); perr != nil {
+		if perr := h.reqSvc.UpdateBaseBranchWithSource(p.RequirementID, baseBranch, baseSource); perr != nil {
 			log.Printf("[start-coding] %s: failed to persist base_branch=%q: %v", p.RequirementID, baseBranch, perr)
 		} else if reqRow != nil {
 			reqRow.BaseBranch = baseBranch
+			reqRow.BaseBranchSource = baseSource
 		}
 	}
 	// Stamp the development-environment provenance BEFORE the run starts.
