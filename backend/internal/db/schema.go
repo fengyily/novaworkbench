@@ -1536,6 +1536,20 @@ var alterColumns = []string{
 	// re-runs overwrite cleanly. Empty = legacy row or no design yet — the
 	// merge stage then falls back to project.DefaultBranch.
 	`ALTER TABLE requirements ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`,
+	// base_branch_source: WHERE the persisted base_branch came from.
+	// 'explicit' = the user picked it themselves; 'parent' = inherited from
+	// the parent requirement's branch; 'requirement' = reused this
+	// requirement's own previous value; 'project' = projects.default_branch;
+	// 'default' = the hard-coded "main" fallback.
+	//
+	// Why a separate column: the base_branch STRING alone cannot tell
+	// "the user deliberately chose develop" apart from "develop happened to
+	// be the project default at the time" — and those two must behave
+	// differently when the project's default_branch later changes.
+	//
+	// Empty = a row written before this column existed (legacy rows), which
+	// the resolver treats as "not explicit".
+	`ALTER TABLE requirements ADD COLUMN base_branch_source TEXT NOT NULL DEFAULT ''`,
 	// Issue-monitor source traceability (v0.5.x). Every requirement imported
 	// from a GitHub Issue carries the platform tag ("github" / "gitlab" /
 	// "gitea" — even though only GitHub ships in v0.5.x), the external id

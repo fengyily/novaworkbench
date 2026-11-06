@@ -236,7 +236,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
 			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
@@ -256,7 +256,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA, &r.BaseBranch,
+			&r.DesignBaseSHA, &r.BaseBranch, &r.BaseBranchSource,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush, &r.AutoCommit, &r.AutoPushRemote, &r.AutoCreatePR, &r.NoBranch,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
@@ -447,7 +447,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -456,7 +456,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA, &r.BaseBranch,
+			&r.DesignBaseSHA, &r.BaseBranch, &r.BaseBranchSource,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush, &r.AutoCommit, &r.AutoPushRemote, &r.AutoCreatePR, &r.NoBranch,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
@@ -1308,6 +1308,24 @@ func (s *RequirementService) UpdateBaseBranch(id, branch string) error {
 	_, err := s.db.Exec(
 		"UPDATE requirements SET base_branch = ?, updated_at = ? WHERE id = ?",
 		branch, time.Now(), id)
+	return err
+}
+
+// UpdateBaseBranchWithSource stamps the resolved baseline branch AND the
+// provenance of that branch onto the requirement in a single statement.
+//
+// One statement, both columns: the resolver needs to know WHERE the stored
+// base came from ("the user chose develop" vs "develop was merely the
+// project default at the time"), and a two-statement write could leave the
+// two columns describing different resolutions if the second write failed.
+//
+// source is one of the model.BaseSource* constants. An empty source clears
+// the marker, which is the legacy semantics — readers treat an empty
+// marker as "not explicit".
+func (s *RequirementService) UpdateBaseBranchWithSource(id, branch, source string) error {
+	_, err := s.db.Exec(
+		"UPDATE requirements SET base_branch = ?, base_branch_source = ?, updated_at = ? WHERE id = ?",
+		branch, source, time.Now(), id)
 	return err
 }
 
