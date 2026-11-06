@@ -265,6 +265,24 @@ API：`POST /api/wizard/qa-chat`（返回 `{job_id, turn_id}`，流复用 `GET /
 - **vite.config.ts** — dev server proxies `/api` → `:9527`。
 - **Dockerfile** — `dev` (npm install + `vite --host`), `build` (tsc + vite build), `prod` (nginx serving `dist`)。
 
+### UI 一致性审计 (`scripts/ui-audit/`)
+
+全局复查前端「哪里不统一」的工具,只读、不改 UI。流程:**取证 → 判定 → 复核 → 落盘 → 建单**。
+
+- **取证** — `playwright-core` 驱动 Chromium 逐路由截图(`screenshots/<route>.png`),同时在页面内注入探针采集每个语义控件(`btn-primary` / `input-text` / `card` / `badge` …)的**计算样式指纹**;`manifest.json` 记录 git commit 与每张图的 sha256,证据可校验。
+- **判定** — 两类证据:**静态规则**(R1–R10、R13:调色板外硬编码色、令牌被写字面量、类名两套写法、通用类名落在页面私有样式表里、状态色双套词汇表、`<MarkdownRender>` 未挂 `.md-prose`…)与**运行时漂移**(R11:同一控件在不同页面的 computed style 不一致——这是用户真正感知的「不统一」)。`run.mjs check` 只跑静态规则,无需浏览器、无需模型、**也无需 npm install**(`run.mjs` 对浏览器驱动是懒加载),可作 CI 门禁(与 `baseline.json` 比对,只对**新增**违规失败)。每条规则自带稳定 `signature`(标识发现本身——类名、语义角色——而不是它提到的文件),否则改任何一个无关文件都会误报「新增违规」。
+- **复核** — `claude -p ... --dangerously-skip-permissions` 让模型 **Read 工具真的打开 PNG** 复核,剔除误报并把标题/描述/建议改写成用户视角;失败即降级为规则文案,不阻断建单。
+- **落盘 + 建单** — 截图与报告推到专用分支 `audit/ui-<run-id>` 的 `docs/ui-audit/<run-id>/`,Issue 正文用 raw 绝对 URL 嵌图;每条不一致点**单独**建一个 GitHub Issue(label `ui-audit` + 严重度),run-id 写进正文(`<!-- ui-audit-run: … -->`)用于去重。推送走**临时 git worktree**:不动当前 checkout 的分支,也不要求工作树干净(否则工具自己没提交时就推不了自己的证据)。分支**不要删**——Issue 里的截图链接指向它。
+
+```bash
+make ui-audit-deps                                     # 装 playwright-core(复用系统 Chrome,不下载浏览器)
+make ui-audit BASE_URL=http://localhost:9527            # 跑全流程并建 Issue
+make ui-audit-review  RUN_ID=20261025-2015             # 复用已有采集,只重跑模型复核
+make ui-audit-publish RUN_ID=20261025-2015             # 复用已有采集,只推证据+建单
+make ui-audit-check                                    # CI 门禁(无浏览器、无模型、无 npm install)
+```
+
+**约定**:新增样式一律走 `index.css` 的 `var(--token)`,通用类名(`btn-*` / `form-*` / `input-*`)必须定义在 `frontend/src/index.css` 而不是页面私有样式表——历史上 `.btn-secondary` 落在 `pages/Settings.css`,导致没 import 那张表的其他页面拿不到样式,同一个按钮在不同页面高度从 27px 到 54px 不等。
 ## Key Conventions
 
 - **API envelope**: every JSON response is `{success: bool, data: T, error: {code, message, suggestion?}}` via `writeJSON`/`writeError`. Throw on the client if `success` is false.
