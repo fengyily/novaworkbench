@@ -33,6 +33,11 @@ var (
 	ErrParentCrossProject = errors.New("parent requirement belongs to a different project")
 	ErrParentIsChild      = errors.New("target is already a child requirement; only one level is supported")
 	ErrSelfHasChildren    = errors.New("this requirement has child requirements; move them out first")
+	// ErrParentArchived rejects a NEW child under an archived master. Only
+	// the create path checks it (validateParentTarget's checkArchived flag) —
+	// SetParent keeps its historical behaviour so an existing top-level
+	// requirement can still be attached to an archived master.
+	ErrParentArchived = errors.New("parent requirement is archived")
 )
 
 type RequirementService struct {
@@ -238,7 +243,16 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// slim subset only (see Calendar() below).
 		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
-			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count"+
+			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count,"+
+			// qa_turn_count — how many stage-Q&A turns this requirement has been
+			// asked, across BOTH stages (design + coding). Same shape as
+			// child_count above: a correlated sub-select, never a physical
+			// column, so there is no second copy of the truth to keep in sync.
+			// The index idx_qa_req_stage(requirement_id, stage, created_at)
+			// covers the requirement_id lookup by its leftmost column, so the
+			// count is an index scan per row. No `?` placeholder inside the
+			// sub-select → it survives db.Rebind unchanged on every dialect.
+			"(SELECT COUNT(1) FROM requirement_qa_turns q WHERE q.requirement_id = r.id) AS qa_turn_count"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" "+orderBy,
 		args...)
@@ -262,7 +276,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData, &r.SourceReviewID,
 			&r.SessionServerID,
-			&r.DevEndedAt, &r.ChildCount); err != nil {
+			&r.DevEndedAt, &r.ChildCount, &r.QATurnCount); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -585,10 +599,26 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 		sourceReviewID = req.SourceReviewID
 	}
 
+	// ParentID (optional): the new row is born as a sub-requirement of an
+	// existing master. Validated BEFORE the insert so a rejected parent
+	// leaves nothing behind — the alternative (insert, then call SetParent)
+	// would leave an orphan top-level row behind whenever the second call
+	// failed. The hierarchy rules are shared with SetParent via
+	// validateParentTarget, so "create a child" and "attach an existing
+	// requirement" can never disagree about what a valid master is.
+	//
+	// checkArchived=true: a NEW child under an archived master is refused —
+	// an archived row is a closed chapter and should not grow new work.
+	// SetParent keeps its historical behaviour (no archive check) because
+	// re-homing an existing row is a different operation.
+	if err := s.validateParentTarget(req.ProjectID, req.ParentID, true); err != nil {
+		return nil, err
+	}
+
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?)",
 		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, sourceReviewID, skipAnalysis, skipDesign, now, now,
-		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData)
+		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID)
 	if err != nil {
 		return nil, err
 	}
@@ -1870,18 +1900,12 @@ func (s *RequirementService) SetParent(id, parentID string) (*model.Requirement,
 	if parentID == id {
 		return nil, ErrParentSelf
 	}
-	parent, err := s.Get(parentID)
-	if err != nil {
-		if errors.Is(err, ErrRequirementNotFound) {
-			return nil, ErrParentNotFound
-		}
+	// Same hierarchy rules as the create-with-parent path — one helper, one
+	// definition of "a valid master". checkArchived=false: re-homing an
+	// existing row keeps its historical behaviour (an archived master is
+	// still a legal target), while only NEW children refuse one.
+	if err := s.validateParentTarget(self.ProjectID, parentID, false); err != nil {
 		return nil, err
-	}
-	if parent.ProjectID != self.ProjectID {
-		return nil, ErrParentCrossProject
-	}
-	if parent.ParentID != "" {
-		return nil, ErrParentIsChild
 	}
 	var children int
 	if err := s.db.QueryRow("SELECT COUNT(1) FROM requirements WHERE parent_id = ?", id).Scan(&children); err != nil {
@@ -1894,6 +1918,46 @@ func (s *RequirementService) SetParent(id, parentID string) (*model.Requirement,
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// validateParentTarget checks that parentID may be used as the master of a
+// requirement living in projectID. The rules ARE the hierarchy's invariants:
+//
+//   - the parent must exist
+//   - the parent must live in the same project
+//   - the parent must itself be top-level (one level only)
+//   - the parent must not be archived (only when checkArchived is set)
+//
+// Shared by Create (a brand-new child) and SetParent (re-homing an existing
+// row) so the two paths can never disagree about what a valid parent is —
+// the bug this helper exists to prevent: a UI that lets you CREATE a child
+// under a master that the ATTACH path would have rejected.
+//
+// An empty parentID means "top level" and is always valid.
+func (s *RequirementService) validateParentTarget(projectID, parentID string, checkArchived bool) error {
+	if parentID == "" {
+		return nil
+	}
+	var parentProjectID, parentParentID, parentStatus string
+	err := s.db.QueryRow(
+		"SELECT project_id, parent_id, status FROM requirements WHERE id = ?", parentID,
+	).Scan(&parentProjectID, &parentParentID, &parentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrParentNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if parentProjectID != projectID {
+		return ErrParentCrossProject
+	}
+	if parentParentID != "" {
+		return ErrParentIsChild
+	}
+	if checkArchived && parentStatus == "archived" {
+		return ErrParentArchived
+	}
+	return nil
 }
 
 // Tags caps for UpdateTags. Length cap matches the chips' visual width so a

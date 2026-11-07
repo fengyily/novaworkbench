@@ -227,6 +227,33 @@ export const requirements = {
     nextTurn: 'Next question',
     turnCounter: 'Question {{current}} / {{total}}',
   },
+  // quickCreate — the "+" popover on a requirement title in the project
+  // list: creates a sub-requirement fast (one field, explicit title,
+  // skip_organize → no LLM title distillation).
+  quickCreate: {
+    buttonTitle: 'New sub-requirement',
+    heading: 'New sub-requirement · «{{parent}}»',
+    placeholder: 'Describe this sub-requirement in one line…\nEnter to submit  ·  Shift+Enter for a new line',
+    submit: 'Create',
+    cancel: 'Cancel',
+    creating: 'Creating…',
+    empty: 'Type something first',
+    error: 'Could not create: {{msg}}',
+    errParentNotFound: 'The master requirement no longer exists',
+    errParentSelf: 'A requirement cannot be its own master',
+    errParentArchived: 'The master requirement is archived — no new sub-requirements',
+  },
+  // qaPeek — the read-only stage-Q&A dialog opened from the list's Q&A column.
+  qaPeek: {
+    title: 'Q&A peek · «{{title}}»',
+    openTitle: 'View the {{n}} Q&A turns of this requirement',
+    empty: 'No Q&A yet',
+    loading: 'Loading Q&A…',
+    loadFailed: 'Could not load the Q&A thread',
+    turnCount: '{{count}} questions',
+    openDetail: 'Open in the requirement detail page',
+    close: 'Close',
+  },
   detail2: {
     // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge
     // in the design section; the full SHA is in the title. Hidden when empty.

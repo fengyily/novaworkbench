@@ -223,6 +223,33 @@ export const requirements = {
     nextTurn: '下一个问题',
     turnCounter: '问题 {{current}} / {{total}}',
   },
+  // quickCreate — 需求列表标题上的「+」浮层：给某条需求快速新建一个子需求。
+  // 与完整的 CreateRequirementForm 的区别是「快」：单输入框、显式标题、
+  // skip_organize，因此后端不会跑 LLM 标题蒸馏。
+  quickCreate: {
+    buttonTitle: '新建子需求',
+    heading: '新建子需求 · 《{{parent}}》',
+    placeholder: '一句话描述这个子需求…\nEnter 提交  ·  Shift+Enter 换行',
+    submit: '创建',
+    cancel: '取消',
+    creating: '创建中…',
+    empty: '请先输入内容',
+    error: '创建失败：{{msg}}',
+    errParentNotFound: '主需求不存在或已被删除',
+    errParentSelf: '不能把需求挂到自己下面',
+    errParentArchived: '主需求已归档，不能再新增子需求',
+  },
+  // qaPeek — 需求列表里的「答疑」列点开的只读速览弹窗。
+  qaPeek: {
+    title: '答疑速览 · 《{{title}}》',
+    openTitle: '查看该需求的 {{n}} 条答疑',
+    empty: '还没有答疑记录',
+    loading: '加载答疑记录…',
+    loadFailed: '答疑记录加载失败',
+    turnCount: '共 {{count}} 问',
+    openDetail: '在需求详情页查看',
+    close: '关闭',
+  },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.

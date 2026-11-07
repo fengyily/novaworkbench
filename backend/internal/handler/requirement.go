@@ -146,7 +146,26 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := h.svc.Create(req)
 	if err != nil {
-		writeError(w, 500, "INTERNAL", err.Error())
+		// A rejected parent is a CLIENT-side condition, not a server bug: the
+		// caller asked to nest the new requirement under a master that the
+		// hierarchy forbids (missing / cross-project / already a child /
+		// archived). 400 + a precise code lets the UI say which rule was
+		// broken instead of showing "internal error" — and, crucially, the
+		// requirement was NOT inserted, so there is no orphan row to clean up.
+		switch {
+		case errors.Is(err, service.ErrParentNotFound):
+			writeError(w, 400, "PARENT_NOT_FOUND", err.Error())
+		case errors.Is(err, service.ErrParentCrossProject):
+			writeError(w, 400, "PARENT_CROSS_PROJECT", err.Error())
+		case errors.Is(err, service.ErrParentIsChild):
+			writeError(w, 400, "PARENT_IS_CHILD", err.Error())
+		case errors.Is(err, service.ErrParentSelf):
+			writeError(w, 400, "PARENT_SELF", err.Error())
+		case errors.Is(err, service.ErrParentArchived):
+			writeError(w, 400, "PARENT_ARCHIVED", err.Error())
+		default:
+			writeError(w, 500, "INTERNAL", err.Error())
+		}
 		return
 	}
 	// Record the requirement-creation (title distillation) token usage. Only

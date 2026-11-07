@@ -1,0 +1,164 @@
+/* RequirementQAPeek — the read-only stage-Q&A window opened from the
+   project requirements list.
+
+   The dialog reuses the global modal primitives (.modal-overlay / .modal-box
+   / .modal-header / .modal-body / .modal-actions) so it inherits the
+   desktop-card / mobile-bottom-sheet behaviour for free; only the Q&A
+   specific parts live here.
+
+   Answers are rendered with the shared Markdown renderer + the global
+   `.md-prose` typography — this file deliberately does NOT carry a second
+   copy of the Markdown styling. */
+
+.qa-peek-box {
+  min-width: 460px;
+  max-width: 640px;
+}
+
+.qa-peek-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.qa-peek-close:hover {
+  color: var(--color-text);
+  background: var(--color-hover);
+}
+
+.qa-peek-body {
+  max-height: 62dvh;
+  overflow-y: auto;
+}
+
+.qa-peek-empty {
+  padding: 16px 4px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.qa-peek-stage + .qa-peek-stage {
+  margin-top: 18px;
+}
+.qa-peek-stage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+.qa-peek-stage-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.qa-peek-stage-count {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.qa-peek-turn {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--color-bg);
+}
+.qa-peek-turn > summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+.qa-peek-turn > summary::-webkit-details-marker { display: none; }
+.qa-peek-qtext {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  word-break: break-word;
+}
+.qa-peek-qnum {
+  margin-right: 6px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.qa-peek-tag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.qa-peek-turn-body {
+  margin-top: 8px;
+  padding-left: 26px;
+}
+.qa-peek-qfull {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.qa-peek-a {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.qa-peek-abody {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+.qa-peek-pending {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.qa-peek-errtext {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-error-deep, #b91c1c);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.qa-peek-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.qa-peek-fresh {
+  color: var(--color-warning-deep, #b45309);
+}
+
+@media (max-width: 768px) {
+  .qa-peek-box {
+    min-width: 0;
+  }
+  .qa-peek-turn-body {
+    padding-left: 0;
+  }
+}
