@@ -1,0 +1,150 @@
+/* RequirementSplitModal — the 方案拆分 preview dialog.
+ *
+ * It reuses the global modal primitives (.modal-overlay / .modal-box /
+ * .modal-header / .modal-actions) so it inherits the responsive bottom-sheet
+ * behaviour on phones for free. Only the split-specific furniture lives here:
+ * the candidate grid, the progress strip and the reference grid.
+ *
+ * The candidate grid is a CSS grid rather than a <table> because each cell
+ * holds form controls (inputs / textareas / checkboxes) that need to wrap
+ * inside a narrow column — a table would force a horizontal scroll on a
+ * phone, and the whole point of the modal is to edit candidates in place. */
+
+.req-split-modal {
+  min-width: 720px;
+  max-width: min(94vw, 1100px);
+}
+
+.req-split-body {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.req-split-hint {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--color-active, #eef2ff);
+  border-radius: var(--radius-sm);
+  color: var(--color-text, #334155);
+}
+.req-split-hint-muted {
+  background: transparent;
+  color: var(--color-text-muted, #64748b);
+  padding: 2px 2px 8px;
+  font-size: 12px;
+}
+
+.req-split-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 4px;
+  color: var(--color-text-muted, #64748b);
+}
+.req-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border, #e2e8f0);
+  border-top-color: var(--color-primary, #4f46e5);
+  border-radius: 50%;
+  animation: req-split-spin 0.8s linear infinite;
+}
+@keyframes req-split-spin {
+  to { transform: rotate(360deg); }
+}
+
+.req-split-error {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--color-warning-soft, #fef3c7);
+  color: var(--color-warning-deep, #b45309);
+  border-radius: var(--radius-sm);
+}
+
+.req-split-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.req-split-row {
+  display: grid;
+  grid-template-columns: 28px minmax(140px, 1fr) minmax(240px, 2fr) minmax(110px, 0.8fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface, #fff);
+}
+.req-split-row-head {
+  border: 0;
+  padding: 0 8px;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted, #64748b);
+}
+
+.req-split-col-idx {
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+  padding-top: 6px;
+}
+.req-split-col-title .form-input { width: 100%; }
+.req-split-col-desc { display: flex; flex-direction: column; gap: 4px; }
+.req-split-col-desc .form-input { width: 100%; resize: vertical; }
+.req-split-col-dep { display: flex; flex-wrap: wrap; gap: 4px 8px; padding-top: 4px; }
+.req-split-col-act { display: flex; gap: 4px; padding-top: 4px; }
+
+.req-split-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.req-split-muted {
+  color: var(--color-text-muted, #64748b);
+  font-size: 11px;
+}
+.req-split-dep-hint {
+  flex-basis: 100%;
+}
+
+.req-split-refs {
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm);
+}
+.req-split-refs-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.req-split-refs-hint {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: 6px;
+}
+.req-split-refs-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+@media (max-width: 900px) {
+  .req-split-modal {
+    min-width: 0;
+  }
+  .req-split-row {
+    grid-template-columns: 24px 1fr;
+  }
+  .req-split-col-desc,
+  .req-split-col-dep,
+  .req-split-col-act {
+    grid-column: 1 / -1;
+  }
+}

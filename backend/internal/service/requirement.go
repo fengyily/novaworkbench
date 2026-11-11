@@ -38,6 +38,9 @@ var (
 	// SetParent keeps its historical behaviour so an existing top-level
 	// requirement can still be attached to an archived master.
 	ErrParentArchived = errors.New("parent requirement is archived")
+	// ErrChildrenNotDone — a master whose development was handed down to its
+	// children can only be marked done once every child is done.
+	ErrChildrenNotDone = errors.New("child requirements are not all done")
 )
 
 type RequirementService struct {
@@ -132,7 +135,11 @@ var validTransitions = map[string][]string{
 	"draft":      {"analyzing", "designing", "developing", "archived"},
 	"analyzing":  {"designing", "draft", "archived"},
 	"designing":  {"designed", "analyzing", "archived"},
-	"designed":   {"developing", "archived"},
+	// "designed" → "done" exists for the master of a split: after the split
+	// the master never develops (the coding gate rejects it), so the only
+	// way out is to mark it done once every child is done. UpdateStatus
+	// enforces that precondition.
+	"designed":   {"developing", "done", "archived"},
 	"developing": {"done", "designed", "archived"},
 	"done":       {"archived"},
 	// archived is reversible: unarchive restores the requirement to "done" and
@@ -241,7 +248,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
 			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count,"+
 			// qa_turn_count — how many stage-Q&A turns this requirement has been
@@ -266,7 +273,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
@@ -461,12 +468,12 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
@@ -615,10 +622,16 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 		return nil, err
 	}
 
+	// Columns (25) = VALUES list (25). split_batch_id / dev_delegated are
+	// written explicitly (rather than left to their DEFAULT) so the generic
+	// create path can stamp a split-produced row without a second UPDATE.
+	// PromoteFromIdea below has its own INSERT and needs no change — the
+	// column defaults keep those rows at '' / 0.
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, sourceReviewID, skipAnalysis, skipDesign, now, now,
-		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID)
+		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID,
+		req.SplitBatchID, req.DevDelegated)
 	if err != nil {
 		return nil, err
 	}
@@ -741,6 +754,22 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 		return nil, fmt.Errorf("invalid status transition: %s -> %s", r.Status, newStatus)
 	}
 
+	// A master whose development was handed down to its children (the
+	// "方案拆分" flow sets dev_delegated=1) never develops itself — so the
+	// only way out of "designed" is to mark it done, and that is only
+	// legitimate once every child is done. Without this guard the master
+	// could be closed while its children were still in flight, which is
+	// exactly the "无人收尾" hole the split flow has to close.
+	if newStatus == "done" {
+		pending, err := s.listUnfinishedChildren(id)
+		if err != nil {
+			return nil, err
+		}
+		if len(pending) > 0 {
+			return nil, fmt.Errorf("%w: %s", ErrChildrenNotDone, strings.Join(pending, ", "))
+		}
+	}
+
 	now := time.Now()
 	var completedAt *time.Time
 	if newStatus == "done" {
@@ -781,6 +810,31 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// listUnfinishedChildren returns the titles of this requirement's children that
+// are neither done nor archived. Used by the "master can only be closed once
+// its children are" guard in UpdateStatus.
+//
+// Archived children are excluded on purpose: an archived child is a closed
+// chapter and must not keep the master from being closed.
+func (s *RequirementService) listUnfinishedChildren(id string) ([]string, error) {
+	rows, err := s.db.Query(
+		"SELECT title FROM requirements WHERE parent_id=? AND status != 'done' AND status != 'archived'",
+		id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // UpdateAnalysisSession persists the claude CLI session id used for the analyst
@@ -1801,6 +1855,15 @@ func (s *RequirementService) Delete(id string) error {
 	// version rows behind.
 	if _, err := tx.Exec("DELETE FROM design_revisions WHERE requirement_id=?", id); err != nil {
 		return err
+	}
+	// Dependency edges need BOTH directions deleted. The edge table has two
+	// FKs onto requirements (requirement_id = the dependent, depends_on_id =
+	// the prerequisite), so "delete where requirement_id = ?" alone would
+	// leave the edges where this row is the *prerequisite* — and a dangling
+	// edge blocks the dependent's coding gate forever (the gate looks up
+	// status != 'done' and a missing row never satisfies it).
+	if _, err := tx.Exec("DELETE FROM requirement_dependencies WHERE requirement_id=? OR depends_on_id=?", id, id); err != nil {
+		return fmt.Errorf("cleanup requirement_dependencies: %w", err)
 	}
 	// Same reasoning for every other requirement_id child table: the schema
 	// declares ON DELETE CASCADE on them, but SQLite never enables

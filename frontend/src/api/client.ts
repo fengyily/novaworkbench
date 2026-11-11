@@ -1124,6 +1124,12 @@ export interface Requirement {
   // 在 base 分支上 commit/push。后端 StartCoding prologue 写入,前端在
   // 详情页 preflight modal 提供 toggle,并在 Merge 卡片根据它隐藏 PR CTA。
   no_branch?: boolean;
+  // 同一次「方案拆分」生成的子需求共享同一个批次 id（spb_<hex>）。空 = 该行
+  // 不是拆分产物（人工创建 / 历史数据）。前端用它区分来源并按批次分组展示。
+  split_batch_id?: string;
+  // 开发权已下放给子需求（true）时，本需求不再自己写代码 —— coding 闸门会
+  // 拒绝它进入开发，主需求改为「全部子需求完成后才能标记完成」。
+  dev_delegated?: boolean;
   // Launch-spec dispatch result (display-only, NOT a requirements column).
   // Populated ONLY by POST /api/requirements when the request carried a
   // launch spec. launch_mode tells the caller which downstream path the
@@ -1385,6 +1391,58 @@ export const priorityLabelKeys: Record<string, string> = {
   low: 'requirements.list.priority.low',
 };
 
+// ── 方案拆分 (requirement split) ──────────────────────────────────────────
+//
+// 拆分走两段式：POST /split 让 AI 产出**候选**（SSE 送达），用户在弹窗里
+// 编辑 / 删除 / 排序 / 指定前置后，再 POST /split/confirm 落库。
+//
+// depends_on 存的是**批次内序号**（1 起算），不是数据库 id —— 真实 id 只有
+// 落库时才知道。
+
+// 一条候选子需求。
+export interface SplitTaskCandidate {
+  title: string;
+  description: string;
+  scope: string[];
+  acceptance: string[];
+  boundary: string;
+  order: number;
+  // 同批次内的前置序号（1 起算）。只能引用 order 更小的候选。
+  depends_on: number[];
+}
+
+// 落库结果 —— 每个子需求的 id / 基线 / 前置 id。
+export interface SplitConfirmResult {
+  children: Array<{
+    id: string;
+    title: string;
+    status: string;
+    base_branch?: string;
+    base_branch_source?: string;
+    split_batch_id?: string;
+    // 前置子需求的 id 列表。
+    depends_on: string[];
+  }>;
+  // 软失败提示（例如「互相引用」写入失败）。子需求已落库，只是引用没写成。
+  warnings?: string[];
+}
+
+// 一条依赖边。requirement_id 依赖 depends_on_id。
+export interface RequirementDependencyEdge {
+  requirement_id: string;
+  depends_on_id: string;
+  batch_id?: string;
+  // 对端标题 / 状态（读路径填充，方便前端直接渲染「依赖 ①」）。
+  title?: string;
+  status?: string;
+}
+
+// 主需求的子需求列表 + 它们之间的依赖边。
+export interface RequirementChildList {
+  children: Requirement[];
+  dependencies: RequirementDependencyEdge[];
+}
+
 export const requirementsApi = {
   list: (params?: { project_id?: string; status?: string; priority?: string; kind?: string }) => {
     const q = new URLSearchParams();
@@ -1471,6 +1529,25 @@ export const requirementsApi = {
   // direct one.
   setReferences: (id: string, references: RequirementReferenceInput[]) =>
     api.put<RequirementReference[]>(`/api/requirements/${id}/references`, { references }),
+  // ── 方案拆分 ────────────────────────────────────────────────────────────
+  // split: start the AI split. Returns { job_id }; the candidate list arrives
+  // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
+  // carries `result.tasks`.
+  split: (id: string, body: { model?: string; claude_config_id?: string } = {}) =>
+    api.post<{ job_id: string }>(`/api/requirements/${id}/split`, body),
+  // confirmSplit: persist the user-confirmed candidates as sub-requirements.
+  // The whole batch lands in one transaction (children + dependency edges +
+  // the master's dev_delegated flag).
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][] }) =>
+    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body),
+  // listChildren: the requirement's sub-requirements + their dependency edges.
+  listChildren: (id: string) =>
+    api.get<RequirementChildList>(`/api/requirements/${id}/children`),
+  // splitStreamUrl: the SSE endpoint for a split job. Dedicated (not the
+  // shared /api/wizard/jobs/{id}/stream) because only this flow hands a
+  // structured payload on the terminal frame.
+  splitStreamUrl: (id: string, jobId: string) =>
+    `${API_BASE}/api/requirements/${id}/split/${jobId}/stream`,
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

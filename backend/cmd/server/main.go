@@ -812,6 +812,21 @@ func main() {
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.
 	mux.HandleFunc("POST /api/requirements/{id}/promote", reqH.PromoteFromIdea)
+	// 方案拆分 (requirement split) — turns the master's technical design into
+	// candidate sub-requirements, which the user confirms before they land.
+	//
+	//   POST .../split                     → start the AI split, returns {job_id}
+	//   GET  .../split/{job_id}/stream     → SSE; the terminal frame carries result.tasks
+	//   POST .../split/confirm             → persist the confirmed candidates
+	//   GET  .../children                  → the children + their dependency edges
+	//
+	// The SSE endpoint is dedicated (rather than the shared
+	// /api/wizard/jobs/{id}/stream) because only this flow needs to hand a
+	// structured payload on the terminal frame — see handler/requirement_split.go.
+	mux.HandleFunc("POST /api/requirements/{id}/split", wizardH.Split)
+	mux.HandleFunc("POST /api/requirements/{id}/split/confirm", wizardH.ConfirmSplit)
+	mux.HandleFunc("GET /api/requirements/{id}/split/{job_id}/stream", wizardH.StreamSplitJob)
+	mux.HandleFunc("GET /api/requirements/{id}/children", wizardH.ListChildren)
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)

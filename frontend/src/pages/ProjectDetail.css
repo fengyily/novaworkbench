@@ -1235,3 +1235,32 @@
    on the badge anyway. The dot and badge now live inside a
    .req-type-cell wrapper (index.css) which already provides the 6px
    gap, so no spacing rule is needed here. */
+
+/* ── 方案拆分来源标记 ─────────────────────────────────────────────────── */
+/* Two narrow badges that sit on the requirement title line:
+     · 🧩        — this row came out of a 「方案拆分」 (split_batch_id set)
+     · 开发已下放 — this master handed development down to its children
+   Both are deliberately compact: the title line is the one fixed-width
+   column in this table worth protecting. */
+.req-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: default;
+}
+.req-badge-split {
+  background: var(--color-active, #eef2ff);
+  color: var(--color-primary, #4f46e5);
+  border: 1px solid var(--color-border, #e2e8f0);
+}
+.req-badge-devdelegated {
+  background: #FEF3C7;
+  color: #92400E;
+  border: 1px solid #FCD34D;
+}

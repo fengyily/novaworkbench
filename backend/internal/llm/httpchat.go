@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/novaworkbench/backend/internal/prompt"
 )
 
 // formatAndTitleSystemPrompt reorganizes the user's raw, free-form requirement
@@ -86,6 +88,21 @@ const extractStepsSystemPrompt = `你是一位软件项目调度助手。用户�
 - 计划里的前言、背景、风险分析等非步骤章节不要变成子任务。
 - 如果这份文本里确实没有任何可执行的步骤列表，输出 {"subtasks":[]}。
 只输出该 JSON 对象，不要任何前后缀说明。`
+
+// extractSplitSystemPrompt asks the LLM to break a technical design into
+// independently deliverable sub-requirements.
+//
+// The contract body is imported from internal/prompt instead of being
+// duplicated: the CLI path (the primary one) and this HTTP path (the
+// fallback) must enforce the SAME rules, and two copies of a contract are
+// two contracts that drift. internal/prompt does not import internal/llm, so
+// the dependency direction is safe.
+//
+// The system message is the contract plus the "output JSON only" wrapper;
+// the design docs travel in the user message.
+var extractSplitSystemPrompt = "你是一位软件架构师，负责把一份技术方案拆分成可独立交付的子需求。\n\n" +
+	prompt.SplitJSONContract +
+	"\n\n只输出上述结构的那一个 JSON 块，不要输出其它 json 围栏块。"
 
 // extractReportKnowledgePrompt distills a development report (主 Agent 汇总报告
 // or 子任务报告) into a reusable knowledge-base entry. The output is

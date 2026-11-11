@@ -1182,6 +1182,27 @@ export default function ProjectDetail() {
             </span>
           )}
           <span className="pr-title-text-label">{req.title}</span>
+          {/* 方案拆分来源标记。子需求带 🧩（它来自一次方案拆分），主需求带
+              「开发已下放」（拆分后开发权交给了子需求）。两个标记都刻意
+              做成窄的 —— 标题行是这张表里唯一值得保护的固定宽度列。 */}
+          {req.split_batch_id && (
+            <span
+              className="req-badge req-badge-split"
+              title={t('requirements.split.badgeTitle')}
+              aria-label={t('requirements.split.badgeTitle')}
+            >
+              🧩
+            </span>
+          )}
+          {req.dev_delegated && (
+            <span
+              className="req-badge req-badge-devdelegated"
+              title={t('requirements.devDelegated.badgeTitle')}
+              aria-label={t('requirements.devDelegated.badgeTitle')}
+            >
+              {t('requirements.devDelegated.badge')}
+            </span>
+          )}
           {/* No "Sub-requirement" / "Sub-requirements N" chips on the title
               line. The gutter already encodes both facts — a child is
               indented under an elbow, a master with children carries a

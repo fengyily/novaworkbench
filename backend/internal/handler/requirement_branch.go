@@ -147,22 +147,32 @@ func resolveEffectiveBase(req *model.Requirement, projDefaultBranch, incoming, p
 	return auto, autoSource
 }
 
-// parentBranchBaseWith returns the branch the PARENT requirement actually
-// develops on, or "" when there is nothing to inherit.
+// parentBranchBaseWith returns the base branch the PARENT requirement works
+// from, or "" when there is nothing to inherit.
 //
-// It reads parent.BranchName — the branch the parent really used — rather
-// than re-deriving feat/req_<parent> from the parent's kind. A parent that
-// never entered development has an EMPTY branch_name, and re-deriving
-// would hand back a branch that does not exist in git: the worktree would
-// then silently branch off HEAD (the wrong starting point) instead of
-// failing loudly.
+// NEW SEMANTICS (after the 需求拆分 feature): it reads parent.BaseBranch —
+// the BASE the parent selected (the project default, or an explicit
+// release/x) — rather than parent.BranchName, the parent's DEVELOPMENT
+// branch.
+//
+// Why the reversal: once a requirement is split, the master hands
+// development down to its children and never develops itself, so its
+// branch_name is permanently empty. "Base 主需求分支" therefore can only
+// mean the master's BASE. Reading branch_name would return "" and every
+// child would silently fall back to the project default — breaking the
+// "all children share the master's base" invariant that makes the
+// children's PRs independent siblings instead of a stack.
+//
+// The second-tier fallback to branch_name keeps pre-split data working:
+// a master that already developed before the split feature shipped only
+// has a branch_name, and its children must keep inheriting it.
 //
 // Every failure degrades to "" and never blocks the run:
 //   - no parent (nil row / empty parent_id)
 //   - the parent row was deleted, or the lookup failed
 //   - the parent runs in "develop on base" mode (no_branch) — it has no
 //     branch of its own to inherit
-//   - the parent has not entered development yet (empty branch_name)
+//   - the parent has neither a base nor a development branch
 //
 // The lookup is injected so the rules stay a pure function and can be
 // unit-tested without a database.
@@ -180,10 +190,13 @@ func parentBranchBaseWith(lookup func(string) (*model.Requirement, error), req *
 	if parent.NoBranch {
 		return ""
 	}
-	if strings.TrimSpace(parent.BranchName) == "" {
-		return ""
+	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
+		return b
 	}
-	return parent.BranchName
+	if b := strings.TrimSpace(parent.BranchName); b != "" {
+		return b
+	}
+	return ""
 }
 
 // parentBranchBase wires parentBranchBaseWith to the requirement service.

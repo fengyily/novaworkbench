@@ -72,6 +72,33 @@ CREATE TABLE IF NOT EXISTS requirements (
 	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- 需求「执行顺序依赖」的边表。子需求之间平级（requirements.parent_id 才是
+-- 层级边，全部子需求都指向同一个主需求），先后关系用这张**独立的**边表
+-- 表达 —— DAG 天然多对多，需要 UNIQUE 防重复边、需要按「被依赖方」反查
+-- （删除前置时清理）、需要跨库迁移；JSON 列在 MySQL 上既无法建索引也
+-- 无法反查。
+--
+--   requirement_id —— 依赖方（后置子需求）
+--   depends_on_id  —— 被依赖方（前置子需求）
+--   batch_id       —— 同一次「方案拆分」的批次 id（spb_xxx）；跨批次不建边
+--
+-- MySQL 不能索引 TEXT 列 —— depends_on_id 必须进 mysqlIndexedCol 白名单，
+-- 否则 CREATE TABLE 在 MySQL 上直接失败（SQLite / Postgres 会静默接受）。
+--
+-- 悬空边的清理不依赖 ON DELETE CASCADE：SQLite 从不开 PRAGMA foreign_keys，
+-- CASCADE 不会触发，必须由 service 显式删两个方向。
+CREATE TABLE IF NOT EXISTS requirement_dependencies (
+	id             TEXT PRIMARY KEY,
+	requirement_id TEXT NOT NULL,
+	depends_on_id  TEXT NOT NULL,
+	batch_id       TEXT NOT NULL DEFAULT '',
+	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(requirement_id, depends_on_id),
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE,
+	FOREIGN KEY (depends_on_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_req_deps_depends_on ON requirement_dependencies(depends_on_id);
+
 -- Per-requirement file attachments. Each row is one file uploaded against a
 -- requirement — the wizard's three role-gated stages (analyst / architect /
 -- developer) all share this single set, and Claude ingests each via Read
@@ -1671,6 +1698,19 @@ var alterColumns = []string{
 	// safe across SQLite / MySQL / Postgres and is the zero value the
 	// service recognizes as "no synced attachments yet".
 	`ALTER TABLE agent_servers ADD COLUMN attachment_sync_state TEXT NOT NULL DEFAULT '{}'`,
+	// split_batch_id: 同一次「方案拆分」生成的子需求共享同一个批次 id
+	// （spb_<hex>）。空 = 不是拆分产物（人工创建 / 历史数据）。用途：UI
+	// 分组展示、区分「拆分生成」与「人工创建」、为将来的「替换本批」留
+	// 定位能力。不建索引（TEXT 索引在 MySQL 需 VARCHAR）。
+	`ALTER TABLE requirements ADD COLUMN split_batch_id TEXT NOT NULL DEFAULT ''`,
+	// dev_delegated: 开发权已下放给子需求（1）还是本需求自己开发（0）。
+	// 「方案拆分」成功时置主需求为 1；子需求恒为 0；历史数据 = 0，行为不变。
+	// 为什么不用「有子需求就推断」：手工 quick-create 一个子需求并不代表
+	// 主需求放弃开发 —— 只有「拆分」这一动作才下放开发权，规则必须显式、
+	// 可审计。沿用 requirements.no_branch 的 INTEGER(0/1) + DEFAULT 0
+	// 约定，保证三方言一致（TEXT 字面量默认值在 MySQL 上需要改写成
+	// DEFAULT ('…')，INTEGER 无此问题）。
+	`ALTER TABLE requirements ADD COLUMN dev_delegated INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (
@@ -1684,7 +1724,9 @@ var (
 	// without a prefix length), while SQLite/Postgres silently accepted it.
 	// `stage` joined the list with requirement_qa_turns (indexed as part of
 	// idx_qa_req_stage) — the same trap, one column further down.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
+	// `depends_on_id` joined the list with requirement_dependencies (indexed as
+	// part of its UNIQUE(requirement_id, depends_on_id) constraint).
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)
