@@ -22,6 +22,9 @@ import { SummarizeToRequirementModal } from '../components/SummarizeToRequiremen
 import { ScheduleModal } from '../components/ScheduleModal';
 import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
 import ImportDesignDialog from '../components/ImportDesignDialog';
+import RequirementSplitModal from '../components/RequirementSplitModal';
+import RequirementChildrenPanel from '../components/RequirementChildrenPanel';
+import RequirementDependencyPanel from '../components/RequirementDependencyPanel';
 import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
   StageIcon,
@@ -1367,6 +1370,28 @@ export default function RequirementDetail() {
   // long designs are truncated with a fade-mask + toggle button.
   const [designExpanded, setDesignExpanded] = useState(false);
   const [isLongDesignDoc, setIsLongDesignDoc] = useState(false);
+  // ── 方案拆分 (requirement split) ──
+  // splitOpen — the preview modal. The AI only produces CANDIDATES; nothing
+  //   reaches the database until the user confirms in the modal.
+  // childCount — how many sub-requirements the split produced. Drives the
+  //   「开发已下放给 N 个子需求」 banner. It comes from the children list,
+  //   NOT from requirement.child_count (the backend only fills that on the
+  //   LIST endpoint).
+  // unmetDeps — the titles of the prerequisites that are not done yet. They
+  //   disable the 「开始开发」 button (the backend's coding gate refuses the
+  //   same cases).
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [childCount, setChildCount] = useState(0);
+  const [unmetDeps, setUnmetDeps] = useState<string[]>([]);
+  // childrenReloadToken — bumped when the children list may have changed (a
+  //   split was just confirmed). RequirementChildrenPanel watches it and
+  //   re-fetches. It replaces the old `onChanged` callback prop, which was
+  //   an inline arrow in the parent's JSX: its identity changed on every
+  //   render, and it sat in the panel's `load` useCallback deps — so each
+  //   render rebuilt `load`, refired the panel's fetch effect, and the
+  //   fetch called `onChanged()` → parent refresh → new render → ∞.
+  //   See RequirementChildrenPanel's `reloadToken` prop for the full story.
+  const [childrenReloadToken, setChildrenReloadToken] = useState(0);
   useEffect(() => {
     setIsLongDesignDoc(isLongDesign(parseDesign(req?.design_docs ?? '').plan_markdown ?? req?.design_docs ?? ''));
     setDesignExpanded(false);
@@ -5653,6 +5678,19 @@ export default function RequirementDetail() {
                     )}
                   </div>
                 )}
+                {/* 拆分任务 — 把这份方案拆成可独立交付、可独立提 PR 的子需求。
+                    只在有方案且不是 wiki 时出现（外层 hasDesign 已经保证了
+                    「有方案」，wiki 由这里的 kind 守卫排除）。AI 只产出候选，
+                    真正的落库由用户在弹窗里确认。 */}
+                {req.kind !== 'wiki' && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setSplitOpen(true)}
+                    title={t('requirements.split.btnTitle')}
+                  >
+                    🧩 {t('requirements.split.btn')}
+                  </button>
+                )}
               </div>
               <div
                 className={
@@ -5753,6 +5791,21 @@ export default function RequirementDetail() {
             </>
           )}
         </div>
+      )}
+
+      {/* ── 子需求 (split children) ── */}
+      {/* The block that a 「方案拆分」 filled in. It sits between the design
+          and the developer stage: the children come out of the design, and
+          the developer stage is where their dependency gate bites. Rendered
+          only when there is a design to split (or a split that already
+          happened) — wiki rows never split. */}
+      {req.kind !== 'wiki' && hasDesign && (
+        <RequirementChildrenPanel
+          requirementId={req.id}
+          onRequestSplit={() => setSplitOpen(true)}
+          reloadToken={childrenReloadToken}
+          onChildCountChange={setChildCount}
+        />
       )}
 
       {/* ── Wiki stage ── (kind=wiki only) ── */}
@@ -6050,6 +6103,10 @@ export default function RequirementDetail() {
         <div className="detail-section">
           <div className="section-header"><h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3></div>
 
+          {/* 前置依赖 —— 只在子需求有依赖边时出现。未完成的前置会把下面的
+              「开始开发」按钮置灰（后端的 coding 闸门同样会拒绝）。 */}
+          <RequirementDependencyPanel requirementId={req.id} onUnmetChange={setUnmetDeps} />
+
           {/* Optional knowledge pre-read display (renders only when the user
               opted in and the backend emitted a knowledge event). */}
           <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
@@ -6254,9 +6311,25 @@ export default function RequirementDetail() {
                           the route readout's READY indicator, not by a
                           btn-primary treatment that would clash with the
                           other wizard stage CTAs. */}
-                      <button className="btn btn-sm" onClick={() => openBranchModal()}>
-                        <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.ctaStartCoding')}
-                      </button>
+                      {/* 开发权已下放：拆分后主需求不再自己写代码 —— 后端的
+                          coding 闸门也会拒绝它（409 GATE_DEV_DELEGATED），
+                          所以这里干脆不渲染「开始开发」，换成一条指路提示。 */}
+                      {req.dev_delegated ? (
+                        <div className="dev-delegated-notice">
+                          {t('requirements.devDelegated.notice', { count: childCount })}
+                        </div>
+                      ) : (
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => openBranchModal()}
+                          disabled={unmetDeps.length > 0}
+                          title={unmetDeps.length > 0
+                            ? t('requirements.dependency.unmet', { title: unmetDeps.join('、') })
+                            : undefined}
+                        >
+                          <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.ctaStartCoding')}
+                        </button>
+                      )}
                       {/* Immediate "design + coding" trigger in the
                           developer section. Opens
                           DesignCodingImmediateModal which chains design →
@@ -6855,6 +6928,29 @@ export default function RequirementDetail() {
             streamDesignJob(designJobId);
           }}
           onClose={() => setImmediateModalOpen(false)}
+        />
+      )}
+      {/* 拆分任务 modal — the candidate preview. Nothing is persisted until
+          the user confirms inside it, so the modal owns the whole round trip:
+          it starts the AI split, shows the SSE progress, lets the user edit
+          the candidates, and only then calls /split/confirm. */}
+      {splitOpen && (
+        <RequirementSplitModal
+          open={splitOpen}
+          onClose={() => setSplitOpen(false)}
+          requirementId={req.id}
+          requirementTitle={req.title}
+          baseBranch={req.base_branch || project?.default_branch || ''}
+          masterBranch={req.branch_name || defaultBranchName(req.id, kindOf(req))}
+          branches={availableBranches}
+          onConfirmed={() => {
+            setSplitOpen(false);
+            // The split created new children — bump the panel's reload token
+            // so it re-fetches its own list (the parent refresh below only
+            // updates the requirement row, not the panel's children data).
+            setChildrenReloadToken((n) => n + 1);
+            void refresh();
+          }}
         />
       )}
       {importDesignDialogOpen && (

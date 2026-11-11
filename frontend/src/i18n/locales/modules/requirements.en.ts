@@ -965,6 +965,73 @@ export const requirements = {
     detailLabel: 'Referenced requirements',
     emptyDetail: 'No referenced requirements',
   },
+  // 方案拆分 (requirement split) — break one large plan into independently
+  // deliverable sub-requirements. The AI only proposes candidates; nothing
+  // is persisted until the user confirms them.
+  split: {
+    btn: 'Split tasks',
+    btnTitle: 'Split this requirement’s plan into independently deliverable sub-requirements',
+    badgeTitle: 'Sub-requirement produced by a plan split',
+    modalTitle: 'Split tasks',
+    generating: 'Generating split suggestions…',
+    generated: 'Generated {{count}} candidate sub-requirements',
+    truncated: 'More than {{max}} candidates — truncated',
+    baseHint: 'Every sub-requirement develops on the master branch {{base}} (stacked PRs): merge the master branch first, then each sub-requirement branch. You can order them: a task cannot start development until its prerequisites are done.',
+    sourceBranchHint: 'The master branch is created from (or aligned to) the branch you pick and is pushed to the remote; every sub-requirement develops on top of it.',
+    parallelHint: 'Sub-requirements can be developed in parallel — watch the load on this machine.',
+    refreshHint: 'The candidate list is temporary — reload the page to generate it again.',
+    colTitle: 'Title',
+    colDesc: 'Description / acceptance',
+    colDepends: 'Prerequisites',
+    colActions: 'Actions',
+    noTitle: '(untitled sub-requirement)',
+    acceptancePlaceholder: 'Acceptance criteria (one per line)',
+    dependsNone: 'None',
+    dependsHint: 'Only earlier candidates can be prerequisites',
+    referencesTitle: 'Cross-references (optional)',
+    referencesHint: 'Ticked pairs share context during the design stage. Nothing is ticked by default.',
+    moveUp: 'Move up',
+    moveDown: 'Move down',
+    remove: 'Remove',
+    cancel: 'Cancel',
+    confirm: 'Create {{count}} sub-requirements',
+    confirming: 'Creating…',
+    childrenTitle: 'Sub-requirements',
+    refresh: 'Refresh',
+    emptyTitle: 'Not split yet. When the plan is large, split it into independently deliverable sub-requirements here.',
+    batchTitle: 'Split batch',
+    baseFollows: 'Base: follows the master branch · {{base}}',
+    errKind: 'This requirement kind cannot be split',
+    errNoDesign: 'Generate a technical plan before splitting',
+    errIsChild: 'A sub-requirement cannot be split again (one level only)',
+    errArchived: 'An archived requirement cannot be split',
+    errDeveloped: 'This requirement already entered development',
+    errAlreadySplit: 'This requirement is already split — development was handed to its sub-requirements',
+    errInProgress: 'A split is already running — please wait',
+    errCycle: 'The prerequisites form a cycle',
+    errExpired: 'The split result expired — please generate it again',
+    errGeneric: 'Split failed: {{msg}}',
+  },
+  // Execution-order dependencies. NOT the same as references: a dependency is
+  // a gate (the backend refuses to start coding), a reference only shares
+  // context.
+  dependency: {
+    title: 'Prerequisites',
+    postTitle: 'Dependent tasks',
+    done: 'Done',
+    pending: 'Pending',
+    none: 'None',
+    unmet: 'Prerequisite {{title}} is not done yet',
+    dependsOn: 'Depends on {{list}}',
+    dependedBy: 'Required by {{list}}',
+    mergeHint: 'The prerequisite’s PR must be merged into the base branch first — otherwise the dependent task cannot see that code.',
+  },
+  // Development was handed down to the sub-requirements.
+  devDelegated: {
+    notice: 'This requirement was split into {{count}} sub-requirements; development is handled by them.',
+    badge: 'Development delegated',
+    badgeTitle: 'Development was handed down to the sub-requirements — this requirement no longer writes code',
+  },
 } as const;
 
 export default requirements;

@@ -51,6 +51,20 @@ type Requirement struct {
 	// only, same project). Empty = top level. NOT the same as
 	// SourceRequirementID, which is promotion provenance.
 	ParentID string `json:"parent_id"`
+	// SplitBatchID groups the sub-requirements produced by one "方案拆分"
+	// run (spb_<hex>). Empty = this row was not produced by a split (manual
+	// creation / pre-existing data). Read-only from the API's point of view —
+	// only the split transaction writes it.
+	SplitBatchID string `json:"split_batch_id"`
+	// DevDelegated means "development has been handed down to the children"
+	// (1) vs "this requirement develops itself" (0). The split transaction
+	// sets it to 1 on the master and leaves it 0 on every child. The coding
+	// gate refuses to promote a dev_delegated requirement into "developing".
+	//
+	// Why not infer it from "has children": a hand-made child (quick-create)
+	// does NOT mean the master gave up development. Only the explicit split
+	// action does — the rule must be auditable.
+	DevDelegated bool `json:"dev_delegated"`
 	// ChildCount is a read-only derived count of non-archived children,
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`
@@ -435,6 +449,14 @@ type CreateRequirementReq struct {
 	// link land in ONE insert; creating first and attaching afterwards would
 	// leave an orphan top-level row behind whenever the second call failed.
 	ParentID string `json:"parent_id"`
+
+	// SplitBatchID groups the sub-requirements produced by one "方案拆分" run.
+	// Empty = not a split product. Only the split service writes it.
+	SplitBatchID string `json:"split_batch_id"`
+
+	// DevDelegated = 1 means development was handed down to the children.
+	// The split service sets it on the master only.
+	DevDelegated bool `json:"dev_delegated"`
 
 	// Launch: optional execution plan attached at creation time. When set,
 	// the handler dispatches the run synchronously (Mode=="immediate") or

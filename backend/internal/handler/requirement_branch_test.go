@@ -311,6 +311,44 @@ func TestParentBranchBase(t *testing.T) {
 			},
 			want: "feat/req_P",
 		},
+		// ── 需求拆分 semantics: the parent's DEVELOPMENT branch wins.
+		//
+		// A split master keeps its own dev branch (feat/req_<master>) as the
+		// stack bottom, and every child branches off it — the stacked-PR
+		// model. The base is only the fallback for a parent that has no
+		// development branch of its own.
+		{
+			name: "parent development branch wins over the parent base",
+			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
+			lookup: func(string) (*model.Requirement, error) {
+				return &model.Requirement{ID: "req_P", BaseBranch: "release/x", BranchName: "feat/req_P"}, nil
+			},
+			want: "feat/req_P",
+		},
+		{
+			name: "parent base only (parent has no development branch)",
+			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
+			lookup: func(string) (*model.Requirement, error) {
+				return &model.Requirement{ID: "req_P", BaseBranch: "release/x"}, nil
+			},
+			want: "release/x",
+		},
+		{
+			name: "legacy parent without a base falls back to its development branch",
+			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
+			lookup: func(string) (*model.Requirement, error) {
+				return &model.Requirement{ID: "req_P", BranchName: "feat/req_P"}, nil
+			},
+			want: "feat/req_P",
+		},
+		{
+			name: "parent with neither base nor development branch",
+			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
+			lookup: func(string) (*model.Requirement, error) {
+				return &model.Requirement{ID: "req_P", BaseBranch: "  ", BranchName: "  "}, nil
+			},
+			want: "",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

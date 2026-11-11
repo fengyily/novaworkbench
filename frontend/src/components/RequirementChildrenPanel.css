@@ -1,0 +1,118 @@
+/* RequirementChildrenPanel — the 「子需求」 block on a master requirement's
+   detail page.
+ *
+ * The cards read as a compact list rather than a table: each one carries a
+ * title link, a status chip and a metadata line, and the metadata is what
+ * makes the split topology legible (which base the child inherits, which
+ * siblings it waits for, which batch it came from). */
+
+.req-children-panel {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--color-surface, #fff);
+}
+
+.req-children-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.req-children-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #334155);
+}
+
+.req-children-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 0 2px;
+}
+.req-children-empty-text {
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+}
+
+.req-children-error {
+  font-size: 12px;
+  color: var(--color-danger, #dc2626);
+}
+
+.req-children-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.req-child-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm);
+}
+.req-child-card:hover {
+  border-color: var(--color-primary, #4f46e5);
+}
+
+.req-child-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.req-child-idx {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-active, #eef2ff);
+  color: var(--color-primary, #4f46e5);
+  font-size: 11px;
+}
+.req-child-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text, #334155);
+  text-decoration: none;
+}
+.req-child-title:hover {
+  color: var(--color-primary, #4f46e5);
+  text-decoration: underline;
+}
+
+.req-child-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding-left: 26px;
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+}
+.req-child-meta-dep {
+  color: var(--color-primary, #4f46e5);
+}
+.req-child-batch {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-active, #eef2ff);
+  color: var(--color-text-muted, #64748b);
+}

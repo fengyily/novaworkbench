@@ -19,6 +19,9 @@ var copyOrder = []string{
 	"projects",
 	"memories",
 	"requirements",
+	// Dependency edges between sibling sub-requirements — both endpoints are
+	// requirements, and "requirements" has already been copied above.
+	"requirement_dependencies",
 	"requirement_attachments",
 	// Authorized directories (--add-dir grants) are requirement-scoped like
 	// the attachments above, so they travel with the requirement.

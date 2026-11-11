@@ -297,6 +297,18 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The split gates (delegated master / unfinished prerequisites) apply to
+	// this path too — it is the PRIMARY way a user starts development, so
+	// leaving it ungated would let a delegated master develop anyway. The
+	// check runs BEFORE the job is created so the user gets a clean 409
+	// instead of a job that fails a moment later.
+	if reqRow, err := h.reqSvc.Get(p.RequirementID); err == nil {
+		if af := h.checkSplitCodingPrerequisites(reqRow); af != nil {
+			writeError(w, af.Status, af.Code, af.Msg)
+			return
+		}
+	}
+
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
 	// Persist the live coding job_id (for SSE reconnect after a refresh) AND
@@ -371,7 +383,62 @@ func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks)
 // Returns the freshly loaded *model.Requirement on success so the caller
 // can build codingRunParams from the post-promotion row. Returns nil +
 // *apiFailure on any failure.
+//
+// Step 0 (added by the 需求拆分 feature) runs BEFORE the status promotion:
+// the master of a split never develops itself, and a dependent child may
+// not start before its prerequisites are done. Both gates must run before
+// the promotion — otherwise a rejected requirement would be left sitting in
+// "developing", which is a dirty state the user has to clean up by hand.
+//
+// The two new checks live in checkSplitCodingPrerequisites so they can be
+// applied to EVERY coding entry — gateCodingEntry only covers the scheduled
+// and LaunchSpec paths; the HTTP POST /api/wizard/start-coding path has its
+// own (gate-free) prologue and would otherwise let a delegated master and an
+// early dependent straight into development.
+// checkSplitCodingPrerequisites applies the two gates the 需求拆分 feature
+// adds to the development stage. Returns nil when the requirement may enter
+// development.
+//
+//  1. GATE_DEV_DELEGATED — the master of a split handed development down to
+//     its children; it never writes code itself.
+//  2. GATE_DEPENDENCY_NOT_MET — a dependent sub-requirement may not start
+//     while its prerequisites are unfinished. Design is NOT gated (plans can
+//     be written in parallel); only coding is.
+//
+// It is deliberately separate from gateCodingEntry: that function also
+// promotes designed → developing and rejects other statuses, which is the
+// behaviour the SCHEDULED and LaunchSpec paths want but the HTTP
+// POST /api/wizard/start-coding path does not have today (that path has
+// always let the frontend decide). Applying the whole gate there would be a
+// behaviour change well beyond this feature; applying just these two
+// checks is the minimum that makes the split rules hold on every path.
+func (h *WizardHandler) checkSplitCodingPrerequisites(req *model.Requirement) *apiFailure {
+	if req == nil {
+		return nil
+	}
+	if req.DevDelegated {
+		return fail(409, "GATE_DEV_DELEGATED",
+			"该需求已拆分，开发由子需求承担，请在子需求上执行开发")
+	}
+	unmet, err := h.reqSvc.UnmetDependencies(req.ID)
+	if err != nil {
+		return fail(500, "GATE_DEPENDENCY_CHECK_FAILED", err.Error())
+	}
+	if len(unmet) > 0 {
+		titles := make([]string, 0, len(unmet))
+		for _, u := range unmet {
+			titles = append(titles, u.Title)
+		}
+		return fail(409, "GATE_DEPENDENCY_NOT_MET",
+			"前置任务未完成："+strings.Join(titles, "、"))
+	}
+	return nil
+}
+
 func (h *WizardHandler) gateCodingEntry(req *model.Requirement) (*model.Requirement, *apiFailure) {
+	if af := h.checkSplitCodingPrerequisites(req); af != nil {
+		return nil, af
+	}
 	if req.Status == "designed" || (req.Status == "draft" && req.SkipDesign) {
 		if _, err := h.reqSvc.UpdateStatus(req.ID, "developing"); err != nil {
 			return nil, fail(500, "GATE_UPDATE_FAILED", "状态转移失败: "+err.Error())
