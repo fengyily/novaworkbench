@@ -1383,6 +1383,15 @@ export default function RequirementDetail() {
   const [splitOpen, setSplitOpen] = useState(false);
   const [childCount, setChildCount] = useState(0);
   const [unmetDeps, setUnmetDeps] = useState<string[]>([]);
+  // childrenReloadToken — bumped when the children list may have changed (a
+  //   split was just confirmed). RequirementChildrenPanel watches it and
+  //   re-fetches. It replaces the old `onChanged` callback prop, which was
+  //   an inline arrow in the parent's JSX: its identity changed on every
+  //   render, and it sat in the panel's `load` useCallback deps — so each
+  //   render rebuilt `load`, refired the panel's fetch effect, and the
+  //   fetch called `onChanged()` → parent refresh → new render → ∞.
+  //   See RequirementChildrenPanel's `reloadToken` prop for the full story.
+  const [childrenReloadToken, setChildrenReloadToken] = useState(0);
   useEffect(() => {
     setIsLongDesignDoc(isLongDesign(parseDesign(req?.design_docs ?? '').plan_markdown ?? req?.design_docs ?? ''));
     setDesignExpanded(false);
@@ -5794,8 +5803,8 @@ export default function RequirementDetail() {
         <RequirementChildrenPanel
           requirementId={req.id}
           onRequestSplit={() => setSplitOpen(true)}
+          reloadToken={childrenReloadToken}
           onChildCountChange={setChildCount}
-          onChanged={() => void refresh()}
         />
       )}
 
@@ -6934,6 +6943,10 @@ export default function RequirementDetail() {
           baseBranch={req.base_branch || ''}
           onConfirmed={() => {
             setSplitOpen(false);
+            // The split created new children — bump the panel's reload token
+            // so it re-fetches its own list (the parent refresh below only
+            // updates the requirement row, not the panel's children data).
+            setChildrenReloadToken((n) => n + 1);
             void refresh();
           }}
         />

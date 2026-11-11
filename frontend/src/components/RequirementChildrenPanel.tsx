@@ -24,8 +24,21 @@ export interface RequirementChildrenPanelProps {
   requirementId: string;
   /** Fired when the user asks to start a split (the parent owns the modal). */
   onRequestSplit?: () => void;
-  /** Fired after the panel's data changed (e.g. a split was confirmed). */
-  onChanged?: () => void;
+  /** Bumped by the parent when the children list may have changed (a split
+   *  was just confirmed). The panel re-fetches on change.
+   *
+   *  This is a TOKEN, not a callback, on purpose. The previous shape was
+   *  `onChanged` + a `load` that called it — the parent's `onChanged` was an
+   *  inline arrow (`() => void refresh()`), so it got a NEW identity on
+   *  every parent render. `onChanged` sat in `load`'s useCallback deps, so
+   *  every parent render rebuilt `load`, which re-fired the `useEffect`
+   *  below, which re-fetched the children and called `onChanged()` again →
+   *  the parent refreshed → new render → ∞. Symptom: the requirement detail
+   *  page hammered /api/requirements/{id}/children + /api/requirements/{id} +
+   *  /api/usage/... + /api/schedules in a tight loop. A token keeps the
+   *  fetch effect keyed on something that only changes when the data
+   *  actually changed. */
+  reloadToken?: number;
   /** The child's count is reported back so the parent can show the
    *  「开发已下放给 N 个子需求」 banner. */
   onChildCountChange?: (n: number) => void;
@@ -39,27 +52,29 @@ interface ChildData {
 export function RequirementChildrenPanel({
   requirementId,
   onRequestSplit,
-  onChanged,
+  reloadToken,
   onChildCountChange,
 }: RequirementChildrenPanelProps) {
   const { t } = useTranslation();
   const [data, setData] = useState<ChildData | null>(null);
   const [error, setError] = useState('');
 
+  // NOTE: no parent callback in this dep array — see the `reloadToken`
+  // comment above. `load` must stay stable across parent renders, or the
+  // effect below refires on every render.
   const load = useCallback(async () => {
     try {
       const res = await requirementsApi.listChildren(requirementId);
       setData({ children: res.children ?? [], dependencies: res.dependencies ?? [] });
       setError('');
-      if (onChanged) onChanged();
     } catch {
       setError(t('requirements.split.errGeneric', { msg: '' }));
     }
-  }, [requirementId, t, onChanged]);
+  }, [requirementId, t]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, reloadToken]);
 
   useEffect(() => {
     if (onChildCountChange) onChildCountChange(data?.children.length ?? 0);
