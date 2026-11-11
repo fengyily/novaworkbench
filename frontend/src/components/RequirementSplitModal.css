@@ -34,6 +34,20 @@
   font-size: 12px;
 }
 
+/* The source-branch picker block at the top of the split modal. The
+   BranchPicker component ships the chip+rail vocabulary (defined in
+   RequirementDetail.css); the only thing this block adds is the full-width
+   stretch so the input does not collapse to the narrow inline cap. */
+.req-split-source {
+  margin-bottom: 10px;
+}
+.req-split-source .branch-selector {
+  max-width: none;
+}
+.req-split-source .preflight-field-card {
+  width: 100%;
+}
+
 .req-split-progress {
   display: flex;
   align-items: center;

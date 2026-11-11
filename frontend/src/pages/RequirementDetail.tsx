@@ -6940,7 +6940,9 @@ export default function RequirementDetail() {
           onClose={() => setSplitOpen(false)}
           requirementId={req.id}
           requirementTitle={req.title}
-          baseBranch={req.base_branch || ''}
+          baseBranch={req.base_branch || project?.default_branch || ''}
+          masterBranch={req.branch_name || defaultBranchName(req.id, kindOf(req))}
+          branches={availableBranches}
           onConfirmed={() => {
             setSplitOpen(false);
             // The split created new children — bump the panel's reload token

@@ -185,6 +185,67 @@ func TestCreateChildren_BaseFallsBackToProjectDefault(t *testing.T) {
 	}
 }
 
+// The children's base is the master's DEVELOPMENT branch — the stack bottom
+// of the stacked-PR model — not the master's base.
+//
+// The master has BOTH here (branch_name=feat/req_master, base=release/x);
+// the development branch must win, otherwise every child would be flattened
+// onto release/x and the children's PRs would target the wrong branch.
+func TestCreateChildren_BaseIsTheMasterDevelopmentBranch(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "release/x", model.BaseSourceExplicit, "designed")
+	if _, err := svc.db.Exec(
+		`UPDATE requirements SET branch_name='feat/req_master' WHERE id='req_master'`); err != nil {
+		t.Fatalf("set branch_name: %v", err)
+	}
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	children, err := svc.CreateChildren(master, splitTasks()[:1], nil, SplitCreateOpts{})
+	if err != nil {
+		t.Fatalf("CreateChildren: %v", err)
+	}
+	if children[0].BaseBranch != "feat/req_master" {
+		t.Errorf("base_branch = %q, want the master's development branch feat/req_master", children[0].BaseBranch)
+	}
+	if children[0].BaseBranchSource != model.BaseSourceParent {
+		t.Errorf("base_branch_source = %q, want %q", children[0].BaseBranchSource, model.BaseSourceParent)
+	}
+}
+
+// The handler prepares the stack bottom (creates the branch, pushes it) and
+// passes it down explicitly — the service must use it verbatim instead of
+// deriving another line.
+func TestCreateChildren_ExplicitBaseBranchWins(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "release/x", model.BaseSourceExplicit, "designed")
+	if _, err := svc.db.Exec(
+		`UPDATE requirements SET branch_name='feat/req_master' WHERE id='req_master'`); err != nil {
+		t.Fatalf("set branch_name: %v", err)
+	}
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	children, err := svc.CreateChildren(master, splitTasks()[:1], nil, SplitCreateOpts{
+		BaseBranch: "feat/req_stacked",
+	})
+	if err != nil {
+		t.Fatalf("CreateChildren: %v", err)
+	}
+	if children[0].BaseBranch != "feat/req_stacked" {
+		t.Errorf("base_branch = %q, want the explicitly passed feat/req_stacked", children[0].BaseBranch)
+	}
+	if children[0].BaseBranchSource != model.BaseSourceParent {
+		t.Errorf("base_branch_source = %q, want %q", children[0].BaseBranchSource, model.BaseSourceParent)
+	}
+}
+
 // A cycle must abort the WHOLE batch — no orphaned rows survive.
 func TestCreateChildren_RollsBackOnDependencyCycle(t *testing.T) {
 	svc := newSplitSvc(t)

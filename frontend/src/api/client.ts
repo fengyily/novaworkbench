@@ -1425,6 +1425,12 @@ export interface SplitConfirmResult {
   }>;
   // 软失败提示（例如「互相引用」写入失败）。子需求已落库，只是引用没写成。
   warnings?: string[];
+  // 子需求实际继承的基线（通常是主需求的开发分支 feat/req_<master>）。
+  base_branch?: string;
+  // 堆叠栈底分支。空 = 没有堆叠栈（子需求沿用主需求基线）。
+  stack_base?: string;
+  // 栈底分支是否已推送到远端。堆叠 PR 的 base 必须在 origin 上存在。
+  pushed?: boolean;
 }
 
 // 一条依赖边。requirement_id 依赖 depends_on_id。
@@ -1538,7 +1544,7 @@ export const requirementsApi = {
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +
   // the master's dev_delegated flag).
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][] }) =>
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }) =>
     api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>

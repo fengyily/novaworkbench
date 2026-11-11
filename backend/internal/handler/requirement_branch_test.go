@@ -311,21 +311,22 @@ func TestParentBranchBase(t *testing.T) {
 			},
 			want: "feat/req_P",
 		},
-		// ── 需求拆分 semantics: the BASE wins over the development branch.
+		// ── 需求拆分 semantics: the parent's DEVELOPMENT branch wins.
 		//
-		// After a split the master never develops, so its branch_name is
-		// empty and "Base 主需求分支" can only mean its base_branch. These
-		// cases pin that the resolver reads the base first.
+		// A split master keeps its own dev branch (feat/req_<master>) as the
+		// stack bottom, and every child branches off it — the stacked-PR
+		// model. The base is only the fallback for a parent that has no
+		// development branch of its own.
 		{
-			name: "parent base wins over the parent development branch",
+			name: "parent development branch wins over the parent base",
 			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
 			lookup: func(string) (*model.Requirement, error) {
 				return &model.Requirement{ID: "req_P", BaseBranch: "release/x", BranchName: "feat/req_P"}, nil
 			},
-			want: "release/x",
+			want: "feat/req_P",
 		},
 		{
-			name: "parent base only (split master has no development branch)",
+			name: "parent base only (parent has no development branch)",
 			req:  &model.Requirement{ID: "req_C", ParentID: "req_P"},
 			lookup: func(string) (*model.Requirement, error) {
 				return &model.Requirement{ID: "req_P", BaseBranch: "release/x"}, nil

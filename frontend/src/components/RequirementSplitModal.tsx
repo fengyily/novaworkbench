@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError, requirementsApi, type SplitTaskCandidate } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
+import { BranchPicker } from './BranchPicker';
 import { IconClose } from './icons';
 import './RequirementSplitModal.css';
 
@@ -35,8 +36,14 @@ export interface RequirementSplitModalProps {
   onClose: () => void;
   requirementId: string;
   requirementTitle: string;
-  /** The master's base branch — every child inherits it. */
+  /** The master's CURRENT base — the default value of the source-branch
+   *  picker, and what the stack-bottom branch is created from. */
   baseBranch: string;
+  /** The master's own dev branch (feat/req_<master>) — the stack bottom every
+   *  child develops on. */
+  masterBranch: string;
+  /** Branch candidates for the source-branch picker. */
+  branches: string[];
   /** Fired after the candidates were persisted. */
   onConfirmed: () => void;
 }
@@ -91,6 +98,8 @@ export function RequirementSplitModal({
   requirementId,
   requirementTitle,
   baseBranch,
+  masterBranch,
+  branches,
   onConfirmed,
 }: RequirementSplitModalProps) {
   const { t } = useTranslation();
@@ -102,6 +111,8 @@ export function RequirementSplitModal({
   const [running, setRunning] = useState(false);
   /** Candidate pairs the user ticked for mutual reference: [a, b] ordinals. */
   const [references, setReferences] = useState<[number, number][]>([]);
+  /** The branch the master's own dev branch is created from. */
+  const [sourceBranch, setSourceBranch] = useState<string>(baseBranch || '');
 
   const streamRef = useRef<EventStream | null>(null);
 
@@ -115,6 +126,13 @@ export function RequirementSplitModal({
     setReferences([]);
     onClose();
   }, [onClose]);
+
+  // Seed the source-branch picker from the master's current base whenever
+  // the modal opens (the parent's base can change between two splits).
+  useEffect(() => {
+    if (!open) return;
+    setSourceBranch(baseBranch || '');
+  }, [open, baseBranch]);
 
   // Start the split as soon as the modal opens.
   useEffect(() => {
@@ -262,7 +280,11 @@ export function RequirementSplitModal({
         order: i + 1,
         depends_on: r.dependsOn,
       }));
-      const res = await requirementsApi.confirmSplit(requirementId, { tasks, references });
+      const res = await requirementsApi.confirmSplit(requirementId, {
+        tasks,
+        references,
+        source_branch: sourceBranch.trim() || undefined,
+      });
       const warn = res.warnings && res.warnings.length > 0 ? res.warnings.join('；') : '';
       close();
       if (warn) {
@@ -318,8 +340,28 @@ export function RequirementSplitModal({
         </div>
 
         <div className="req-split-body">
+          {/* The source branch: the master's own dev branch is created from
+              it (or aligned to it) and pushed to the remote. Every child
+              then develops on that branch — stacked PRs. */}
+          <div className="req-split-source">
+            <BranchPicker
+              inputId="split-source-branch-input"
+              datalistId="split-source-branch-suggestions"
+              value={sourceBranch}
+              onChange={setSourceBranch}
+              disabled={busy}
+              placeholder={baseBranch || 'main'}
+              options={branches}
+              chipLabel="BASE 主需求"
+              defaultName={baseBranch || 'main'}
+              emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+            />
+            <div className="req-split-hint req-split-hint-muted">
+              {t('requirements.split.sourceBranchHint')}
+            </div>
+          </div>
           <div className="req-split-hint">
-            {t('requirements.split.baseHint', { base: baseBranch || 'main' })}
+            {t('requirements.split.baseHint', { base: masterBranch || baseBranch || 'main' })}
           </div>
           <div className="req-split-hint req-split-hint-muted">{t('requirements.split.parallelHint')}</div>
 

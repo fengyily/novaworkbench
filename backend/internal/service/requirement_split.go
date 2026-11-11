@@ -18,10 +18,16 @@ import (
 //
 //  1. **平级**：所有子需求的 parent_id 都等于主需求 id，互相不是父子。
 //     层级只有一层，依赖不参与层级判定。
-//  2. **基线恒等**：每个子需求的 base_branch ≡ 主需求的 base_branch，
-//     base_branch_source 恒为 model.BaseSourceParent（绝不是 explicit）。
-//     主需求拆分后不再开发 ⇒ 它没有开发分支 ⇒「主需求分支」只能是它
-//     选定的基线。所有子需求因此平铺打到同一条基线，PR 互相独立。
+//  2. **基线 = 主需求分支（堆叠 PR）**：每个子需求的 base_branch ≡ 主需求的
+//     **开发分支**（feat/req_<master>），base_branch_source 恒为
+//     model.BaseSourceParent（绝不是 explicit —— 用户是在主需求上选的，
+//     子需求只是跟随）。
+//
+//     子需求从主需求的开发分支上开枝，于是它们的 PR 全部打到
+//     feat/req_<master>，整摞子需求形成一条自底向上的堆叠栈：先合主需求
+//     分支，再合各子需求分支。主需求分支本身在拆分时会被创建（从用户选的
+//     来源分支 checkout 出来）并推送到远端 —— 堆叠 PR 的 base 必须存在于
+//     origin 上，否则子需求的 PR 全部无法创建。
 //  3. **原子**：子需求行 + 依赖边 + 主需求 dev_delegated=1 在同一个事务
 //     里落库。任一步失败整体回滚 —— 半截的拆分比不拆分更糟。
 //
@@ -39,6 +45,13 @@ type SplitCreateOpts struct {
 	// 已经过主需求的分析与方案，不必再跑一遍 analyst（architect 阶段的
 	// 「无分析会话」分支本来就只在 !skipAnalysis 时才要求会话存在）。
 	SkipAnalysis *bool
+	// BaseBranch — 子需求共同继承的基线（堆叠 PR 的栈底，即主需求的开发
+	// 分支 feat/req_<master>）。留空则由 splitBaseBranch 按主需求自身的
+	// 分支 / 基线 / 项目默认推导。
+	//
+	// 调用方（handler）在拆分时已经把这个分支创建出来并推送到了远端，
+	// 所以这里显式传下来，避免服务层再推导一次推导出另一条线。
+	BaseBranch string
 }
 
 // splitMaxTasks — 单次拆分的子需求数量上限。契约里写死 2–12，超出截断。
@@ -73,7 +86,10 @@ func (s *RequirementService) CreateChildren(
 		return nil, err
 	}
 
-	base := s.splitBaseBranch(parent)
+	base := strings.TrimSpace(opts.BaseBranch)
+	if base == "" {
+		base = s.splitBaseBranch(parent)
+	}
 
 	batchID := strings.TrimSpace(opts.BatchID)
 	if batchID == "" {
@@ -164,15 +180,19 @@ func (s *RequirementService) CreateChildren(
 
 // splitBaseBranch resolves the base branch every child inherits.
 //
-// The mapping is the identity on the master's base branch: the master no
-// longer develops, so "the master's branch" can only mean the base it
-// selected (the project default, or an explicit release/x). Fallbacks:
-// master base → project default → "main".
+// The mapping is the identity on the master's DEVELOPMENT branch: every
+// requirement that enters development lands on feat/req_<id>, and a split
+// master keeps that branch as the stack bottom its children branch off.
+// Fallbacks: master development branch → master base → project default →
+// "main".
 //
 // The source is ALWAYS model.BaseSourceParent — never explicit. "explicit"
 // means "the user picked this on THIS requirement", and the user did not:
 // they picked it on the master, and the child merely follows.
 func (s *RequirementService) splitBaseBranch(parent *model.Requirement) string {
+	if b := strings.TrimSpace(parent.BranchName); b != "" {
+		return b
+	}
 	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
 		return b
 	}

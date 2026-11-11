@@ -21,8 +21,9 @@
 // The same file also owns the BASE-branch resolution chain
 // (resolveEffectiveBase): which branch a run forks from. A child
 // requirement (parent_id set) bases itself on the branch its parent
-// requirement actually develops on; a requirement without a usable parent
-// branch falls back to the project's default branch.
+// requirement actually develops on — the stacked-PR stack bottom; a
+// requirement without a usable parent branch falls back to the project's
+// default branch.
 //
 // The frontend mirrors the branch-name convention in api/client.ts
 // (branchPrefixForKind / defaultBranchName) — the two MUST stay in sync;
@@ -85,7 +86,8 @@ func isRequirementBranch(name string) bool {
 //  2. explicit    — the user picked this base last time and we remembered
 //     it (requirements.base_branch_source == "explicit").
 //  3. parent      — a child requirement bases itself on the branch its
-//     parent requirement actually develops on.
+//     parent requirement actually develops on (feat/req_<parent> — the
+//     stack bottom of a split).
 //  4. requirement — this requirement's own previously persisted value, but
 //     ONLY when that value was not merely derived from the
 //     project default.
@@ -150,29 +152,30 @@ func resolveEffectiveBase(req *model.Requirement, projDefaultBranch, incoming, p
 // parentBranchBaseWith returns the base branch the PARENT requirement works
 // from, or "" when there is nothing to inherit.
 //
-// NEW SEMANTICS (after the 需求拆分 feature): it reads parent.BaseBranch —
-// the BASE the parent selected (the project default, or an explicit
-// release/x) — rather than parent.BranchName, the parent's DEVELOPMENT
-// branch.
+// SEMANTICS: a child requirement bases itself on the branch its parent
+// actually DEVELOPS on (parent.BranchName, i.e. feat/req_<parent>), and
+// only falls back to the parent's base when the parent has no development
+// branch of its own.
 //
-// Why the reversal: once a requirement is split, the master hands
-// development down to its children and never develops itself, so its
-// branch_name is permanently empty. "Base 主需求分支" therefore can only
-// mean the master's BASE. Reading branch_name would return "" and every
-// child would silently fall back to the project default — breaking the
-// "all children share the master's base" invariant that makes the
-// children's PRs independent siblings instead of a stack.
+// Why branch-first: this is the stacked-PR model. Every requirement that
+// enters development lands on feat/req_<id>; a split master keeps that
+// branch as the STACK BOTTOM and every child branches off it, so the
+// children's PRs target the master's branch and the whole stack merges
+// bottom-up. Reading the parent's BASE instead would flatten every child
+// onto the same line (the project default), producing independent sibling
+// PRs — and would also contradict what the UI promises ("子需求基于主需求
+// 分支开发").
 //
-// The second-tier fallback to branch_name keeps pre-split data working:
-// a master that already developed before the split feature shipped only
-// has a branch_name, and its children must keep inheriting it.
+// The base fallback keeps pre-split data working: a master that was
+// created before the branch convention (or that runs in no_branch mode)
+// has no branch_name, so its children inherit its base.
 //
 // Every failure degrades to "" and never blocks the run:
 //   - no parent (nil row / empty parent_id)
 //   - the parent row was deleted, or the lookup failed
 //   - the parent runs in "develop on base" mode (no_branch) — it has no
 //     branch of its own to inherit
-//   - the parent has neither a base nor a development branch
+//   - the parent has neither a development branch nor a base
 //
 // The lookup is injected so the rules stay a pure function and can be
 // unit-tested without a database.
@@ -190,10 +193,10 @@ func parentBranchBaseWith(lookup func(string) (*model.Requirement, error), req *
 	if parent.NoBranch {
 		return ""
 	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
+	if b := strings.TrimSpace(parent.BranchName); b != "" {
 		return b
 	}
-	if b := strings.TrimSpace(parent.BranchName); b != "" {
+	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
 		return b
 	}
 	return ""

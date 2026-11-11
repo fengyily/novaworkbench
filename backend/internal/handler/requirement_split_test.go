@@ -96,7 +96,7 @@ func TestSplit_PreconditionErrorCodes(t *testing.T) {
 			designDocs: "# 方案", wantCode: "SPLIT_PARENT_ARCHIVED",
 		},
 		{
-			name: "already developed", reqID: "req_dev", kind: "requirement", status: "designed",
+			name: "currently developing", reqID: "req_dev", kind: "requirement", status: "developing",
 			designDocs: "# 方案", branchName: "feat/req_dev", wantCode: "SPLIT_ALREADY_DEVELOPED",
 		},
 	}
@@ -111,6 +111,59 @@ func TestSplit_PreconditionErrorCodes(t *testing.T) {
 				t.Errorf("code = %q, want %q", code, c.wantCode)
 			}
 		})
+	}
+}
+
+// A requirement that has merely been DESIGNED must stay splittable.
+//
+// The design stage creates the worktree and writes branch_name, so the old
+// gate (branch_name != "" ⇒ "already developed") made branch-mode splitting
+// a deadlock: every designed requirement looked like it was already in
+// development. 321 of the 476 requirements that had a design in the wild
+// were blocked by it.
+//
+// The "may split" case is tested on the pure function rather than through
+// the HTTP layer: a request that passes the preconditions would spawn a
+// claude subprocess (the test handler has no gateway) and crash the test
+// binary.
+func TestSplitPrecondition_DesignedWithBranchNameIsSplittable(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *model.Requirement
+	}{
+		{
+			name: "designed with a branch name",
+			req:  &model.Requirement{ID: "req_m", Kind: "requirement", Status: "designed", DesignDocs: "# 方案", BranchName: "feat/req_m"},
+		},
+		{
+			name: "draft without a branch name",
+			req:  &model.Requirement{ID: "req_m", Kind: "requirement", Status: "draft", DesignDocs: "# 方案"},
+		},
+		{
+			name: "done requirement can be topped up",
+			req:  &model.Requirement{ID: "req_m", Kind: "requirement", Status: "done", DesignDocs: "# 方案", BranchName: "feat/req_m"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if code, msg := splitPreconditionError(c.req); code != "" {
+				t.Errorf("code = %q (%s), want the split to be allowed", code, msg)
+			}
+		})
+	}
+}
+
+// A master that already handed its development down to a batch of children
+// must not be split again — a second batch would produce a second,
+// conflicting set of children.
+func TestSplitPrecondition_AlreadySplitIsRefused(t *testing.T) {
+	req := &model.Requirement{
+		ID: "req_m", Kind: "requirement", Status: "designed",
+		DesignDocs: "# 方案", BranchName: "feat/req_m", DevDelegated: true,
+	}
+	code, _ := splitPreconditionError(req)
+	if code != "SPLIT_ALREADY_SPLIT" {
+		t.Errorf("code = %q, want SPLIT_ALREADY_SPLIT", code)
 	}
 }
 
@@ -215,6 +268,50 @@ func TestConfirmSplit_PersistsChildrenAndEdges(t *testing.T) {
 	}
 	if len(post) != 1 || post[0].RequirementID != resp2.Children[1].ID {
 		t.Errorf("child 1 dependents = %v, want child 2", post)
+	}
+}
+
+// A master that already has its own development branch hands that branch
+// down as the children's base — the stacked-PR stack bottom.
+func TestConfirmSplit_ChildrenBaseOnTheMasterBranch(t *testing.T) {
+	h, reqSvc, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "feat/req_m")
+	if _, err := d.Exec("UPDATE requirements SET base_branch='release/x', base_branch_source='explicit' WHERE id='req_m'"); err != nil {
+		t.Fatalf("set base branch: %v", err)
+	}
+
+	body := `{"tasks":[{"title":"子需求 A","order":1,"depends_on":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_m/split/confirm", strings.NewReader(body))
+	req.SetPathValue("id", "req_m")
+	rec := httptest.NewRecorder()
+	h.ConfirmSplit(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Children []struct {
+				BaseBranch string `json:"base_branch"`
+			} `json:"children"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data.Children) != 1 {
+		t.Fatalf("got %d children, want 1", len(resp.Data.Children))
+	}
+	if resp.Data.Children[0].BaseBranch != "feat/req_m" {
+		t.Errorf("base_branch = %q, want the master's branch feat/req_m", resp.Data.Children[0].BaseBranch)
+	}
+
+	// The master handed development down.
+	master, err := reqSvc.Get("req_m")
+	if err != nil {
+		t.Fatalf("get master: %v", err)
+	}
+	if !master.DevDelegated {
+		t.Error("master dev_delegated = false, want true")
 	}
 }
 

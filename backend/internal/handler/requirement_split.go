@@ -62,6 +62,10 @@ type ConfirmSplitReq struct {
 	// 被引用方序号]（均 1 起算）。依赖（闸门）与引用（上下文参考）是两件事：
 	// 引用只影响方案提示词，不阻塞任何流程。
 	References [][2]int `json:"references"`
+	// SourceBranch — 用户选的**来源分支**：主需求自己的开发分支
+	// （feat/req_<master>）由它 checkout 出来，拆分时还会被推送到远端。
+	// 留空则沿用主需求当前的基线。
+	SourceBranch string `json:"source_branch"`
 }
 
 // splitJobResults — 拆分结果在进程内的暂存。
@@ -175,8 +179,15 @@ func (h *WizardHandler) splitState() *splitState {
 //	no design docs           → SPLIT_NO_DESIGN
 //	the requirement is itself a child → SPLIT_PARENT_IS_CHILD
 //	archived                 → SPLIT_PARENT_ARCHIVED
-//	already developed (branch_name set) → SPLIT_ALREADY_DEVELOPED
+//	already split (dev_delegated) → SPLIT_ALREADY_SPLIT
+//	currently developing      → SPLIT_ALREADY_DEVELOPED
 //	a split is already running → SPLIT_IN_PROGRESS (409)
+//
+// NOTE: the "already developed" test used to be `branch_name != ""`, which
+// was wrong — the DESIGN stage writes branch_name (anchorWorktree), so a
+// requirement that had merely been designed looked "already in development"
+// and could never be split. The gate is the state machine plus the
+// dev_delegated flag instead. See splitPreconditionError.
 //
 // Returns {"job_id": ...}; the candidate list arrives on the job's SSE stream.
 func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +244,24 @@ func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
 
 // splitPreconditionError returns the error code + message when the
 // requirement may NOT be split. Empty code means "may split".
+//
+// The "already developed" gate reads the STATE MACHINE, not branch_name:
+// the design stage creates the worktree and writes branch_name (see
+// anchorWorktree → UpdateWorktree), so a requirement that had only been
+// designed would look like it was already in development. Judging by
+// branch_name made branch-mode splitting a deadlock — 321 of the 476
+// requirements that had a design in the wild were blocked by it.
+//
+// Two distinct gates remain:
+//
+//   - dev_delegated → SPLIT_ALREADY_SPLIT. The master already handed its
+//     development down to a batch of children; splitting it again would
+//     produce a second, conflicting batch.
+//   - status == "developing" → SPLIT_ALREADY_DEVELOPED. The requirement is
+//     mid-development right now, so its branch has real commits on it.
+//
+// A "done" requirement stays splittable: topping up the task breakdown of
+// a finished requirement is a legitimate request.
 func splitPreconditionError(req *model.Requirement) (code, msg string) {
 	if req == nil {
 		return "SPLIT_NOT_FOUND", "需求不存在"
@@ -249,7 +278,10 @@ func splitPreconditionError(req *model.Requirement) (code, msg string) {
 	if req.Status == "archived" {
 		return "SPLIT_PARENT_ARCHIVED", "已归档的需求不能拆分"
 	}
-	if strings.TrimSpace(req.BranchName) != "" {
+	if req.DevDelegated {
+		return "SPLIT_ALREADY_SPLIT", "该需求已拆分，开发已下放给子需求，不能重复拆分"
+	}
+	if req.Status == "developing" {
 		return "SPLIT_ALREADY_DEVELOPED", "该需求已进入开发，不能再拆分"
 	}
 	return "", ""
@@ -456,6 +488,27 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prepare the stack bottom: the master's own dev branch, created from
+	// the user-picked source branch and pushed to origin. Every child will
+	// develop on it (stacked PRs), so it must exist remotely before the
+	// children are persisted.
+	var proj *model.Project
+	if h.projectSvc != nil {
+		if p, pErr := h.projectSvc.Get(parent.ProjectID); pErr == nil {
+			proj = p
+		}
+	}
+	stackBase, stackPushed, stackWarnings, stackErr := h.prepareSplitStackBase(parent, proj, body.SourceBranch)
+	if stackErr != nil {
+		var se *splitStackError
+		if errors.As(stackErr, &se) {
+			writeError(w, http.StatusBadRequest, se.code, se.msg)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "SPLIT_CREATE_FAILED", stackErr.Error())
+		return
+	}
+
 	// Order the candidates and pre-mint their ids so the dependency edges
 	// (which reference real ids) can be inserted in the same transaction as
 	// the rows themselves.
@@ -489,7 +542,9 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	children, err := h.reqSvc.CreateChildren(parent, tasks, edges, service.SplitCreateOpts{})
+	children, err := h.reqSvc.CreateChildren(parent, tasks, edges, service.SplitCreateOpts{
+		BaseBranch: stackBase,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrDependencyCycle):
@@ -508,7 +563,7 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	warnings := []string{}
+	warnings := append([]string{}, stackWarnings...)
 	if len(body.References) > 0 {
 		if err := h.applySplitReferences(children, body.References); err != nil {
 			log.Printf("[split] %s: reference linking failed: %v", reqID, err)
@@ -549,9 +604,20 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The stack bottom the children actually inherited — the master's own
+	// development branch (feat/req_<master>), or whatever the service layer
+	// derived when no stack could be prepared.
+	effectiveBase := ""
+	if len(children) > 0 {
+		effectiveBase = children[0].BaseBranch
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"children": out,
-		"warnings": warnings,
+		"children":    out,
+		"warnings":    warnings,
+		"base_branch": effectiveBase,
+		"stack_base":  stackBase,
+		"pushed":      stackPushed,
 	})
 }
 
