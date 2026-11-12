@@ -179,10 +179,16 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// persists design_job_id on the requirement row before we return, so
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
 	// Resolve the design-stage base branch from the same body.BaseBranch
-	// the coding half will use (resolveImmediateBase is called separately
-	// inside the chained callback) so the two halves always share a base
-	// when the user picks one in DesignCodingImmediateModal.
-	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
+	// the coding half will use, so the two halves always share a base when
+	// the user picks one in DesignCodingImmediateModal.
+	//
+	// The value is passed through UNRESOLVED on purpose: prepareArchitectDesign
+	// runs the shared resolver (handler/requirement_branch.go), which treats a
+	// non-empty value that differs from the auto value as an explicit choice
+	// and otherwise falls through to the parent requirement's branch / the
+	// project default. Resolving it here would freeze a stale project default
+	// and defeat the parent-inheritance rule.
+	designBase := body.BaseBranch
 	// regenerate=false: the immediate design-and-coding path is the
 	// first-run dispatch (LaunchSpec + the HTTP "立即生成方案并开发" CTA
 	// both treat it as "start from where the requirement is"), so it must
@@ -219,7 +225,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 	// string (NOT the requirement row), and returns 3 values including
 	// *store.Job. Reuses the same gating as the HTTP /api/wizard/architect-design
 	// and scheduler paths.
-	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
+	designBase := body.BaseBranch
 	// regenerate=false: launchDesignOnly is the design-only sibling of
 	// launchDesignAndCoding (PromoteFromIdea + its dispatch). Like the
 	// design+coding chain, it treats every dispatch as a first-run /
@@ -341,7 +347,7 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				RequirementTitle: req.Title,
 				RequirementDesc:  req.Description,
 				BranchName:       resolveImmediateBranch(body.BranchName, reqID, req.Kind),
-				BaseBranch:       resolveImmediateBase(h, body.BaseBranch, req.ProjectID),
+				BaseBranch:       body.BaseBranch,
 				Model:            body.CodingModel,
 				ClaudeConfigID:   body.CodingConfigID,
 				ReadKnowledge:    body.ReadKnowledge,
@@ -400,18 +406,6 @@ func (h *WizardHandler) immediateCodingCallback(reqID string) *runCallbacks {
 	}
 }
 
-// branchPrefixForKind returns the conventional branch prefix for a
-// requirement kind: "fix" for issues, "feat" for everything else
-// (requirement / idea / legacy empty). Used by resolveImmediateBranch and
-// anchorWorktree so the dev branch matches the change type the user
-// declared when creating the requirement.
-func branchPrefixForKind(kind string) string {
-	if kind == service.KindIssue {
-		return "fix"
-	}
-	return "feat"
-}
-
 // resolveImmediateBranch returns the explicit body field when set, else
 // falls back to "<prefix>/<id stripped of req_ prefix>" where the prefix
 // is "fix" for issues and "feat" otherwise — the convention used by the
@@ -428,38 +422,5 @@ func resolveImmediateBranch(explicit, reqID, kind string) string {
 	// coding stages share the same req id, so both resolve to the same branch
 	// and the coding stage reuses the design worktree (EnsureWorktree is
 	// idempotent per req+branch) instead of colliding.
-	return branchPrefixForKind(kind) + "/" + reqID
-}
-
-// resolveImmediateBase returns the explicit body field when set, else
-// falls back to the project's stored DefaultBranch, else "main" — same
-// precedence chain execStartCoding uses inline (wizard_coding.go:200-216).
-func resolveImmediateBase(h *WizardHandler, explicit, projectID string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if projectID != "" {
-		if proj, err := h.projectSvc.Get(projectID); err == nil && proj != nil && proj.DefaultBranch != "" {
-			return proj.DefaultBranch
-		}
-	}
-	return "main"
-}
-
-// resolveImmediateDesignBase mirrors resolveImmediateBase for the design-stage
-// half of the chained run. It returns the explicit body.BaseBranch when
-// provided, otherwise project.DefaultBranch, otherwise "main". Does NOT touch
-// codingRunParams.BranchName — that is resolveImmediateBase's job. The two
-// helpers stay separate so future asymmetry (e.g. a design-only override that
-// diverges from coding) does not require refactoring the coding path.
-func resolveImmediateDesignBase(h *WizardHandler, explicit, projectID string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if projectID != "" {
-		if proj, err := h.projectSvc.Get(projectID); err == nil && proj != nil && proj.DefaultBranch != "" {
-			return proj.DefaultBranch
-		}
-	}
-	return "main"
+	return requirementBranchName(kind, reqID)
 }

@@ -12,11 +12,18 @@ const (
 	ReviewStatusError   = "error"
 )
 
-// Review type discriminator. Both kinds share one table so the history list
+// Review type discriminator. All kinds share one table so the history list
 // is a single query; PR reviews keep their legacy entry point.
 const (
 	ReviewTypeBranch = "branch"
 	ReviewTypePR     = "pr"
+	// ReviewTypeRequirement is a requirement-level Review: launched from the
+	// requirement detail page as a SUB-TASK (sub_tasks.task_kind='review'),
+	// scoped to the requirement's branch + working tree instead of a
+	// project-level branch pair. Its report is the authoritative copy — the
+	// requirement page renders it, and 追问 / 重新生成 / 版本 / 导出 all reuse
+	// the existing code_reviews read paths unchanged.
+	ReviewTypeRequirement = "requirement"
 )
 
 // CodeReview is one persisted Review session: the owner of its attachments,
@@ -70,11 +77,27 @@ type CodeReview struct {
 	// the report the model already produced. Empty = no session to resume
 	// (old rows, or a run that never emitted an init event); the follow-up
 	// then starts fresh with the report embedded in its prompt.
-	ClaudeSessionID string     `json:"claude_session_id"`
-	CreatedBy       string     `json:"created_by"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	ClaudeSessionID string `json:"claude_session_id"`
+	// RequirementID links the session to the requirement it reviews. Empty =
+	// a project-level review (every pre-existing row). It is what lets the
+	// requirement page list the Review rounds of one requirement
+	// (CodeReviewService.ListByRequirement).
+	RequirementID string `json:"requirement_id"`
+	// RoleKey is the AI persona (roles.key) the review ran under — the
+	// "Review 身份" the user picks in the requirement page. Empty = fall back
+	// to the default "reviewer" persona. It lives on the review (not on the
+	// sub-task) because the persona is a property of the review session, and
+	// the same session can be re-run / resumed / regenerated with it.
+	RoleKey string `json:"role_key"`
+	// Verdict is a NON-PERSISTED verdict for the round chain: "pass" |
+	// "fail" | "pending" | "error". It is computed from p0/p1 at read time
+	// rather than stored, so it can never drift from the counts the report
+	// actually carries. Empty for rows that have not finished yet.
+	Verdict     string     `json:"verdict,omitempty"`
+	CreatedBy   string     `json:"created_by"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 }
 
 // ReviewFinding is one graded issue from the report's trailing JSON block.

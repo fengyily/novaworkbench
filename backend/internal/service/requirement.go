@@ -33,6 +33,14 @@ var (
 	ErrParentCrossProject = errors.New("parent requirement belongs to a different project")
 	ErrParentIsChild      = errors.New("target is already a child requirement; only one level is supported")
 	ErrSelfHasChildren    = errors.New("this requirement has child requirements; move them out first")
+	// ErrParentArchived rejects a NEW child under an archived master. Only
+	// the create path checks it (validateParentTarget's checkArchived flag) —
+	// SetParent keeps its historical behaviour so an existing top-level
+	// requirement can still be attached to an archived master.
+	ErrParentArchived = errors.New("parent requirement is archived")
+	// ErrChildrenNotDone — a master whose development was handed down to its
+	// children can only be marked done once every child is done.
+	ErrChildrenNotDone = errors.New("child requirements are not all done")
 )
 
 type RequirementService struct {
@@ -127,7 +135,11 @@ var validTransitions = map[string][]string{
 	"draft":      {"analyzing", "designing", "developing", "archived"},
 	"analyzing":  {"designing", "draft", "archived"},
 	"designing":  {"designed", "analyzing", "archived"},
-	"designed":   {"developing", "archived"},
+	// "designed" → "done" exists for the master of a split: after the split
+	// the master never develops (the coding gate rejects it), so the only
+	// way out is to mark it done once every child is done. UpdateStatus
+	// enforces that precondition.
+	"designed":   {"developing", "done", "archived"},
 	"developing": {"done", "designed", "archived"},
 	"done":       {"archived"},
 	// archived is reversible: unarchive restores the requirement to "done" and
@@ -236,9 +248,18 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
-			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count"+
+			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count,"+
+			// qa_turn_count — how many stage-Q&A turns this requirement has been
+			// asked, across BOTH stages (design + coding). Same shape as
+			// child_count above: a correlated sub-select, never a physical
+			// column, so there is no second copy of the truth to keep in sync.
+			// The index idx_qa_req_stage(requirement_id, stage, created_at)
+			// covers the requirement_id lookup by its leftmost column, so the
+			// count is an index scan per row. No `?` placeholder inside the
+			// sub-select → it survives db.Rebind unchanged on every dialect.
+			"(SELECT COUNT(1) FROM requirement_qa_turns q WHERE q.requirement_id = r.id) AS qa_turn_count"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" "+orderBy,
 		args...)
@@ -252,17 +273,17 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA, &r.BaseBranch,
+			&r.DesignBaseSHA, &r.BaseBranch, &r.BaseBranchSource,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush, &r.AutoCommit, &r.AutoPushRemote, &r.AutoCreatePR, &r.NoBranch,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData, &r.SourceReviewID,
 			&r.SessionServerID,
-			&r.DevEndedAt, &r.ChildCount); err != nil {
+			&r.DevEndedAt, &r.ChildCount, &r.QATurnCount); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -447,16 +468,16 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA, &r.BaseBranch,
+			&r.DesignBaseSHA, &r.BaseBranch, &r.BaseBranchSource,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush, &r.AutoCommit, &r.AutoPushRemote, &r.AutoCreatePR, &r.NoBranch,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
@@ -585,10 +606,32 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 		sourceReviewID = req.SourceReviewID
 	}
 
+	// ParentID (optional): the new row is born as a sub-requirement of an
+	// existing master. Validated BEFORE the insert so a rejected parent
+	// leaves nothing behind — the alternative (insert, then call SetParent)
+	// would leave an orphan top-level row behind whenever the second call
+	// failed. The hierarchy rules are shared with SetParent via
+	// validateParentTarget, so "create a child" and "attach an existing
+	// requirement" can never disagree about what a valid master is.
+	//
+	// checkArchived=true: a NEW child under an archived master is refused —
+	// an archived row is a closed chapter and should not grow new work.
+	// SetParent keeps its historical behaviour (no archive check) because
+	// re-homing an existing row is a different operation.
+	if err := s.validateParentTarget(req.ProjectID, req.ParentID, true); err != nil {
+		return nil, err
+	}
+
+	// Columns (25) = VALUES list (25). split_batch_id / dev_delegated are
+	// written explicitly (rather than left to their DEFAULT) so the generic
+	// create path can stamp a split-produced row without a second UPDATE.
+	// PromoteFromIdea below has its own INSERT and needs no change — the
+	// column defaults keep those rows at '' / 0.
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, sourceReviewID, skipAnalysis, skipDesign, now, now,
-		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData)
+		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID,
+		req.SplitBatchID, req.DevDelegated)
 	if err != nil {
 		return nil, err
 	}
@@ -711,6 +754,22 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 		return nil, fmt.Errorf("invalid status transition: %s -> %s", r.Status, newStatus)
 	}
 
+	// A master whose development was handed down to its children (the
+	// "方案拆分" flow sets dev_delegated=1) never develops itself — so the
+	// only way out of "designed" is to mark it done, and that is only
+	// legitimate once every child is done. Without this guard the master
+	// could be closed while its children were still in flight, which is
+	// exactly the "无人收尾" hole the split flow has to close.
+	if newStatus == "done" {
+		pending, err := s.listUnfinishedChildren(id)
+		if err != nil {
+			return nil, err
+		}
+		if len(pending) > 0 {
+			return nil, fmt.Errorf("%w: %s", ErrChildrenNotDone, strings.Join(pending, ", "))
+		}
+	}
+
 	now := time.Now()
 	var completedAt *time.Time
 	if newStatus == "done" {
@@ -751,6 +810,31 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// listUnfinishedChildren returns the titles of this requirement's children that
+// are neither done nor archived. Used by the "master can only be closed once
+// its children are" guard in UpdateStatus.
+//
+// Archived children are excluded on purpose: an archived child is a closed
+// chapter and must not keep the master from being closed.
+func (s *RequirementService) listUnfinishedChildren(id string) ([]string, error) {
+	rows, err := s.db.Query(
+		"SELECT title FROM requirements WHERE parent_id=? AND status != 'done' AND status != 'archived'",
+		id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // UpdateAnalysisSession persists the claude CLI session id used for the analyst
@@ -1291,23 +1375,36 @@ func (s *RequirementService) UpdateDesignBaseSHA(id, sha string) error {
 	return err
 }
 
-// UpdateBaseBranch stamps the resolved baseline branch onto the requirement.
-// Called from the design stage prologue (right after the explicit-vs-default
-// fallback chain resolves the value) so a later coding-stage run can pick
-// up the same base even when the user forgot to re-pick it on the coding
-// form, AND so the merge stage targets the PR at the user-chosen base
-// instead of project.DefaultBranch. The CODING stage calls it too, with the
-// base it actually resolved for this run — otherwise a base switched on the
-// "start coding" form would leave the push stage reading the design stage's
-// stale value, and the code would be developed against one branch but
-// pushed onto another. STAMP-IF-NON-EMPTY: empty input clears
-// the column (used when the user explicitly blanks the field), and a
-// non-empty input always overwrites — re-runs deliberately update the row
-// so a deliberate base switch flips the PR target on the next merge.
-func (s *RequirementService) UpdateBaseBranch(id, branch string) error {
+// UpdateBaseBranchWithSource stamps the resolved baseline branch AND the
+// provenance of that branch onto the requirement in a single statement.
+//
+// Called from the design stage prologue (right after the resolver resolves
+// the value) so a later coding-stage run can pick up the same base even
+// when the user forgot to re-pick it on the coding form, AND so the merge
+// stage targets the PR at the user-chosen base instead of
+// project.DefaultBranch. The CODING stage calls it too, with the base it
+// actually resolved for this run — otherwise a base switched on the
+// "start coding" form would leave the push stage reading the design
+// stage's stale value, and the code would be developed against one branch
+// but pushed onto another.
+//
+// One statement, both columns: the resolver needs to know WHERE the stored
+// base came from ("the user chose develop" vs "develop was merely the
+// project default at the time"), and a two-statement write could leave the
+// two columns describing different resolutions if the second write failed.
+//
+// STAMP-IF-NON-EMPTY: empty input clears the column (used when the user
+// explicitly blanks the field), and a non-empty input always overwrites —
+// re-runs deliberately update the row so a deliberate base switch flips the
+// PR target on the next merge.
+//
+// source is one of the model.BaseSource* constants. An empty source clears
+// the marker, which is the legacy semantics — readers treat an empty
+// marker as "not explicit".
+func (s *RequirementService) UpdateBaseBranchWithSource(id, branch, source string) error {
 	_, err := s.db.Exec(
-		"UPDATE requirements SET base_branch = ?, updated_at = ? WHERE id = ?",
-		branch, time.Now(), id)
+		"UPDATE requirements SET base_branch = ?, base_branch_source = ?, updated_at = ? WHERE id = ?",
+		branch, source, time.Now(), id)
 	return err
 }
 
@@ -1759,6 +1856,15 @@ func (s *RequirementService) Delete(id string) error {
 	if _, err := tx.Exec("DELETE FROM design_revisions WHERE requirement_id=?", id); err != nil {
 		return err
 	}
+	// Dependency edges need BOTH directions deleted. The edge table has two
+	// FKs onto requirements (requirement_id = the dependent, depends_on_id =
+	// the prerequisite), so "delete where requirement_id = ?" alone would
+	// leave the edges where this row is the *prerequisite* — and a dangling
+	// edge blocks the dependent's coding gate forever (the gate looks up
+	// status != 'done' and a missing row never satisfies it).
+	if _, err := tx.Exec("DELETE FROM requirement_dependencies WHERE requirement_id=? OR depends_on_id=?", id, id); err != nil {
+		return fmt.Errorf("cleanup requirement_dependencies: %w", err)
+	}
 	// Same reasoning for every other requirement_id child table: the schema
 	// declares ON DELETE CASCADE on them, but SQLite never enables
 	// PRAGMA foreign_keys, so the cascade silently no-ops and each deleted
@@ -1857,18 +1963,12 @@ func (s *RequirementService) SetParent(id, parentID string) (*model.Requirement,
 	if parentID == id {
 		return nil, ErrParentSelf
 	}
-	parent, err := s.Get(parentID)
-	if err != nil {
-		if errors.Is(err, ErrRequirementNotFound) {
-			return nil, ErrParentNotFound
-		}
+	// Same hierarchy rules as the create-with-parent path — one helper, one
+	// definition of "a valid master". checkArchived=false: re-homing an
+	// existing row keeps its historical behaviour (an archived master is
+	// still a legal target), while only NEW children refuse one.
+	if err := s.validateParentTarget(self.ProjectID, parentID, false); err != nil {
 		return nil, err
-	}
-	if parent.ProjectID != self.ProjectID {
-		return nil, ErrParentCrossProject
-	}
-	if parent.ParentID != "" {
-		return nil, ErrParentIsChild
 	}
 	var children int
 	if err := s.db.QueryRow("SELECT COUNT(1) FROM requirements WHERE parent_id = ?", id).Scan(&children); err != nil {
@@ -1881,6 +1981,46 @@ func (s *RequirementService) SetParent(id, parentID string) (*model.Requirement,
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// validateParentTarget checks that parentID may be used as the master of a
+// requirement living in projectID. The rules ARE the hierarchy's invariants:
+//
+//   - the parent must exist
+//   - the parent must live in the same project
+//   - the parent must itself be top-level (one level only)
+//   - the parent must not be archived (only when checkArchived is set)
+//
+// Shared by Create (a brand-new child) and SetParent (re-homing an existing
+// row) so the two paths can never disagree about what a valid parent is —
+// the bug this helper exists to prevent: a UI that lets you CREATE a child
+// under a master that the ATTACH path would have rejected.
+//
+// An empty parentID means "top level" and is always valid.
+func (s *RequirementService) validateParentTarget(projectID, parentID string, checkArchived bool) error {
+	if parentID == "" {
+		return nil
+	}
+	var parentProjectID, parentParentID, parentStatus string
+	err := s.db.QueryRow(
+		"SELECT project_id, parent_id, status FROM requirements WHERE id = ?", parentID,
+	).Scan(&parentProjectID, &parentParentID, &parentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrParentNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if parentProjectID != projectID {
+		return ErrParentCrossProject
+	}
+	if parentParentID != "" {
+		return ErrParentIsChild
+	}
+	if checkArchived && parentStatus == "archived" {
+		return ErrParentArchived
+	}
+	return nil
 }
 
 // Tags caps for UpdateTags. Length cap matches the chips' visual width so a

@@ -250,8 +250,8 @@ func TestAutoPushPRUsesRequirementBase(t *testing.T) {
 	if err := reqSvc.UpdateNoBranch(row.ID, true); err != nil {
 		t.Fatalf("UpdateNoBranch: %v", err)
 	}
-	if err := reqSvc.UpdateBaseBranch(row.ID, "develop"); err != nil {
-		t.Fatalf("UpdateBaseBranch: %v", err)
+	if err := reqSvc.UpdateBaseBranchWithSource(row.ID, "develop", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource: %v", err)
 	}
 	if err := reqSvc.UpdateWorktree(row.ID, "", wtPath); err != nil {
 		t.Fatalf("UpdateWorktree: %v", err)
@@ -329,8 +329,8 @@ func TestCodingBaseWriteBackAlignsPushTarget(t *testing.T) {
 	proj := &model.Project{DefaultBranch: "main"}
 
 	// The design stage stamped "develop".
-	if err := reqSvc.UpdateBaseBranch(row.ID, "develop"); err != nil {
-		t.Fatalf("UpdateBaseBranch(develop): %v", err)
+	if err := reqSvc.UpdateBaseBranchWithSource(row.ID, "develop", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource(develop): %v", err)
 	}
 	stored, err := reqSvc.Get(row.ID)
 	if err != nil {
@@ -342,8 +342,8 @@ func TestCodingBaseWriteBackAlignsPushTarget(t *testing.T) {
 
 	// The user switches the base to "main" on the coding form; the coding
 	// stage writes the base it actually used back onto the row.
-	if err := reqSvc.UpdateBaseBranch(row.ID, "main"); err != nil {
-		t.Fatalf("UpdateBaseBranch(main): %v", err)
+	if err := reqSvc.UpdateBaseBranchWithSource(row.ID, "main", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource(main): %v", err)
 	}
 	stored, err = reqSvc.Get(row.ID)
 	if err != nil {

@@ -1261,6 +1261,57 @@ func (g *Gateway) ExtractStepsFromPlan(planMarkdown, feedback string) (string, e
 	return stripJSONFences(out), nil
 }
 
+// ExtractSubRequirementsFromDesign converts a technical design into the
+// {"tasks":[{...}]} envelope the 方案拆分 flow consumes, over the direct HTTP
+// LLM channel (OpenAI-compatible).
+//
+// It is the FALLBACK path: the primary path runs the local claude CLI (which
+// can read the repository and ground the scope in real file paths). When the
+// CLI is unavailable or fails, this single-shot HTTP call produces the
+// candidates instead — no tool use, no second session, just a text
+// transformation.
+//
+// The contract text is imported from the prompt package rather than copied,
+// so the CLI path and the HTTP path can never drift apart. internal/prompt
+// does not import internal/llm, so this direction is safe.
+//
+// feedback carries the previous attempt's raw output so the model can
+// self-correct on a parse failure — same "parse → feedback → retry" pattern
+// ExtractStepsFromPlan uses.
+//
+// The call runs on the heavy channel timeout (default 5m) because it ships
+// the whole design and asks for 8192 tokens.
+//
+// The returned string is a bare JSON payload; the caller parses it (via
+// prompt.NormalizeSplitTasks), which also applies the count cap and the
+// depends_on sanity rules.
+func (g *Gateway) ExtractSubRequirementsFromDesign(designDocs, feedback string) (string, error) {
+	if g.llmCfg == nil {
+		return "", fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	const maxRunes = 24000
+	if runes := []rune(designDocs); len(runes) > maxRunes {
+		designDocs = string(runes[:maxRunes]) + "\n…（后文省略）"
+	}
+	if feedback != "" {
+		designDocs = designDocs +
+			"\n\n（你上一次的输出无法解析为合法 JSON 或未能生成有效子需求列表，错误信息：" +
+			feedback + "，这次请严格输出合法 JSON。）"
+	}
+	out, _, err := chatCompletion(baseURL, apiKey, model, extractSplitSystemPrompt, designDocs, 8192, HeavyChatTimeout())
+	if err != nil {
+		return "", err
+	}
+	return stripJSONFences(out), nil
+}
+
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "```json")

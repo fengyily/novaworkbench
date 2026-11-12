@@ -72,6 +72,33 @@ CREATE TABLE IF NOT EXISTS requirements (
 	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- 需求「执行顺序依赖」的边表。子需求之间平级（requirements.parent_id 才是
+-- 层级边，全部子需求都指向同一个主需求），先后关系用这张**独立的**边表
+-- 表达 —— DAG 天然多对多，需要 UNIQUE 防重复边、需要按「被依赖方」反查
+-- （删除前置时清理）、需要跨库迁移；JSON 列在 MySQL 上既无法建索引也
+-- 无法反查。
+--
+--   requirement_id —— 依赖方（后置子需求）
+--   depends_on_id  —— 被依赖方（前置子需求）
+--   batch_id       —— 同一次「方案拆分」的批次 id（spb_xxx）；跨批次不建边
+--
+-- MySQL 不能索引 TEXT 列 —— depends_on_id 必须进 mysqlIndexedCol 白名单，
+-- 否则 CREATE TABLE 在 MySQL 上直接失败（SQLite / Postgres 会静默接受）。
+--
+-- 悬空边的清理不依赖 ON DELETE CASCADE：SQLite 从不开 PRAGMA foreign_keys，
+-- CASCADE 不会触发，必须由 service 显式删两个方向。
+CREATE TABLE IF NOT EXISTS requirement_dependencies (
+	id             TEXT PRIMARY KEY,
+	requirement_id TEXT NOT NULL,
+	depends_on_id  TEXT NOT NULL,
+	batch_id       TEXT NOT NULL DEFAULT '',
+	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(requirement_id, depends_on_id),
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE,
+	FOREIGN KEY (depends_on_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_req_deps_depends_on ON requirement_dependencies(depends_on_id);
+
 -- Per-requirement file attachments. Each row is one file uploaded against a
 -- requirement — the wizard's three role-gated stages (analyst / architect /
 -- developer) all share this single set, and Claude ingests each via Read
@@ -1424,6 +1451,28 @@ var alterColumns = []string{
 	// 门控本就不走三段，所以该列对它们没有意义；显式空串回落 auto 的语义与
 	// session_mode 一致。
 	`ALTER TABLE sub_tasks ADD COLUMN report_mode TEXT NOT NULL DEFAULT 'auto'`,
+	// 子任务类型：'code'（默认，历史全部行为）/ 'review'（需求级 Review 子任务）。
+	//
+	// 与 source 列语义正交：source 记录「派发来源」（manual / auto / push_pr /
+	// push_base），不是「任务类型」；复用 source 会破坏 FindRecentPushForReq 与
+	// phaseEnabledForSource 的既有语义。因此新增一列显式区分。
+	//
+	// DEFAULT 'code' 让所有存量行行为逐字不变。
+	`ALTER TABLE sub_tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'code'`,
+	// task_kind='review' 时指向 code_reviews.id（需求级 Review 会话行）。
+	// 报告的权威源是 code_reviews 行，本列只是子任务卡片拿回自己报告的指针。
+	// 空串 = 非 Review 子任务。
+	`ALTER TABLE sub_tasks ADD COLUMN review_id TEXT NOT NULL DEFAULT ''`,
+	// Review 回归轮次（仅 task_kind='review' 的行有值；首轮 = 1）。
+	// 修复子任务保持 0，所以轮次链只由 Review 型节点构成。
+	`ALTER TABLE sub_tasks ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0`,
+	// code_reviews 关联的需求：空串 = 项目级 Review（既有行不受影响）。
+	// 需求页要「按需求列 Review 轮次」需要这一列；code_reviews 本身是报告的
+	// 权威源，追问 / 重新生成 / 版本 / 导出全部只认这张表。
+	`ALTER TABLE code_reviews ADD COLUMN requirement_id TEXT NOT NULL DEFAULT ''`,
+	// 本次 Review 使用的 AI persona（roles.key）。空串 = 回退到 'reviewer'。
+	// 与 sub_tasks.task_kind 分离：身份是 Review 会话的属性，不是子任务的属性。
+	`ALTER TABLE code_reviews ADD COLUMN role_key TEXT NOT NULL DEFAULT ''`,
 	// 父子查询索引：未来「列出某个父任务的所有子任务」按此索引即可。
 	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_parent ON sub_tasks(parent_subtask_id)`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch
@@ -1536,6 +1585,20 @@ var alterColumns = []string{
 	// re-runs overwrite cleanly. Empty = legacy row or no design yet — the
 	// merge stage then falls back to project.DefaultBranch.
 	`ALTER TABLE requirements ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`,
+	// base_branch_source: WHERE the persisted base_branch came from.
+	// 'explicit' = the user picked it themselves; 'parent' = inherited from
+	// the parent requirement's branch; 'requirement' = reused this
+	// requirement's own previous value; 'project' = projects.default_branch;
+	// 'default' = the hard-coded "main" fallback.
+	//
+	// Why a separate column: the base_branch STRING alone cannot tell
+	// "the user deliberately chose develop" apart from "develop happened to
+	// be the project default at the time" — and those two must behave
+	// differently when the project's default_branch later changes.
+	//
+	// Empty = a row written before this column existed (legacy rows), which
+	// the resolver treats as "not explicit".
+	`ALTER TABLE requirements ADD COLUMN base_branch_source TEXT NOT NULL DEFAULT ''`,
 	// Issue-monitor source traceability (v0.5.x). Every requirement imported
 	// from a GitHub Issue carries the platform tag ("github" / "gitlab" /
 	// "gitea" — even though only GitHub ships in v0.5.x), the external id
@@ -1657,6 +1720,19 @@ var alterColumns = []string{
 	// safe across SQLite / MySQL / Postgres and is the zero value the
 	// service recognizes as "no synced attachments yet".
 	`ALTER TABLE agent_servers ADD COLUMN attachment_sync_state TEXT NOT NULL DEFAULT '{}'`,
+	// split_batch_id: 同一次「方案拆分」生成的子需求共享同一个批次 id
+	// （spb_<hex>）。空 = 不是拆分产物（人工创建 / 历史数据）。用途：UI
+	// 分组展示、区分「拆分生成」与「人工创建」、为将来的「替换本批」留
+	// 定位能力。不建索引（TEXT 索引在 MySQL 需 VARCHAR）。
+	`ALTER TABLE requirements ADD COLUMN split_batch_id TEXT NOT NULL DEFAULT ''`,
+	// dev_delegated: 开发权已下放给子需求（1）还是本需求自己开发（0）。
+	// 「方案拆分」成功时置主需求为 1；子需求恒为 0；历史数据 = 0，行为不变。
+	// 为什么不用「有子需求就推断」：手工 quick-create 一个子需求并不代表
+	// 主需求放弃开发 —— 只有「拆分」这一动作才下放开发权，规则必须显式、
+	// 可审计。沿用 requirements.no_branch 的 INTEGER(0/1) + DEFAULT 0
+	// 约定，保证三方言一致（TEXT 字面量默认值在 MySQL 上需要改写成
+	// DEFAULT ('…')，INTEGER 无此问题）。
+	`ALTER TABLE requirements ADD COLUMN dev_delegated INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (
@@ -1670,7 +1746,9 @@ var (
 	// without a prefix length), while SQLite/Postgres silently accepted it.
 	// `stage` joined the list with requirement_qa_turns (indexed as part of
 	// idx_qa_req_stage) — the same trap, one column further down.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
+	// `depends_on_id` joined the list with requirement_dependencies (indexed as
+	// part of its UNIQUE(requirement_id, depends_on_id) constraint).
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

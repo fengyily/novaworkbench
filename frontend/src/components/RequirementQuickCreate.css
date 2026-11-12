@@ -1,0 +1,118 @@
+/* RequirementQuickCreate — the "+" that appears on a requirement title, and
+   the one-field popover it opens.
+
+   The button follows the repo's established "hidden at rest, revealed by
+   intent" idiom (same shape as .req-tree-add in RequirementTreeToggle.css):
+   opacity 0 at rest, revealed on row hover, on keyboard focus, and on touch
+   devices where there is no hover at all. opacity rather than visibility so
+   the button keeps its hit area and never reflows the row when it appears. */
+
+.pr-title-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  opacity: 0;
+  transition: background 160ms ease, color 160ms ease, opacity 160ms ease;
+}
+.req-tree-row:hover .pr-title-add,
+.pr-title-add:hover,
+.pr-title-add:focus-visible {
+  opacity: 1;
+}
+.pr-title-add:hover {
+  color: var(--color-primary);
+  background: var(--color-active);
+}
+/* Touch devices have no hover at all — keep the "+" always visible. */
+@media (hover: none) {
+  .pr-title-add { opacity: 1; }
+}
+
+/* The popover itself — rendered through a portal with fixed positioning, so
+   it escapes the requirements table's scroll container (`.pr-list` has
+   overflow-x: auto and would clip an in-cell panel near the page bottom). */
+.req-quick-create {
+  position: fixed;
+  z-index: 60;
+  width: 320px;
+  max-width: min(86vw, 320px);
+  padding: 10px;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  text-align: left;
+  cursor: default;
+}
+.req-quick-create-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+.req-quick-create-title {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.req-quick-create-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.req-quick-create-close:hover {
+  color: var(--color-text);
+  background: var(--color-hover);
+}
+.req-quick-create-input {
+  width: 100%;
+  min-height: 68px;
+  padding: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+.req-quick-create-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+.req-quick-create-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-error-deep, #b91c1c);
+}
+.req-quick-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}

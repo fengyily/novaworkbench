@@ -102,7 +102,7 @@ const reviewAttachmentDirective = "### 附件（功能验证材料）\n\n" +
 // origin/<x> when it exists and falls back to the local branch), so the
 // model never has to guess whether a branch was pushed.
 type ReviewPromptInput struct {
-	ReviewType        string // "branch" | "pr"
+	ReviewType        string // "branch" | "pr" | "requirement"
 	Branch            string
 	BaseBranch        string
 	HeadRef           string // resolved, e.g. "origin/feat/x" or "feat/x"
@@ -112,6 +112,16 @@ type ReviewPromptInput struct {
 	Description       string // user-written 改动目标 / Review 上下文
 	ExtraRequirements string // legacy single-line field from the PR entry point
 	HasAttachments    bool
+	// ScopeBlock REPLACES the default "对比区间 + 操作步骤" section when it is
+	// non-empty. It is how the requirement-level Review tells the model that
+	// the change under review is not only `base...head`: a requirement-level
+	// Review also covers the UNCOMMITTED working tree and the UNTRACKED files,
+	// because the fix sub-tasks it spawns edit the working tree without
+	// committing.
+	//
+	// Leaving it empty keeps the project-level Review's prompt byte-for-byte
+	// identical to what it has always been.
+	ScopeBlock string
 }
 
 // BuildReviewPrompt assembles the review task prompt (Chinese, per the
@@ -119,9 +129,12 @@ type ReviewPromptInput struct {
 func BuildReviewPrompt(in ReviewPromptInput) string {
 	var b strings.Builder
 
-	if in.ReviewType == "pr" {
+	switch in.ReviewType {
+	case "pr":
 		b.WriteString("请对以下 PR 的改动进行代码 Review。\n\n")
-	} else {
+	case "requirement":
+		b.WriteString("请对以下需求实现的改动进行代码 Review。\n\n")
+	default:
 		b.WriteString("请对以下分支的改动进行代码 Review。\n\n")
 	}
 
@@ -136,7 +149,9 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 	if in.BaseBranch != "" {
 		fmt.Fprintf(&b, "- 基础分支：`%s`\n", in.BaseBranch)
 	}
-	fmt.Fprintf(&b, "- 对比区间：`git diff %s...%s`\n", in.BaseRef, in.HeadRef)
+	if in.ScopeBlock == "" {
+		fmt.Fprintf(&b, "- 对比区间：`git diff %s...%s`\n", in.BaseRef, in.HeadRef)
+	}
 	b.WriteString("\n")
 
 	if strings.TrimSpace(in.Description) != "" {
@@ -153,7 +168,17 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 		b.WriteString(reviewAttachmentDirective)
 	}
 
-	fmt.Fprintf(&b, `## 操作步骤
+	// The scope block replaces BOTH the diff-range line above and the
+	// "操作步骤" section below: the steps have to match the scope, otherwise
+	// the model is told to run `git diff base...head` while the scope says the
+	// review also covers the working tree — and it would grade a stale copy of
+	// the code, which is exactly the failure the requirement-level Review
+	// exists to avoid.
+	if in.ScopeBlock != "" {
+		b.WriteString(in.ScopeBlock)
+		b.WriteString("\n")
+	} else {
+		fmt.Fprintf(&b, `## 操作步骤
 
 1. 运行 `+"`git diff %s...%s`"+` 查看本次全部改动（该区间已由后端解析好，直接使用，不要自行改写成别的 ref）。
 2. 运行 `+"`git log --oneline %s..%s`"+` 了解提交脉络。
@@ -162,6 +187,7 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 5. 按下面的检查清单与输出契约产出报告。
 
 `, in.BaseRef, in.HeadRef, in.BaseRef, in.HeadRef)
+	}
 
 	b.WriteString(`## 检查清单（三个维度，缺一不可）
 
@@ -252,6 +278,101 @@ JSON 块的约束：
 - ` + "`line`" + ` 是字符串（可写 ` + "`\"42\"`" + ` 或 ` + "`\"12-20\"`" + `，不确定时写 ` + "`\"\"`" + `）。
 - JSON 必须是单个合法对象，且是整个回复的最后一段内容。
 `
+
+// ── 修复子任务 (fix sub-task generated from a Review finding) ───────────────
+
+// FixPromptInput is everything a fix sub-task needs. It describes ONE
+// finding of a Review report — the fix sub-task is deliberately one issue
+// per sub-task, because a mixed "fix 3 unrelated things" prompt is exactly
+// how a child agent ends up doing a sloppy half-fix of each.
+type FixPromptInput struct {
+	// Severity is the finding's grade (P0 / P1 / P3). It is carried into the
+	// prompt because it changes the urgency the fix should be written with
+	// ("必须修复才能合入" vs "优化项建议").
+	Severity string
+	// Title / Detail / Suggestion / File / Line come straight from the
+	// finding the Report contract produced.
+	Title      string
+	Detail     string
+	Suggestion string
+	File       string
+	Line       string
+	// Ref is the finding's stable handle inside the report ("P0-2"), so the
+	// fixer can point at the exact entry in the report it is answering.
+	Ref string
+	// RequirementTitle is the parent requirement's title — it gives the child
+	// agent the "why" behind the code it is fixing.
+	RequirementTitle string
+}
+
+// BuildFixPrompt assembles the task prompt for a fix sub-task spawned from a
+// Review finding.
+//
+// It is a deliberately SHORT prompt compared to the review contract: the
+// grading contract, the mermaid directive and the trailing JSON block are
+// NOT repeated here. A fix sub-task is an implementation task (it must end
+// with code on disk), not a report — repeating the review's output contract
+// would make the child produce a second report instead of a patch, and would
+// make the trailing JSON block land in the fix's artifact where nothing
+// parses it.
+func BuildFixPrompt(in FixPromptInput) string {
+	var b strings.Builder
+
+	b.WriteString("请修复下面这条代码 Review 问题。\n\n")
+
+	b.WriteString("- 等级：")
+	b.WriteString(strings.TrimSpace(in.Severity))
+	b.WriteString("\n")
+	if in.Ref != "" {
+		b.WriteString("- 报告条目：")
+		b.WriteString(strings.TrimSpace(in.Ref))
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(in.Title) != "" {
+		b.WriteString("- 标题：")
+		b.WriteString(strings.TrimSpace(in.Title))
+		b.WriteString("\n")
+	}
+	if loc := strings.TrimSpace(in.File); loc != "" {
+		if line := strings.TrimSpace(in.Line); line != "" {
+			b.WriteString("- 位置：`")
+			b.WriteString(loc)
+			b.WriteString(":")
+			b.WriteString(line)
+			b.WriteString("`\n")
+		} else {
+			b.WriteString("- 位置：`")
+			b.WriteString(loc)
+			b.WriteString("`\n")
+		}
+	}
+	if strings.TrimSpace(in.Detail) != "" {
+		b.WriteString("- 问题说明：")
+		b.WriteString(strings.TrimSpace(in.Detail))
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(in.Suggestion) != "" {
+		b.WriteString("- 修改建议：")
+		b.WriteString(strings.TrimSpace(in.Suggestion))
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(in.RequirementTitle) != "" {
+		b.WriteString("- 所属需求：")
+		b.WriteString(strings.TrimSpace(in.RequirementTitle))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(`
+要求：
+1. 在当前分支上直接完成修改，不要新建分支、不要 git checkout 到别的分支。
+2. 只改与本条问题相关的代码，不顺手重构无关代码。
+3. 改完后自检：说明改了什么、为什么这样改、有没有引入新的问题。
+4. 如果你判断这条问题其实不成立（代码不会被执行、校验已在上游做过等），
+   明确说明理由并保持代码不变，不要为了"有改动"而硬改。
+`)
+
+	return b.String()
+}
 
 // ── 追问 (follow-up questions on a finished review) ──────────────────────────
 

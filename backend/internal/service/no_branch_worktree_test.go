@@ -75,8 +75,8 @@ func TestUpdateNoBranchRoundTrip(t *testing.T) {
 	}
 }
 
-// TestUpdateBaseBranchOverwrites pins the "a non-empty value always
-// overwrites" semantics of UpdateBaseBranch.
+// TestUpdateBaseBranchWithSourceOverwrites pins the "a non-empty value
+// always overwrites" semantics of UpdateBaseBranchWithSource.
 //
 // The coding stage writes the base it actually resolved for this run back
 // onto the row (so the push stage reads the same base the code was written
@@ -84,7 +84,7 @@ func TestUpdateNoBranchRoundTrip(t *testing.T) {
 // "stamp only when empty" behaviour would leave the design stage's stale
 // value in place and the code would be developed against one branch but
 // pushed onto another.
-func TestUpdateBaseBranchOverwrites(t *testing.T) {
+func TestUpdateBaseBranchWithSourceOverwrites(t *testing.T) {
 	d := newTestDB(t)
 	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
 	s := NewRequirementService(d, nil)
@@ -93,8 +93,8 @@ func TestUpdateBaseBranchOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.UpdateBaseBranch(created.ID, "develop"); err != nil {
-		t.Fatalf("UpdateBaseBranch(develop): %v", err)
+	if err := s.UpdateBaseBranchWithSource(created.ID, "develop", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource(develop): %v", err)
 	}
 	got, err := s.Get(created.ID)
 	if err != nil {
@@ -103,9 +103,10 @@ func TestUpdateBaseBranchOverwrites(t *testing.T) {
 	if got.BaseBranch != "develop" {
 		t.Fatalf("base_branch = %q, want %q", got.BaseBranch, "develop")
 	}
-	// The second write must replace the first one.
-	if err := s.UpdateBaseBranch(created.ID, "main"); err != nil {
-		t.Fatalf("UpdateBaseBranch(main): %v", err)
+	// The second write must replace the first one — both the value and the
+	// source marker move together.
+	if err := s.UpdateBaseBranchWithSource(created.ID, "main", model.BaseSourceProject); err != nil {
+		t.Fatalf("UpdateBaseBranchWithSource(main): %v", err)
 	}
 	got, err = s.Get(created.ID)
 	if err != nil {
@@ -113,5 +114,9 @@ func TestUpdateBaseBranchOverwrites(t *testing.T) {
 	}
 	if got.BaseBranch != "main" {
 		t.Fatalf("base_branch = %q, want %q — a non-empty value must always overwrite", got.BaseBranch, "main")
+	}
+	if got.BaseBranchSource != model.BaseSourceProject {
+		t.Fatalf("base_branch_source = %q, want %q — the source marker must move with the value",
+			got.BaseBranchSource, model.BaseSourceProject)
 	}
 }

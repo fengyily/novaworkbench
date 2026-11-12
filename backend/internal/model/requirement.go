@@ -5,6 +5,28 @@ import (
 	"time"
 )
 
+// Base-branch provenance markers. These record WHERE a requirement's
+// base_branch came from, so the resolver can tell an explicit user choice
+// apart from a value that was merely derived (from the parent requirement
+// or from the project's default branch).
+//
+// They live in the model package because both the service layer (which
+// persists the marker) and the handler layer (which resolves it) need them,
+// and the handler layer must not import the service layer's constants for
+// this.
+const (
+	// BaseSourceExplicit — the user picked this base branch themselves.
+	BaseSourceExplicit = "explicit"
+	// BaseSourceParent — inherited from the parent requirement's branch.
+	BaseSourceParent = "parent"
+	// BaseSourceRequirement — reused this requirement's own previous value.
+	BaseSourceRequirement = "requirement"
+	// BaseSourceProject — the project's default_branch.
+	BaseSourceProject = "project"
+	// BaseSourceDefault — the hard-coded "main" fallback.
+	BaseSourceDefault = "default"
+)
+
 type Requirement struct {
 	ID                 string `json:"id"`
 	ProjectID          string `json:"project_id"`
@@ -29,10 +51,30 @@ type Requirement struct {
 	// only, same project). Empty = top level. NOT the same as
 	// SourceRequirementID, which is promotion provenance.
 	ParentID string `json:"parent_id"`
+	// SplitBatchID groups the sub-requirements produced by one "方案拆分"
+	// run (spb_<hex>). Empty = this row was not produced by a split (manual
+	// creation / pre-existing data). Read-only from the API's point of view —
+	// only the split transaction writes it.
+	SplitBatchID string `json:"split_batch_id"`
+	// DevDelegated means "development has been handed down to the children"
+	// (1) vs "this requirement develops itself" (0). The split transaction
+	// sets it to 1 on the master and leaves it 0 on every child. The coding
+	// gate refuses to promote a dev_delegated requirement into "developing".
+	//
+	// Why not infer it from "has children": a hand-made child (quick-create)
+	// does NOT mean the master gave up development. Only the explicit split
+	// action does — the rule must be auditable.
+	DevDelegated bool `json:"dev_delegated"`
 	// ChildCount is a read-only derived count of non-archived children,
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`
 	DesignSessionID     string `json:"design_session_id"`
+	// QATurnCount is a read-only derived count of stage-Q&A turns across both
+	// stages (design + coding), populated by List only. Mirrors ChildCount:
+	// a correlated sub-select, never a physical column — the count is a fact
+	// about the requirement_qa_turns rows, so persisting a second copy would
+	// only add a value that can drift.
+	QATurnCount int `json:"qa_turn_count"`
 	// DesignRevisionNo is which version of the design plan the requirement
 	// currently holds (0 = no design yet, 1 = first run, 2 = first regenerate,
 	// …). Matches the rev_no of the newest design_revisions row. Read paths
@@ -240,6 +282,24 @@ type Requirement struct {
 	// Empty for legacy rows; the merge stage then falls back to
 	// project.DefaultBranch.
 	BaseBranch string `json:"base_branch"`
+	// BaseBranchSource records WHERE the persisted BaseBranch came from.
+	// The base_branch string alone cannot distinguish "the user deliberately
+	// chose develop" from "develop happened to be the project default at the
+	// time" — the two must behave differently once projects.default_branch
+	// changes. See the BaseSource* constants for the value set.
+	//
+	// Empty = a row written before this column existed (legacy row), which
+	// the resolver treats as "not explicit".
+	BaseBranchSource string `json:"base_branch_source"`
+	// BaseBranchEffective is the base branch this requirement WOULD use
+	// right now, computed by the resolver from the requirement row, the
+	// parent requirement and the project's default branch. NOT persisted —
+	// it is recomputed on every read.
+	//
+	// The frontend seeds its BASE picker with this value so the value it
+	// sends back round-trips as "not an explicit choice" instead of
+	// accidentally overriding the parent-inheritance rule.
+	BaseBranchEffective string `json:"base_branch_effective,omitempty"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored
@@ -379,6 +439,24 @@ type CreateRequirementReq struct {
 	// Validated in service.RequirementService (must point to an existing row in
 	// the same project).
 	SourceRequirementID string `json:"source_requirement_id"`
+
+	// ParentID nests the new requirement under a master requirement (one level
+	// only, same project). Empty = top level. Validated by
+	// RequirementService.validateParentTarget — the same rules the
+	// PUT /api/requirements/{id}/parent path enforces, so "create a child" and
+	// "attach an existing requirement" can never disagree about what a valid
+	// master is. Accepted at creation time so the child row and its parent
+	// link land in ONE insert; creating first and attaching afterwards would
+	// leave an orphan top-level row behind whenever the second call failed.
+	ParentID string `json:"parent_id"`
+
+	// SplitBatchID groups the sub-requirements produced by one "方案拆分" run.
+	// Empty = not a split product. Only the split service writes it.
+	SplitBatchID string `json:"split_batch_id"`
+
+	// DevDelegated = 1 means development was handed down to the children.
+	// The split service sets it on the master only.
+	DevDelegated bool `json:"dev_delegated"`
 
 	// Launch: optional execution plan attached at creation time. When set,
 	// the handler dispatches the run synchronously (Mode=="immediate") or

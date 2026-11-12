@@ -690,6 +690,43 @@ export interface SubTask {
   // 替换成 brief 或 full）。undefined = 老后端或非手动行，按 brief 不渲染
   // 三段区即可——配合 !phase_emitted 已覆盖。
   report_mode?: 'auto' | 'brief' | 'full';
+  // What KIND of work this row does: 'code' (the default — an ordinary
+  // implementation sub-task) or 'review' (a requirement-level Review round).
+  // Older backends omit the field; the panel then treats the row as 'code',
+  // so nothing changes for them.
+  task_kind?: 'code' | 'review';
+  // The code_reviews.id this row produced (only set on task_kind='review'
+  // rows). That table is the authoritative report; this field is just the
+  // pointer the sub-task card uses to fetch its own report.
+  review_id?: string;
+  // The regression round of a Review sub-task (1 for the first round, +1 per
+  // re-check). Fix sub-tasks stay at 0, so the round chain is made of Review
+  // nodes only.
+  review_round?: number;
+}
+
+// 需求级 Review 的一轮。GET /api/requirements/{id}/reviews 的元素类型。
+//
+// 它是 code_reviews 行的扁平投影：需求页用它渲染轮次链，完整报告另外从
+// GET /api/code-reviews/{rid} 取。
+export interface ReviewRound {
+  review_id: string;
+  sub_task_id: string;
+  review_round: number;
+  status: 'draft' | 'running' | 'done' | 'error';
+  // 'pass' (no P0/P1 left) / 'fail' (P0 or P1 outstanding) / 'pending' (still
+  // running) / 'error' (the run failed). Computed by the backend from the
+  // counts — the frontend never derives a second source of truth.
+  verdict: 'pass' | 'fail' | 'pending' | 'error';
+  p0_count: number;
+  p1_count: number;
+  p3_count: number;
+  goal_met: string;
+  title: string;
+  model: string;
+  role_key: string;
+  created_at: string;
+  finished_at?: string;
 }
 
 export const subTasksApi = {
@@ -832,6 +869,64 @@ export const subTasksApi = {
     ),
 };
 
+// requirementReviewsApi — 需求级 Review（以子任务的方式发起）。
+//
+// 报告的权威源是 code_reviews 表，所以追问 / 重新生成 / 版本 / 导出全部复用
+// 既有的 codeReviewsApi；这里只有「以子任务的方式发起 / 转修复任务 / 回归」
+// 这三个需求级动作。
+export const requirementReviewsApi = {
+  // Start the first Review round. Returns a JobStore job_id (reuse
+  // /api/wizard/jobs/{job_id}/stream for the live log), a sub-task id and a
+  // code_reviews row id.
+  //
+  // agent_server_id is local-only for now: a remote host only sees origin, so
+  // it cannot see the uncommitted fixes and a re-check would re-grade stale
+  // code. The backend refuses a remote pick explicitly.
+  start: (
+    requirementId: string,
+    data: {
+      description: string;
+      role_key?: string;
+      model?: string;
+      claude_config_id?: string;
+      agent_server_id?: string;
+      base_branch?: string;
+      session_mode?: 'fork' | 'with_context';
+    },
+  ) =>
+    api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
+      `/api/requirements/${requirementId}/reviews`,
+      data,
+    ),
+  // The requirement's Review round chain, newest first.
+  list: (requirementId: string) =>
+    api.get<ReviewRound[]>(`/api/requirements/${requirementId}/reviews`),
+  // Turn the selected findings into fix sub-tasks (nested under that
+  // Review's sub-task). Omitting finding_ref / severities converts every
+  // P0 + P1.
+  createFixes: (
+    requirementId: string,
+    reviewId: string,
+    data: { finding_ref?: string; severities?: string[] },
+  ) =>
+    api.post<{ sub_task_ids: string[] }>(
+      `/api/requirements/${requirementId}/reviews/${reviewId}/fixes`,
+      data,
+    ),
+  // Re-check: starts another round (round +1, parented to the previous one).
+  // The scope is resolved AGAIN — the fixes changed the working tree, so
+  // reusing the previous round's scope would re-grade the old code.
+  recheck: (
+    requirementId: string,
+    reviewId: string,
+    data: { model?: string; claude_config_id?: string; role_key?: string } = {},
+  ) =>
+    api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
+      `/api/requirements/${requirementId}/reviews/${reviewId}/recheck`,
+      data,
+    ),
+};
+
 // SubTaskOrchestrateResponse is what the backend returns from POST
 // /orchestrate. sub_task_ids are the children the orchestrator created in
 // this call; the caller subscribes to each child's
@@ -936,6 +1031,10 @@ export interface Requirement {
   parent_id?: string;
   // Derived by List only: number of non-archived children.
   child_count?: number;
+  // Derived by List only: how many stage-Q&A turns (方案/开发答疑) this
+  // requirement has been asked, across both stages. A correlated sub-select
+  // on the server, never a physical column.
+  qa_turn_count?: number;
   // SourceReviewID points at the code_reviews row that seeded this
   // requirement via the Review "create issue" action. Distinct from
   // source_requirement_id (which is for idea→requirement promotion) and
@@ -1120,6 +1219,12 @@ export interface Requirement {
   // 在 base 分支上 commit/push。后端 StartCoding prologue 写入,前端在
   // 详情页 preflight modal 提供 toggle,并在 Merge 卡片根据它隐藏 PR CTA。
   no_branch?: boolean;
+  // 同一次「方案拆分」生成的子需求共享同一个批次 id（spb_<hex>）。空 = 该行
+  // 不是拆分产物（人工创建 / 历史数据）。前端用它区分来源并按批次分组展示。
+  split_batch_id?: string;
+  // 开发权已下放给子需求（true）时，本需求不再自己写代码 —— coding 闸门会
+  // 拒绝它进入开发，主需求改为「全部子需求完成后才能标记完成」。
+  dev_delegated?: boolean;
   // Launch-spec dispatch result (display-only, NOT a requirements column).
   // Populated ONLY by POST /api/requirements when the request carried a
   // launch spec. launch_mode tells the caller which downstream path the
@@ -1381,6 +1486,64 @@ export const priorityLabelKeys: Record<string, string> = {
   low: 'requirements.list.priority.low',
 };
 
+// ── 方案拆分 (requirement split) ──────────────────────────────────────────
+//
+// 拆分走两段式：POST /split 让 AI 产出**候选**（SSE 送达），用户在弹窗里
+// 编辑 / 删除 / 排序 / 指定前置后，再 POST /split/confirm 落库。
+//
+// depends_on 存的是**批次内序号**（1 起算），不是数据库 id —— 真实 id 只有
+// 落库时才知道。
+
+// 一条候选子需求。
+export interface SplitTaskCandidate {
+  title: string;
+  description: string;
+  scope: string[];
+  acceptance: string[];
+  boundary: string;
+  order: number;
+  // 同批次内的前置序号（1 起算）。只能引用 order 更小的候选。
+  depends_on: number[];
+}
+
+// 落库结果 —— 每个子需求的 id / 基线 / 前置 id。
+export interface SplitConfirmResult {
+  children: Array<{
+    id: string;
+    title: string;
+    status: string;
+    base_branch?: string;
+    base_branch_source?: string;
+    split_batch_id?: string;
+    // 前置子需求的 id 列表。
+    depends_on: string[];
+  }>;
+  // 软失败提示（例如「互相引用」写入失败）。子需求已落库，只是引用没写成。
+  warnings?: string[];
+  // 子需求实际继承的基线（通常是主需求的开发分支 feat/req_<master>）。
+  base_branch?: string;
+  // 堆叠栈底分支。空 = 没有堆叠栈（子需求沿用主需求基线）。
+  stack_base?: string;
+  // 栈底分支是否已推送到远端。堆叠 PR 的 base 必须在 origin 上存在。
+  pushed?: boolean;
+}
+
+// 一条依赖边。requirement_id 依赖 depends_on_id。
+export interface RequirementDependencyEdge {
+  requirement_id: string;
+  depends_on_id: string;
+  batch_id?: string;
+  // 对端标题 / 状态（读路径填充，方便前端直接渲染「依赖 ①」）。
+  title?: string;
+  status?: string;
+}
+
+// 主需求的子需求列表 + 它们之间的依赖边。
+export interface RequirementChildList {
+  children: Requirement[];
+  dependencies: RequirementDependencyEdge[];
+}
+
 export const requirementsApi = {
   list: (params?: { project_id?: string; status?: string; priority?: string; kind?: string }) => {
     const q = new URLSearchParams();
@@ -1390,6 +1553,16 @@ export const requirementsApi = {
   create: (data: {
     project_id: string;
     description: string;
+    // title: an explicit title skips the backend's LLM title distillation
+    // (Create only distills when the title is empty). The quick-create
+    // popover sends the first line of the user's text so a sub-requirement
+    // can be created without an LLM round-trip.
+    title?: string;
+    // parent_id: nest the new requirement under a master (one level, same
+    // project). The server writes it in the SAME insert, so the child row
+    // and its hierarchy link are atomic — creating first and attaching
+    // afterwards would leave an orphan top-level row when the attach failed.
+    parent_id?: string;
     priority?: string;
     kind?: Kind;
     skip_analysis?: boolean;
@@ -1457,6 +1630,28 @@ export const requirementsApi = {
   // direct one.
   setReferences: (id: string, references: RequirementReferenceInput[]) =>
     api.put<RequirementReference[]>(`/api/requirements/${id}/references`, { references }),
+  // ── 方案拆分 ────────────────────────────────────────────────────────────
+  // split: start the AI split. Returns { job_id }; the candidate list arrives
+  // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
+  // carries `result.tasks`.
+  //
+  // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
+  // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
+  split: (id: string, body: { model?: string; claude_config_id?: string; agent_server_id?: string } = {}) =>
+    api.post<{ job_id: string }>(`/api/requirements/${id}/split`, body),
+  // confirmSplit: persist the user-confirmed candidates as sub-requirements.
+  // The whole batch lands in one transaction (children + dependency edges +
+  // the master's dev_delegated flag).
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }) =>
+    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body),
+  // listChildren: the requirement's sub-requirements + their dependency edges.
+  listChildren: (id: string) =>
+    api.get<RequirementChildList>(`/api/requirements/${id}/children`),
+  // splitStreamUrl: the SSE endpoint for a split job. Dedicated (not the
+  // shared /api/wizard/jobs/{id}/stream) because only this flow hands a
+  // structured payload on the terminal frame.
+  splitStreamUrl: (id: string, jobId: string) =>
+    `${API_BASE}/api/requirements/${id}/split/${jobId}/stream`,
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>
@@ -2001,7 +2196,7 @@ export const reviewApi = {
 // The run itself streams over reviewApi.streamJobUrl — there is no separate
 // SSE channel for branch reviews.
 export type CodeReviewStatus = 'draft' | 'running' | 'done' | 'error';
-export type CodeReviewType = 'branch' | 'pr';
+export type CodeReviewType = 'branch' | 'pr' | 'requirement';
 /** Grading ladder. P2 is intentionally unused — see prompt/review.go. */
 export type ReviewSeverity = 'P0' | 'P1' | 'P3';
 /** '' means the model didn't answer the 目标达成 question. */
@@ -2072,6 +2267,17 @@ export interface CodeReview {
   claude_config_id: string;
   /** Execution environment: '' = 本地, otherwise an agent_servers.id. */
   agent_server_id: string;
+  /**
+   * The requirement this review belongs to. '' = a project-level review
+   * (every pre-existing row). Set on review_type='requirement' rows, which
+   * the requirement detail page launches as a SUB-TASK.
+   */
+  requirement_id?: string;
+  /**
+   * The AI persona (roles.key) the review ran under — the identity the user
+   * picked in the requirement page. '' = the default 'reviewer' persona.
+   */
+  role_key?: string;
   /**
    * claude session id of the review's last run. Follow-up questions resume
    * it; '' means a 追问 will run fresh with the report pasted into its prompt

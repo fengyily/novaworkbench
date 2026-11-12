@@ -15,6 +15,8 @@ import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import { RequirementQuickCreate } from '../components/RequirementQuickCreate';
+import { RequirementQAPeek } from '../components/RequirementQAPeek';
 import {
   RowSelectBox, SelectAllBox, BatchBar, BatchDeleteDialog,
 } from '../components/RequirementBatch/RequirementBatch';
@@ -23,7 +25,7 @@ import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
 import ProjectCodeReview from './ProjectCodeReview';
-import { IconClock } from '../components/icons';
+import { IconChat, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { pageWindow } from '../utils/pageWindow';
 import './RequirementDetail.css';
@@ -41,7 +43,11 @@ type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekl
 // agent server, tokens, cost) intentionally don't sort because their data
 // either has no natural ordering (agent server name) or no cheap client-side
 // representation (cost is computed from token usage).
-type ReqSortColumn = 'id' | 'title' | 'priority' | 'status' | 'created_at' | 'updated_at';
+//
+// `updated_at` was dropped together with the column itself: "last touched"
+// was a whole column of width for a fact the row's own activity (status
+// chips, job pulse dot) already conveys.
+type ReqSortColumn = 'id' | 'title' | 'priority' | 'status' | 'created_at';
 
 // Sort direction. First click picks the column's `defaultDir` (see
 // `toggleSort`); subsequent clicks on the same column flip between asc /
@@ -59,7 +65,6 @@ const REQ_SORT_DEFAULT_DIR: Record<ReqSortColumn, ReqSortDir> = {
   priority: 'desc',
   status: 'asc',
   created_at: 'desc',
-  updated_at: 'desc',
 };
 
 // Priority is rendered as an icon-only `.priority-dot` now (text label
@@ -561,6 +566,15 @@ export default function ProjectDetail() {
   const [reqDragId, setReqDragId] = useState<string | null>(null);
   const [reqDropId, setReqDropId] = useState<string | null>(null);
   const [reqAddChildFor, setReqAddChildFor] = useState<string | null>(null);
+  // Quick-create: the master whose title the user clicked the "+" on. The
+  // popover owns the input; this page only owns WHICH master is targeted
+  // (and refreshes the list afterwards).
+  const [quickCreateFor, setQuickCreateFor] = useState<Requirement | null>(null);
+  // Q&A peek: the requirement whose stage Q&A thread is open in the
+  // read-only dialog. The count in the list column comes from the List
+  // endpoint's derived `qa_turn_count`, so opening the dialog needs no
+  // extra round trip to know there IS something to show.
+  const [qaPeekFor, setQaPeekFor] = useState<Requirement | null>(null);
   // Batch import — drop in / pick N .md files, each becomes a requirement
   // (title = first heading or first non-empty line; body = the rest).
   // Optional parent picker attaches all created rows beneath an existing
@@ -1168,11 +1182,64 @@ export default function ProjectDetail() {
             </span>
           )}
           <span className="pr-title-text-label">{req.title}</span>
+          {/* 方案拆分来源标记。子需求带 🧩（它来自一次方案拆分），主需求带
+              「开发已下放」（拆分后开发权交给了子需求）。两个标记都刻意
+              做成窄的 —— 标题行是这张表里唯一值得保护的固定宽度列。 */}
+          {req.split_batch_id && (
+            <span
+              className="req-badge req-badge-split"
+              title={t('requirements.split.badgeTitle')}
+              aria-label={t('requirements.split.badgeTitle')}
+            >
+              🧩
+            </span>
+          )}
+          {req.dev_delegated && (
+            <span
+              className="req-badge req-badge-devdelegated"
+              title={t('requirements.devDelegated.badgeTitle')}
+              aria-label={t('requirements.devDelegated.badgeTitle')}
+            >
+              {t('requirements.devDelegated.badge')}
+            </span>
+          )}
           {/* No "Sub-requirement" / "Sub-requirements N" chips on the title
               line. The gutter already encodes both facts — a child is
               indented under an elbow, a master with children carries a
               chevron — and the chips were the widest fixed element in the
               one column worth protecting, truncating titles to ~110px. */}
+          {/* Fast path: create a NEW sub-requirement under this one, right
+              from the row. The gutter's "+" only ATTACHES a requirement that
+              already exists; this one creates one. Gated on the same rules
+              the tree affordance uses — top-level rows only (the hierarchy
+              is one level deep) and not on archived rows (a closed chapter
+              should not grow new work) — and only on the requirements tab,
+              where the tree lives. The overview's "recent requirements"
+              table has no tree, so a child created from there would show up
+              as a stray flat row. */}
+          {showTree && depth === 0 && req.status !== 'archived' && (
+            <RequirementQuickCreate
+              projectId={req.project_id}
+              parentId={req.id}
+              parentTitle={req.title || t('requirements.list.noTitle')}
+              parentKind={req.kind}
+              open={quickCreateFor?.id === req.id}
+              onOpenChange={o => setQuickCreateFor(o ? req : null)}
+              onCreated={async () => {
+                setQuickCreateFor(null);
+                // Refresh + expand the master so the new child is visible
+                // immediately — same 收尾 as the batch-import path. A failed
+                // refresh must not surface as an unhandled rejection: the
+                // row was already created server-side.
+                try {
+                  setReqs(await requirementsApi.list({ project_id: id }));
+                  setReqExpanded(prev => new Set(prev).add(req.id));
+                } catch (err) {
+                  console.error('[project-detail] refresh after quick-create failed', err);
+                }
+              }}
+            />
+          )}
         </div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
             visible, then +N overflow). Empty / undefined = no chips row,
@@ -1238,6 +1305,28 @@ export default function ProjectDetail() {
           )}
         </span>
       </td>
+      {/* Q&A column — how many times this requirement was asked about in the
+          stage Q&A threads (方案设计 / 开发实现). The count comes from the
+          List endpoint's derived `qa_turn_count`, so the column costs no
+          extra request; clicking the badge opens a read-only peek dialog
+          with the questions and answers, without leaving the list. A row
+          with no Q&A shows a dash and is not clickable — the count is a
+          fact, not a promise. */}
+      <td data-label={t('projects.detail.colQa')} className="pr-c-qa">
+        {(req.qa_turn_count ?? 0) > 0 ? (
+          <button
+            type="button"
+            className="pr-qa-badge"
+            title={t('requirements.qaPeek.openTitle', { n: req.qa_turn_count ?? 0 })}
+            onClick={e => { e.stopPropagation(); setQaPeekFor(req); }}
+          >
+            <IconChat size={12} />
+            {req.qa_turn_count}
+          </button>
+        ) : (
+          <span className="pr-c-dim">—</span>
+        )}
+      </td>
       {/* Agent server column: which remote execution target the requirement
           was developed on. Empty = local. The joined name comes from the
           backend's LEFT JOIN; a deleted server falls back to local so stale
@@ -1289,13 +1378,11 @@ export default function ProjectDetail() {
       >
         <span className="pr-cell-clip">{req.created_at ? fmtDateTime(req.created_at) : '—'}</span>
       </td>
-      <td
-        data-label={t('projects.detail.colUpdatedAt')}
-        className="pr-c-time"
-        title={req.updated_at ? `${fmtDateTime(req.updated_at)} · ${fmtRelative(req.updated_at)}` : undefined}
-      >
-        <span className="pr-cell-clip">{req.updated_at ? fmtDateTime(req.updated_at) : '—'}</span>
-      </td>
+      {/* The "更新时间" column was removed here: it took a whole column
+          (min-width 132px) to state a fact the row's status chips and job
+          pulse dot already convey, while the requirement ID — the only
+          reliable handle for cross-session identification — was squeezed
+          into 104px and truncated to an ellipsis. */}
     </tr>
     );
   });
@@ -1372,7 +1459,6 @@ export default function ProjectDetail() {
         return (order[a.status] ?? 99) - (order[b.status] ?? 99);
       }
       case 'created_at':
-      case 'updated_at':
         // ISO-8601 strings sort correctly lexicographically — same approach as
         // the earlier dropdown sort, kept here for consistency.
         return (a[col] || '').localeCompare(b[col] || '');
@@ -2336,11 +2422,11 @@ export default function ProjectDetail() {
                       <th className="pr-c-type">{t('projects.detail.colType')}</th>
                       <th className="pr-c-title">{t('projects.detail.colTitle')}</th>
                       <th className="pr-c-status">{t('projects.detail.colStatus')}</th>
+                      <th className="pr-c-qa">{t('projects.detail.colQa')}</th>
                       <th className="pr-c-agent">{t('projects.detail.colAgentServer')}</th>
                       <th className="pr-c-num">{t('projects.detail.colTokens')}</th>
                       <th className="pr-c-num pr-c-cost">{t('projects.detail.colCost')}</th>
                       <th className="pr-c-time pr-c-created">{t('projects.detail.colCreatedAt')}</th>
-                      <th className="pr-c-time">{t('projects.detail.colUpdatedAt')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2740,7 +2826,7 @@ export default function ProjectDetail() {
                     <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
                     <SortHeader
                       col="id"
-                      width={96}
+                      width={168}
                       cls="pr-c-id"
                       label={t('projects.detail.colId')}
                       sortColumn={reqSortColumn}
@@ -2775,6 +2861,7 @@ export default function ProjectDetail() {
                       sortDir={reqSortDir}
                       onSort={toggleSort}
                     />
+                    <th className="pr-c-qa">{t('projects.detail.colQa')}</th>
                     <th className="pr-c-agent">{t('projects.detail.colAgentServer')}</th>
                     <th className="pr-c-num">{t('projects.detail.colTokens')}</th>
                     <th className="pr-c-num pr-c-cost">{t('projects.detail.colCost')}</th>
@@ -2783,15 +2870,6 @@ export default function ProjectDetail() {
                       width={128}
                       cls="pr-c-time pr-c-created"
                       label={t('projects.detail.colCreatedAt')}
-                      sortColumn={reqSortColumn}
-                      sortDir={reqSortDir}
-                      onSort={toggleSort}
-                    />
-                    <SortHeader
-                      col="updated_at"
-                      width={128}
-                      cls="pr-c-time"
-                      label={t('projects.detail.colUpdatedAt')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
                       onSort={toggleSort}
@@ -3098,6 +3176,19 @@ export default function ProjectDetail() {
           <span>＋</span>
           <span>{t('projects.detail.fabLabel')}</span>
         </button>
+      )}
+
+      {/* Stage-Q&A peek — opened from the "答疑" column, which both the
+          requirements table and the overview's recent-requirements table
+          render. Mounted at the page root (not inside a tab) so it works
+          from either of them. */}
+      {qaPeekFor && (
+        <RequirementQAPeek
+          requirementId={qaPeekFor.id}
+          requirementTitle={qaPeekFor.title || t('requirements.list.noTitle')}
+          onClose={() => setQaPeekFor(null)}
+          onOpenDetail={() => navigate(`/requirements/${qaPeekFor.id}`)}
+        />
       )}
     </div>
   );

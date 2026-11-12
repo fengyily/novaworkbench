@@ -616,6 +616,16 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
 		return
 	}
+	// A requirement-level Review row is NOT a code sub-task: re-running it
+	// through the generic executor would apply the executor persona and the
+	// "## 子任务" header instead of the review contract, producing a report
+	// nobody asked for. The review chain has its own re-run path (回归 Review),
+	// so the generic ones are refused with a pointer to it.
+	if parent.TaskKind == model.SubTaskKindReview {
+		writeError(w, http.StatusConflict, "REVIEW_ROW",
+			"这是 Review 轮次子任务，请使用「回归 Review」发起下一轮")
+		return
+	}
 	if parent.SessionID == "" {
 		writeError(w, http.StatusConflict, "NO_SESSION",
 			"原子任务尚未生成 session（可能仍在启动或运行），无法追加调整")
@@ -740,6 +750,16 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// nothing to recover via redo. Stopped rows are explicitly Continue-able
 	// (see ContinueSubTask), not Redo-able; the UI hides Redo on stopped
 	// cards and uses Continue instead.
+	// A requirement-level Review row is NOT a code sub-task: re-running it
+	// through the generic executor would apply the executor persona and the
+	// "## 子任务" header instead of the review contract, producing a report
+	// nobody asked for. The review chain has its own re-run path (回归 Review),
+	// so the generic ones are refused with a pointer to it.
+	if parent.TaskKind == model.SubTaskKindReview {
+		writeError(w, http.StatusConflict, "REVIEW_ROW",
+			"这是 Review 轮次子任务，请使用「回归 Review」发起下一轮")
+		return
+	}
 	if parent.Status != model.SubTaskStatusError {
 		writeError(w, http.StatusConflict, "NOT_FAILED", "仅失败的任务可重做")
 		return
@@ -852,6 +872,16 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	}
 	if parent.RequirementID != id {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	// A requirement-level Review row is NOT a code sub-task: re-running it
+	// through the generic executor would apply the executor persona and the
+	// "## 子任务" header instead of the review contract, producing a report
+	// nobody asked for. The review chain has its own re-run path (回归 Review),
+	// so the generic ones are refused with a pointer to it.
+	if parent.TaskKind == model.SubTaskKindReview {
+		writeError(w, http.StatusConflict, "REVIEW_ROW",
+			"这是 Review 轮次子任务，请使用「回归 Review」发起下一轮")
 		return
 	}
 	if parent.Status != model.SubTaskStatusError && parent.Status != model.SubTaskStatusStopped {

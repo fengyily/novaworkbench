@@ -290,15 +290,15 @@
    absorb the rest. */
 .pr-table .pr-c-id {
   /* A requirement ID is "req_" + 16 hex digits = 20 monospace characters
-     (~132px at 11px), so the old 84px ceiling could never hold it. Because
-     `max-width` pins the column and a <td>'s overflow defaults to visible,
-     the surplus text was PAINTED OVER the neighbouring Type cell — the
-     priority dot landed inside the ID and one hex digit stuck out past it.
-     The cell content is now wrapped in `.pr-cell-clip`, which ellipsis-
-     truncates instead of overflowing, and the column grew to 104px
-     (content box 80px ≈ 12 characters) so a useful prefix still reads. */
-  width: 104px;
-  max-width: 104px;
+     (~132px at 11px). The column used to be capped at 104px (content box
+     80px ≈ 12 characters), so the ID was ALWAYS truncated to an ellipsis —
+     and a truncated ID is a useless ID: it is the only reliable handle for
+     naming a requirement across sessions and for reporting a bug. The
+     "更新时间" column was removed in the same change, and its width is
+     what pays for this one: 168px holds the full 20 characters
+     (~132px + 24px side padding) with a little slack. */
+  width: 168px;
+  max-width: 168px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-muted);
@@ -347,9 +347,38 @@
 .pr-table .pr-c-title {
   /* Only flexible column. Capped for the same reason as the cross-project
      list: the marks + tags rows inside refuse to shrink, so without a cap
-     the title demands 400px+ and starves its neighbours. */
+     the title demands 400px+ and starves its neighbours. The cap grew
+     300→340px because the removed "更新时间" column freed 132px and the
+     title is the column users actually scan. */
   min-width: 200px;
-  max-width: 300px;
+  max-width: 340px;
+}
+
+/* Stage-Q&A count column. Narrow and centred — it holds one badge or a
+   dash, never text. */
+.pr-table .pr-c-qa {
+  width: 72px;
+  max-width: 72px;
+  text-align: center;
+}
+/* The badge mirrors .qa-count's pill look (StageQAChat.css) but is a
+   button: the count is the entry point to the Q&A peek dialog. */
+.pr-qa-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.pr-qa-badge:hover {
+  background: var(--color-primary-light, #eef2ff);
 }
 
 /* Column shedding, in priority order (see the note above). The created
@@ -685,6 +714,15 @@
   .pr-status-clip {
     overflow: visible;
     white-space: normal;
+  }
+
+  /* The Q&A cell is a narrow, centred column on the desktop table. In the
+     stacked card layout every cell becomes a label-left / value-right row,
+     so the desktop cap has to go — at 72px the "答疑" label and the badge
+     no longer fit side by side. */
+  .pr-table .pr-c-qa {
+    width: 100%;
+    max-width: none;
   }
 
   /* The detail-tabs container scrolls horizontally so 7 tabs don't crowd
@@ -1197,3 +1235,32 @@
    on the badge anyway. The dot and badge now live inside a
    .req-type-cell wrapper (index.css) which already provides the 6px
    gap, so no spacing rule is needed here. */
+
+/* ── 方案拆分来源标记 ─────────────────────────────────────────────────── */
+/* Two narrow badges that sit on the requirement title line:
+     · 🧩        — this row came out of a 「方案拆分」 (split_batch_id set)
+     · 开发已下放 — this master handed development down to its children
+   Both are deliberately compact: the title line is the one fixed-width
+   column in this table worth protecting. */
+.req-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: default;
+}
+.req-badge-split {
+  background: var(--color-active, #eef2ff);
+  color: var(--color-primary, #4f46e5);
+  border: 1px solid var(--color-border, #e2e8f0);
+}
+.req-badge-devdelegated {
+  background: #FEF3C7;
+  color: #92400E;
+  border: 1px solid #FCD34D;
+}

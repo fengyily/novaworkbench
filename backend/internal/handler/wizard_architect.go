@@ -605,28 +605,32 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
-	// Resolve the design-stage base branch: explicit override (HTTP body
-	// or scheduler payload) wins, otherwise project.DefaultBranch, otherwise
-	// the hard-coded "main" sentinel. The resolved value is later stamped
-	// into designRunParams.BaseBranch and forwarded into both
-	// SyncDesignBase (hard sync gate) and anchorWorktree (worktree root).
-	effectiveBase := baseBranch
-	if effectiveBase == "" && project != nil {
-		effectiveBase = project.DefaultBranch
-	}
+	// Resolve the design-stage base branch through the shared resolver
+	// (handler/requirement_branch.go). The chain is:
+	//   explicit override (HTTP body / scheduler payload) > a base the user
+	//   picked on an earlier run > the PARENT requirement's branch (child
+	//   requirements) > this requirement's own stored base > the project's
+	//   default_branch > the hard-coded "main" sentinel.
+	// The resolved value is later stamped into designRunParams.BaseBranch and
+	// forwarded into both SyncDesignBase (hard sync gate) and anchorWorktree
+	// (worktree root).
+	effectiveBase, baseSource := h.resolveEffectiveBaseFor(req, project, baseBranch)
 	if effectiveBase == "" {
 		effectiveBase = "main"
+		baseSource = model.BaseSourceDefault
 	}
 	if project != nil {
 		projectPath = project.LocalPath
 	}
-	// Persist the resolved base branch onto the requirement so the
-	// development + merge stages can pick up the same base when the user
+	// Persist the resolved base branch AND its source onto the requirement so
+	// the development + merge stages can pick up the same base when the user
 	// (a) picked one in design but forgot to re-pick it on the coding form
-	// or (b) is targeting the PR at a non-default base. Stamp-if-non-empty
-	// semantics: any value the user explicitly chose (or the project
-	// fallback) wins, including re-runs that switch the base.
-	if uerr := h.reqSvc.UpdateBaseBranch(id, effectiveBase); uerr != nil {
+	// or (b) is targeting the PR at a non-default base. The source marker is
+	// what lets the next run tell "the user chose this" apart from "this was
+	// merely the project default at the time" — without it a later change of
+	// projects.default_branch would either be ignored or silently override a
+	// deliberate choice.
+	if uerr := h.reqSvc.UpdateBaseBranchWithSource(id, effectiveBase, baseSource); uerr != nil {
 		log.Printf("[architect-design] failed to persist base_branch for %s: %v", id, uerr)
 	}
 

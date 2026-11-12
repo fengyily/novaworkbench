@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -55,6 +56,69 @@ func capStderr(s string) string {
 	return s[:gitSyncStderrCap] + "\n…(已截断)"
 }
 
+// gitRefExists reports whether a fully-qualified ref resolves in the repo.
+// The fetch-failure triage uses it to tell "the remote-tracking ref is still
+// here" (the remote HAS the branch, the fetch died on network/credentials)
+// from "the remote never had this branch".
+func gitRefExists(repoPath, ref string) bool {
+	_, err := gitRunPlain(repoPath, "rev-parse", "--verify", "--quiet", ref)
+	return err == nil
+}
+
+// remoteRefState is the outcome of probing the remote for a branch.
+type remoteRefState int
+
+const (
+	// remoteRefUnknown — the remote could not be queried (unreachable,
+	// unauthenticated, timed out). We learned nothing about the upstream,
+	// so the caller must NOT assume the local ref stands in for it.
+	remoteRefUnknown remoteRefState = iota
+	// remoteRefPresent — the remote has refs/heads/<ref>.
+	remoteRefPresent
+	// remoteRefAbsent — the remote is reachable but has no such branch.
+	remoteRefAbsent
+)
+
+// probeRemoteRef asks the remote whether it has refs/heads/<ref> without
+// touching the working tree.
+//
+// The answer is read from `git ls-remote --exit-code`'s exit status rather
+// than from its human-readable message, because that message is localized:
+// git says "couldn't find remote ref <x>" on an en-US host and
+// "无法找到远程引用 <x>" on a zh-CN host. The exit status is not:
+// 0 = the remote has the branch, 2 = the remote is reachable but has no
+// matching ref, 128 = the remote could not be queried at all.
+//
+// Only remoteRefAbsent justifies degrading a failed fetch to the local ref —
+// it is the one answer that proves "the upstream baseline has simply not been
+// pushed yet" instead of "we could not reach the upstream".
+func (s *ProjectService) probeRemoteRef(ctx context.Context, repoPath, projectID, ref string, timeout time.Duration) remoteRefState {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(pctx, "git", "-C", repoPath, "ls-remote", "--exit-code", "--heads", "origin", ref)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if projectID != "" && s.gitCredSvc != nil {
+		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(ctx, projectID)
+		if credCleanup != nil {
+			defer credCleanup()
+		}
+		cmd.Env = append(cmd.Env, credEnv...)
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return remoteRefPresent
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		return remoteRefAbsent
+	}
+	return remoteRefUnknown
+}
+
 // GitSyncResult is the outcome of a SyncToOriginBase attempt. Skipped is set
 // for non-fatal "nothing to sync" cases (non-git repo, no origin configured,
 // empty repository) — the wizard proceeds as if the gate didn't exist. BaseSHA
@@ -75,9 +139,13 @@ type GitSyncResult struct {
 //	A   status --porcelain               → non-empty             → DIRTY_WORKTREE
 //	B   rev-parse --abbrev-ref HEAD      → record cur branch     (no rejection)
 //	C   fetch origin <base>              → non-zero exit         → FETCH_FAILED
-//	D   rev-list --count origin/<b>..HEAD → > 0  (only when HEAD on base) → UNPUSHED_COMMITS
-//	E   merge --ff-only origin/<b>       → non-zero exit (only when HEAD on base) → FF_FAILED
-//	F   rev-parse origin/<b>             → BaseSHA
+//	D   rev-list --count <baseRef>..HEAD → > 0  (only when HEAD on base) → UNPUSHED_COMMITS
+//	E   merge --ff-only <baseRef>        → non-zero exit (only when HEAD on base) → FF_FAILED
+//	F   rev-parse <baseRef>              → BaseSHA
+//
+// <baseRef> is "origin/<base>" normally, but it degrades to the plain
+// "<base>" local branch when the remote genuinely does not have the branch
+// yet — see the Step C triage below.
 //
 // Steps D and E only run when HEAD is sitting on baseBranch — they're the
 // "fast-forward the local base ref" path, which requires HEAD to be on the
@@ -87,6 +155,14 @@ type GitSyncResult struct {
 // the design stage stamps that SHA verbatim and resolveStartRef / the worktree
 // already prefer origin/<base> over the local ref, so a stale local <base>
 // ref doesn't poison anything.
+//
+// Step C's fetch failure is triaged instead of failing outright. A child
+// requirement inherits its parent's branch (feat/req_<parent>) as its design
+// baseline, and that branch routinely has NOT been pushed yet — aborting the
+// whole design stage for that would make the "child follows parent" rule
+// unusable. So a fetch failure degrades to the local ref ONLY when we can
+// prove the remote simply lacks the branch; a network / credential failure
+// keeps failing hard, because then we know nothing about the upstream.
 //
 // logf may be nil (silent). The function never mutates the working tree on
 // the failure path — every gate runs read-only first, so a DIRTY_WORKTREE
@@ -187,6 +263,16 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 	// is bound to a platform token, layer the askpass env on top so the
 	// fetch actually authenticates against HTTPS remotes — credEnv is
 	// non-empty only when a token was found.
+	//
+	// baseRef is the ref the rest of the gate reads. It starts as the
+	// remote-tracking ref and degrades to the plain local branch when the
+	// fetch failed because the remote genuinely doesn't have the branch
+	// yet (localOnly). Every downstream step must use baseRef, never a
+	// hardcoded "origin/"+baseBranch, or it would reference a ref that
+	// doesn't exist in the degraded path.
+	baseRef := "origin/" + baseBranch
+	localOnly := false
+
 	fctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	fetchCmd := exec.CommandContext(fctx, "git", "-C", repoPath, "fetch", "origin", baseBranch)
@@ -202,12 +288,41 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 	var fetchErrOut strings.Builder
 	fetchCmd.Stderr = &fetchErrOut
 	if err := fetchCmd.Run(); err != nil {
-		return res, &SyncGateError{
-			Code: SyncGateFetchFailed,
-			Msg: fmt.Sprintf(
-				"无法拉取 origin/%s，请检查网络与凭据后重试",
-				baseBranch),
-			Stderr: capStderr(fetchErrOut.String()),
+		fetchStderr := fetchErrOut.String()
+		// Triage the failure before giving up. Three shapes, one of which
+		// must NOT abort the design stage:
+		//
+		//  1. The remote-tracking ref refs/remotes/origin/<base> is still
+		//     here → a previous successful fetch saw the branch upstream,
+		//     so this fetch died on network/credentials → hard fail.
+		//  2. Neither the remote nor the local repo has the branch →
+		//     there is no baseline to sync against → hard fail.
+		//  3. The remote-tracking ref is gone but the local branch
+		//     exists AND the remote answers "I don't have that branch"
+		//     → the upstream baseline simply has not been pushed yet →
+		//     degrade to the local ref and carry on.
+		//
+		// Case 3 is the one that matters: a child requirement's baseline is
+		// its parent's branch (feat/req_<parent>), which is usually local
+		// only until the parent gets merged. Failing there would make the
+		// "child follows parent" rule unusable.
+		originRefExists := gitRefExists(repoPath, "refs/remotes/origin/"+baseBranch)
+		localRefExists := gitRefExists(repoPath, "refs/heads/"+baseBranch)
+		if !originRefExists && localRefExists {
+			if s.probeRemoteRef(ctx, repoPath, projectID, baseBranch, timeout) == remoteRefAbsent {
+				localOnly = true
+				baseRef = baseBranch
+				syncLog("ℹ️ origin/" + baseBranch + " 尚未推送，改用本地 " + baseBranch + " 作为基线")
+			}
+		}
+		if !localOnly {
+			return res, &SyncGateError{
+				Code: SyncGateFetchFailed,
+				Msg: fmt.Sprintf(
+					"无法拉取 origin/%s，请检查网络与凭据后重试",
+					baseBranch),
+				Stderr: capStderr(fetchStderr),
+			}
 		}
 	}
 
@@ -222,13 +337,13 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		// would compute an ahead count against the wrong tip. rev-list --count
 		// prints the integer directly so we Atoi it; anything non-zero means
 		// HEAD has unpushed commits, which would block --ff-only.
-		countOut, cerr := gitRunPlain(repoPath, "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+		countOut, cerr := gitRunPlain(repoPath, "rev-list", "--count", baseRef+"..HEAD")
 		if cerr == nil {
 			if n, nerr := atoiTrimmed(countOut); nerr == nil && n > 0 {
 				// Capture the actual ahead commits so the user sees exactly
 				// what they'd need to push (or reset) — much more useful than
 				// the bare count.
-				detail, _ := gitRunPlain(repoPath, "log", "--oneline", "origin/"+baseBranch+"..HEAD")
+				detail, _ := gitRunPlain(repoPath, "log", "--oneline", baseRef+"..HEAD")
 				return res, &SyncGateError{
 					Code: SyncGateUnpushedCommits,
 					Msg: fmt.Sprintf(
@@ -247,13 +362,13 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		// zero-ahead) this should always succeed; if it doesn't, surface it
 		// as FF_FAILED so the user knows something changed underfoot (e.g.
 		// concurrent push to origin/<base> between C and E).
-		mffOut, mffErr := gitRunPlain(repoPath, "merge", "--ff-only", "origin/"+baseBranch)
+		mffOut, mffErr := gitRunPlain(repoPath, "merge", "--ff-only", baseRef)
 		if mffErr != nil {
 			return res, &SyncGateError{
 				Code: SyncGateFFFailed,
 				Msg: fmt.Sprintf(
-					"无法 fast-forward 到 origin/%s，请检查仓库状态后重试",
-					baseBranch),
+					"无法 fast-forward 到 %s，请检查仓库状态后重试",
+					baseRef),
 				Stderr: capStderr(mffOut + "\n" + mffErr.Error()),
 			}
 		}
@@ -261,23 +376,23 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		// HEAD on a different branch — the launch-plan / non-default-baseline
 		// case. Emit a short note so the SSE panel doesn't go silent during
 		// the fetch (and so a confused user can see HEAD is intentionally on
-		// a non-base branch). The SHA we stamp comes from origin/<base> so
+		// a non-base branch). The SHA we stamp comes from baseRef so
 		// resolveStartRef / the worktree pick the fresh upstream tip.
 		branchLabel := curBranch
 		if branchLabel == "" {
 			branchLabel = "<unreadable>"
 		}
-		syncLog("ℹ️ 当前 HEAD 在 `" + branchLabel + "` 分支，跳过本地 `merge --ff-only`（design 基线 = `origin/" + baseBranch + "`）")
+		syncLog("ℹ️ 当前 HEAD 在 `" + branchLabel + "` 分支，跳过本地 `merge --ff-only`（design 基线 = `" + baseRef + "`）")
 	}
 
 	// Step F: capture the final SHA + emit the human-readable success lines
 	// in the same style as syncBaseBranchService so existing readers aren't
 	// surprised by an unfamiliar log format.
-	sha, shaErr := gitRunPlain(repoPath, "rev-parse", "origin/"+baseBranch)
+	sha, shaErr := gitRunPlain(repoPath, "rev-parse", baseRef)
 	if shaErr != nil {
 		return res, &SyncGateError{
 			Code: SyncGateFFFailed,
-			Msg: "无法读取同步后的 origin/<base> SHA",
+			Msg: "无法读取同步后的 " + baseRef + " SHA",
 			Stderr: capStderr(shaErr.Error()),
 		}
 	}
@@ -286,12 +401,12 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		res.FastForwarded = true
 	}
 
-	syncLog("🔄 已同步 origin/" + baseBranch)
+	syncLog("🔄 已同步 " + baseRef)
 	if res.BaseSHA != "" {
-		if tip, terr := gitRunPlain(repoPath, "log", "-1", "origin/"+baseBranch,
+		if tip, terr := gitRunPlain(repoPath, "log", "-1", baseRef,
 			"--format=%h %s (%an, %ad)", "--date=format:%Y-%m-%d %H:%M"); terr == nil {
 			if tip = strings.TrimSpace(tip); tip != "" {
-				syncLog("📌 origin/" + baseBranch + " 最新提交: " + tip)
+				syncLog("📌 " + baseRef + " 最新提交: " + tip)
 			}
 		}
 	}

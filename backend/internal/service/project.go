@@ -1805,6 +1805,16 @@ func (s *ProjectService) Purge(id string) error {
 	}
 	defer tx.Rollback()
 
+	// Dependency edges between sibling requirements — both endpoints are
+	// requirements of THIS project, and the edge table has two FKs onto
+	// requirements (dependent + prerequisite), so both directions have to go.
+	// Must run before the requirements rows are deleted below.
+	if _, err := tx.Exec(
+		`DELETE FROM requirement_dependencies WHERE requirement_id IN (SELECT id FROM requirements WHERE project_id = ?) OR depends_on_id IN (SELECT id FROM requirements WHERE project_id = ?)`,
+		id, id); err != nil {
+		return fmt.Errorf("PURGE_FAILED: requirement_dependencies: %w", err)
+	}
+
 	// Grandchildren keyed off the project's requirements — delete before the
 	// requirements rows they reference.
 	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns", "requirement_dirs"}

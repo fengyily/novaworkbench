@@ -28,6 +28,7 @@ func TestBranchPrefixForKind(t *testing.T) {
 		{"requirement", "feat"},
 		{"", "feat"},
 		{"idea", "feat"},
+		{service.KindWiki, "feat"},
 	}
 	for _, c := range cases {
 		if got := branchPrefixForKind(c.kind); got != c.want {
