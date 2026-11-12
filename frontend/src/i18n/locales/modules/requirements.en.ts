@@ -979,7 +979,7 @@ export const requirements = {
     baseHint: 'Every sub-requirement develops on the master branch {{base}} (stacked PRs): merge the master branch first, then each sub-requirement branch. You can order them: a task cannot start development until its prerequisites are done.',
     sourceBranchHint: 'The master branch is created from (or aligned to) the branch you pick and is pushed to the remote; every sub-requirement develops on top of it.',
     parallelHint: 'Sub-requirements can be developed in parallel — watch the load on this machine.',
-    refreshHint: 'The candidate list is temporary — reload the page to generate it again.',
+    refreshHint: 'Candidates are kept on the server — closing the dialog and reopening it shows them again.',
     colTitle: 'Title',
     colDesc: 'Description / acceptance',
     colDepends: 'Prerequisites',
@@ -1019,6 +1019,22 @@ export const requirements = {
     errCycle: 'The prerequisites form a cycle',
     errExpired: 'The split result expired — please generate it again',
     errGeneric: 'Split failed: {{msg}}',
+    // ── Status strip / stream panel ───────────────────────────────────
+    // "Reopening the dialog shows the previous split's status" — the status
+    // strip is where that shows up.
+    statusRunning: 'Split in progress',
+    statusDone: 'Completed',
+    statusError: 'Failed',
+    statusMetaRunning: 'Running',
+    statusMetaDone: '{{count}} candidates · {{time}}',
+    statusMetaError: 'The split failed',
+    running: 'Running',
+    resumed: 'Restored the previous split',
+    reconnecting: 'Connection lost, reconnecting…',
+    streamTitle: 'Execution log',
+    streamCollapse: 'Collapse',
+    streamExpand: 'Expand',
+    streamEmpty: '(no output yet)',
   },
   // Execution-order dependencies. NOT the same as references: a dependency is
   // a gate (the backend refuses to start coding), a reference only shares

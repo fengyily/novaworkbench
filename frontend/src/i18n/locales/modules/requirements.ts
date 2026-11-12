@@ -1039,7 +1039,7 @@ export const requirements = {
     baseHint: '所有子需求都基于主需求分支 {{base}} 开发（堆叠 PR）：先合并主需求分支，再合并各子需求分支。子需求之间可指定执行顺序：前置任务未完成时，后置任务不能开始开发。',
     sourceBranchHint: '拆分时会把主需求分支从所选分支创建/对齐，并推送到远端；所有子需求都基于它开发。',
     parallelHint: '子需求可并行开发，注意本机负载。',
-    refreshHint: '拆分结果是临时的，刷新页面需重新生成。',
+    refreshHint: '候选列表保存在服务端，关闭弹窗后再次打开可以继续查看。',
     colTitle: '标题',
     colDesc: '描述 / 验收标准',
     colDepends: '前置任务',
@@ -1079,6 +1079,21 @@ export const requirements = {
     errCycle: '前置依赖成环，无法创建子需求',
     errExpired: '拆分结果已失效，请重新生成',
     errGeneric: '拆分失败：{{msg}}',
+    // ── 状态条 / 流面板 ───────────────────────────────────────────────
+    // 「关掉弹窗再打开能看到上次拆分的状态」—— 状态条是它的主载体。
+    statusRunning: '拆分进行中',
+    statusDone: '已完成',
+    statusError: '失败',
+    statusMetaRunning: '正在运行',
+    statusMetaDone: '生成 {{count}} 个候选子需求 · {{time}}',
+    statusMetaError: '拆分失败',
+    running: '运行中',
+    resumed: '已恢复上次拆分的进度',
+    reconnecting: '连接中断，正在重连…',
+    streamTitle: '执行过程',
+    streamCollapse: '折叠',
+    streamExpand: '展开',
+    streamEmpty: '（暂无输出）',
   },
   // 执行顺序依赖（与「引用」是两件事：依赖是闸门，引用只是上下文）
   dependency: {

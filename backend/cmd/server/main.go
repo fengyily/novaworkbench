@@ -847,6 +847,9 @@ func main() {
 	//   POST .../split                     → start the AI split, returns {job_id}
 	//   GET  .../split/{job_id}/stream     → SSE; the terminal frame carries result.tasks
 	//   POST .../split/confirm             → persist the confirmed candidates
+	//   GET  .../split/state               → the most recent split run of this
+	//                                        requirement (status / candidates /
+	//                                        error). "Never ran" → 200 + status:none.
 	//   GET  .../children                  → the children + their dependency edges
 	//
 	// The SSE endpoint is dedicated (rather than the shared
@@ -854,6 +857,7 @@ func main() {
 	// structured payload on the terminal frame — see handler/requirement_split.go.
 	mux.HandleFunc("POST /api/requirements/{id}/split", wizardH.Split)
 	mux.HandleFunc("POST /api/requirements/{id}/split/confirm", wizardH.ConfirmSplit)
+	mux.HandleFunc("GET /api/requirements/{id}/split/state", wizardH.GetSplitState)
 	mux.HandleFunc("GET /api/requirements/{id}/split/{job_id}/stream", wizardH.StreamSplitJob)
 	mux.HandleFunc("GET /api/requirements/{id}/children", wizardH.ListChildren)
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)

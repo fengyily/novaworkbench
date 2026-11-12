@@ -25,8 +25,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ApiError, requirementsApi, type SplitTaskCandidate } from '../api/client';
+import {
+  ApiError,
+  requirementsApi,
+  type SplitRunState,
+  type SplitTaskCandidate,
+} from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
+import { fmtDateTime } from '../utils/intl';
+import { appendLogLine, type LogLine } from '../utils/logLines';
 import { BranchPicker } from './BranchPicker';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { IconClose } from './icons';
@@ -34,8 +41,10 @@ import ModelSelect from './ModelSelect';
 import './RequirementSplitModal.css';
 
 /**
- * The modal runs in three stages:
+ * The modal runs in four stages:
  *
+ *   loading → the modal just opened and is asking the backend whether this
+ *             requirement has a split run to restore.
  *   config  → the user picks the model / execution environment / source
  *             branch. NOTHING is sent to the backend here.
  *   running → the AI is producing the candidates (SSE progress).
@@ -44,8 +53,14 @@ import './RequirementSplitModal.css';
  * The config stage exists because the split is the one entry point that used
  * to fire the AI the instant the dialog opened — the user never got a say in
  * which model ran, on which machine, or on top of which branch.
+ *
+ * The loading stage exists because the modal is **conditionally rendered** by
+ * the parent (`{splitOpen && <RequirementSplitModal/>}`) — closing it unmounts
+ * the component and throws away every piece of local state. The only way the
+ * reopened modal can show the previous run is by asking the backend for it
+ * (GET /split/state), which is what the loading stage waits for.
  */
-type SplitStage = 'config' | 'running' | 'review';
+type SplitStage = 'loading' | 'config' | 'running' | 'review';
 
 export interface RequirementSplitModalProps {
   open: boolean;
@@ -117,6 +132,29 @@ function lines(text: string): string[] {
     .filter((l) => l !== '');
 }
 
+/**
+ * Pulls the candidates out of a terminal frame's `result`.
+ *
+ * Three shapes are accepted on purpose:
+ *   ① `{tasks: [...]}`  — the backend's current contract
+ *   ② `[...]`           — the bare array the backend used to send
+ *   ③ `{candidates: []}`— a shape a future backend might pick
+ *
+ * The backend and the frontend shipped out of sync for a while (the backend
+ * sent a bare array, the frontend read `result.tasks`), and the split UI was
+ * therefore unusable — every run ended in "拆分结果已失效". Accepting all three
+ * means neither side can break the other again.
+ */
+function extractCandidates(result: unknown): RawCandidate[] {
+  if (Array.isArray(result)) return result as RawCandidate[];
+  if (result && typeof result === 'object') {
+    const obj = result as Record<string, unknown>;
+    if (Array.isArray(obj.tasks)) return obj.tasks as RawCandidate[];
+    if (Array.isArray(obj.candidates)) return obj.candidates as RawCandidate[];
+  }
+  return [];
+}
+
 export function RequirementSplitModal({
   open,
   onClose,
@@ -136,8 +174,16 @@ export function RequirementSplitModal({
 
   const [rows, setRows] = useState<Row[]>([]);
   const [stage, setStage] = useState<SplitStage>('config');
-  /** The latest progress line pushed over SSE. */
-  const [progress, setProgress] = useState('');
+  /** The visible SSE stream — every phase / tool_call / message line. */
+  const [streamLines, setStreamLines] = useState<LogLine[]>([]);
+  /** Whether the stream panel is expanded. */
+  const [streamOpen, setStreamOpen] = useState(true);
+  /** The most recent split run of this requirement — the status strip's data. */
+  const [runState, setRunState] = useState<SplitRunState | null>(null);
+  /** This session restored a previous run rather than starting a new one. */
+  const [restored, setRestored] = useState(false);
+  /** The SSE dropped and is being re-attached. */
+  const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   /** Candidate pairs the user ticked for mutual reference: [a, b] ordinals. */
@@ -164,15 +210,48 @@ export function RequirementSplitModal({
   /** True once the modal unmounted — guards the async start() against
    *  touching state that no longer exists. */
   const cancelledRef = useRef(false);
+  /** Attach generation — every (re)attach bumps it, so late frames from a
+   *  previous stream are dropped instead of interleaving with the new ones. */
+  const genRef = useRef(0);
+  /** The reconnect backoff step (1s → 2s → 4s → 8s → 10s). */
+  const attemptRef = useRef(0);
+  /** The pending reconnect timer / state-poll interval. */
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** A terminal frame was received — the stream ending afterwards is normal
+   *  shutdown, not a failure. */
+  const terminalRef = useRef(false);
+  /** The stream panel's scroll container. */
+  const streamBodyRef = useRef<HTMLDivElement | null>(null);
+
+  // attach / applyRunState / startPollingState call each other. Routing the
+  // recursion through refs breaks the useCallback dependency cycle (React
+  // would otherwise rebuild them on every render and the reconnect timer
+  // would keep a stale closure).
+  const attachRef = useRef<(jobId: string) => void>(() => {});
+  const applyStateRef = useRef<(st: SplitRunState) => void>(() => {});
+  const pollFnRef = useRef<() => void>(() => {});
 
   const close = useCallback(() => {
     streamRef.current?.close();
     streamRef.current = null;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    genRef.current++; // invalidate any late frame from the old stream
     setRows([]);
     setStage('config');
-    setProgress('');
     setError('');
     setReferences([]);
+    setStreamLines([]);
+    setRunState(null);
+    setRestored(false);
+    setReconnecting(false);
     onClose();
   }, [onClose]);
 
@@ -192,18 +271,247 @@ export function RequirementSplitModal({
       cancelledRef.current = true;
       streamRef.current?.close();
       streamRef.current = null;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      // Bump the generation so any late frame from the old stream is
+      // discarded. The ref is captured in a local first — the cleanup must
+      // not read whatever .current happens to hold by the time it runs.
+      const gen = genRef;
+      gen.current++;
     };
   }, []);
 
+  // pushLine appends a frame to the visible stream, keeping the last 200.
+  const pushLine = useCallback((line: LogLine) => {
+    setStreamLines((prev) => {
+      const next = appendLogLine(prev, line);
+      return next.length > 200 ? next.slice(next.length - 200) : next;
+    });
+  }, []);
+
+  // attach subscribes to a split job's SSE and owns the whole frame
+  // lifecycle: live frames, the terminal frame, and reconnection.
+  const attach = useCallback(
+    (jobId: string) => {
+      // Close the previous stream and clear the lines first — a reconnect
+      // replays the job's whole history, so stale lines would double up.
+      streamRef.current?.close();
+      streamRef.current = null;
+      setStreamLines([]);
+      terminalRef.current = false;
+      attemptRef.current = 0;
+
+      const gen = ++genRef.current;
+      const stream = createEventStream(
+        requirementsApi.splitStreamUrl(requirementId, jobId),
+        (data: any) => {
+          if (gen !== genRef.current) return; // a stale stream's frame
+          if (cancelledRef.current) return;
+          const type = String(data?.type ?? '');
+          if (type === 'job_done') {
+            terminalRef.current = true;
+            setReconnecting(false);
+            // Close it ourselves: createEventStream fires onError when the
+            // stream ends, and that would overwrite the terminal state with
+            // a bogus "拆分失败".
+            stream.close();
+            if (data.status === 'error') {
+              const msg = String(data.error_message || data.error_kind || '');
+              setError(msg);
+              setRunState((prev) =>
+                prev ? { ...prev, status: 'error', running: false, error_message: msg } : prev,
+              );
+              setStage('config');
+              return;
+            }
+            const tasks = extractCandidates(data?.result);
+            if (tasks.length === 0) {
+              // The candidate list is in-process state — a backend restart
+              // (or an eviction from the registry) loses it.
+              setError(t('requirements.split.errExpired'));
+              setStage('config');
+              return;
+            }
+            const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
+            const ordered = next.map((r, i) => ({ ...r, order: i + 1 }));
+            setRows(ordered);
+            // Keep the status strip in sync — it counted the candidates from
+            // the state payload, which was still the "running" snapshot.
+            setRunState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: 'done',
+                    running: false,
+                    candidates: ordered.map((r) => ({
+                      title: r.title,
+                      description: r.description,
+                      scope: r.scope,
+                      acceptance: r.acceptance,
+                      boundary: r.boundary,
+                      order: r.order,
+                      depends_on: r.dependsOn,
+                    })),
+                  }
+                : prev,
+            );
+            setStage('review');
+            return;
+          }
+          if (type === 'error') {
+            // The backend writes the user-visible reason into an "error"
+            // line — it used to be dropped, leaving the user with a bare
+            // "拆分失败：" and no cause.
+            const msg = String(data.content ?? '');
+            if (msg) setError(msg);
+            pushLine({ type: 'error', content: msg, at: data.at });
+            return;
+          }
+          if (
+            type === 'phase' ||
+            type === 'message' ||
+            type === 'tool_call' ||
+            type === 'tool_result'
+          ) {
+            setReconnecting(false); // a frame arrived — we're connected again
+            pushLine({ type, content: String(data.content ?? ''), at: data.at });
+          }
+        },
+        () => {
+          if (gen !== genRef.current) return;
+          if (cancelledRef.current) return;
+          if (terminalRef.current) return; // normal shutdown after the terminal frame
+          setReconnecting(true);
+          // Back off: 1s → 2s → 4s → 8s → 10s (capped).
+          const attempt = attemptRef.current++;
+          if (attempt >= 4) {
+            // Reconnecting repeatedly failed → fall back to polling the state
+            // endpoint. The registry lives outside the JobStore ring buffer,
+            // so the status and the candidates survive even when the job was
+            // evicted.
+            pollFnRef.current();
+            return;
+          }
+          const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+          timerRef.current = setTimeout(() => {
+            if (gen !== genRef.current) return;
+            attachRef.current(jobId);
+          }, delay);
+        },
+      );
+      streamRef.current = stream;
+    },
+    [requirementId, t, pushLine],
+  );
+
+  // applyRunState folds a state payload into the modal: which stage to show,
+  // whether to (re)attach the stream, and what the candidate table holds.
+  const applyRunState = useCallback(
+    (st: SplitRunState) => {
+      setRunState(st);
+      if (st.status === 'running' && st.job_id) {
+        setStage('running');
+        setError('');
+        setRestored(true); // this is a previous run, not a fresh one
+        attachRef.current(st.job_id); // reattach to the split still running
+        return;
+      }
+      if (st.status === 'done' && st.candidates && st.candidates.length > 0) {
+        const next = st.candidates.map(toRow).sort((a, b) => a.order - b.order);
+        setRows(next.map((r, i) => ({ ...r, order: i + 1 })));
+        setStage('review'); // show the previous candidates straight away
+        setError('');
+        setRestored(true);
+        return;
+      }
+      if (st.status === 'error') {
+        setError(st.error_message || t('requirements.split.errGeneric', { msg: '' }));
+        setStage('config');
+        return;
+      }
+      // never ran, or the candidates are gone → back to the config stage
+      setStage('config');
+    },
+    [t],
+  );
+
+  // startPollingState is the fallback for when the SSE cannot be reattached.
+  // It polls the state endpoint rather than the job: the registry lives
+  // outside the JobStore ring buffer, so the status and the candidates
+  // survive even when the job itself was evicted.
+  const startPollingState = useCallback(
+    () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        void (async () => {
+          try {
+            const st = await requirementsApi.splitState(requirementId);
+            if (cancelledRef.current) return;
+            if (st.status === 'running') return; // still going, keep waiting
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            applyStateRef.current(st);
+          } catch {
+            /* network blip — retry on the next tick */
+          }
+        })();
+      }, 3000);
+    },
+    [requirementId],
+  );
+
+  // Keep the refs pointing at the latest implementations.
+  attachRef.current = attach;
+  applyStateRef.current = applyRunState;
+  pollFnRef.current = startPollingState;
+
+  // Ask the backend what this requirement's last split looks like as soon as
+  // the modal opens. The parent renders the modal conditionally, so closing
+  // it destroys every piece of local state — this is the only way the
+  // reopened modal can pick the previous run back up.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setStage('loading');
+    void (async () => {
+      try {
+        const st = await requirementsApi.splitState(requirementId);
+        if (cancelled) return;
+        applyStateRef.current(st);
+      } catch {
+        if (cancelled) return;
+        setStage('config'); // can't tell → behave as if it never ran
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, requirementId]);
+
+  // Keep the stream panel pinned to the newest line.
+  useEffect(() => {
+    const el = streamBodyRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [streamLines]);
+
   // start kicks off one split run with the configuration the user picked.
-  // The SSE handling below is the original one, moved verbatim — only the
-  // trigger changed.
   const start = useCallback(async () => {
     setRows([]);
-    setProgress(t('requirements.split.generating'));
+    setStreamLines([]);
     setError('');
     setReferences([]);
     setStage('running');
+    setRestored(false); // this one is a fresh run
+    setReconnecting(false);
     try {
       const { job_id } = await requirementsApi.split(requirementId, {
         model: model || undefined,
@@ -211,46 +519,20 @@ export function RequirementSplitModal({
         agent_server_id: agentServerId || undefined,
       });
       if (cancelledRef.current) return;
-      const stream = createEventStream(
-        requirementsApi.splitStreamUrl(requirementId, job_id),
-        (data: any) => {
-          if (cancelledRef.current) return;
-          if (data?.type === 'phase' || data?.type === 'message' || data?.type === 'tool_call') {
-            if (data.content) setProgress(String(data.content));
-            return;
-          }
-          if (data?.type === 'job_done') {
-            if (data.status === 'error') {
-              setError(t('requirements.split.errGeneric', { msg: data.error_kind || '' }));
-              setStage('config');
-              return;
-            }
-            const tasks: RawCandidate[] = Array.isArray(data?.result?.tasks)
-              ? data.result.tasks
-              : [];
-            if (tasks.length === 0) {
-              // The candidate list is in-process state — a backend restart
-              // (or an eviction from the job ring buffer) loses it.
-              setError(t('requirements.split.errExpired'));
-              setStage('config');
-              return;
-            }
-            const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
-            setRows(next.map((r, i) => ({ ...r, order: i + 1 })));
-            setProgress(t('requirements.split.generated', { count: next.length }));
-            setStage('review');
-            return;
-          }
-        },
-        () => {
-          if (cancelledRef.current) return;
-          setError(t('requirements.split.errGeneric', { msg: '' }));
-          setStage('config');
-        },
-      );
-      streamRef.current = stream;
+      attachRef.current(job_id);
     } catch (err) {
       if (cancelledRef.current) return;
+      // Another tab is already splitting this requirement. Don't surface an
+      // error — take over the run that is already going.
+      if (err instanceof ApiError && err.code === 'SPLIT_IN_PROGRESS') {
+        try {
+          const st = await requirementsApi.splitState(requirementId);
+          if (!cancelledRef.current) applyStateRef.current(st);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
       setStage('config');
     }
@@ -374,6 +656,12 @@ export function RequirementSplitModal({
 
   const canConfirm = !busy && stage === 'review' && rows.length > 0 && rows.every((r) => r.title.trim() !== '');
 
+  // The finished-at timestamp, rendered in the app's locale. 0 means "not
+  // finished yet" — the zero time's UnixMilli would otherwise show 1969.
+  const finishedAt = runState?.finished_at && runState.finished_at > 0
+    ? fmtDateTime(runState.finished_at)
+    : '';
+
   return (
     <div className="modal-overlay" onClick={() => !busy && close()}>
       <div className="modal-box req-split-modal" onClick={(e) => e.stopPropagation()}>
@@ -395,6 +683,40 @@ export function RequirementSplitModal({
         </div>
 
         <div className="req-split-body">
+          {/* ── 状态条（常驻）──
+              "关掉弹窗再打开能看到上次拆分的状态" 的主载体。它跟着最近一次
+              拆分 run 走，与当前处于哪个阶段无关。 */}
+          {runState && runState.status !== 'none' && (
+            <div className={`req-split-status req-split-status--${runState.status}`}>
+              <span className="req-split-status-dot" aria-hidden />
+              <span className="req-split-status-text">
+                {runState.status === 'running' && t('requirements.split.statusRunning')}
+                {runState.status === 'done' && t('requirements.split.statusDone')}
+                {runState.status === 'error' && t('requirements.split.statusError')}
+              </span>
+              <span className="req-split-status-meta">
+                {runState.status === 'running' && t('requirements.split.statusMetaRunning')}
+                {runState.status === 'done' &&
+                  t('requirements.split.statusMetaDone', {
+                    count: runState.candidates?.length ?? 0,
+                    time: finishedAt,
+                  })}
+                {runState.status === 'error' &&
+                  (runState.error_message || t('requirements.split.statusMetaError'))}
+              </span>
+            </div>
+          )}
+          {restored && (
+            <div className="req-split-hint req-split-hint-muted">
+              {t('requirements.split.resumed')}
+            </div>
+          )}
+          {reconnecting && (
+            <div className="req-split-hint req-split-hint-muted">
+              {t('requirements.split.reconnecting')}
+            </div>
+          )}
+
           {/* ── Config stage ──
               The model, the execution environment and the source branch are
               picked BEFORE the AI is asked for candidates. Nothing is sent
@@ -471,10 +793,52 @@ export function RequirementSplitModal({
           <div className="req-split-hint req-split-hint-muted">{t('requirements.split.parallelHint')}</div>
 
           {stage === 'running' && (
-            <div className="req-split-progress">
-              <span className="req-spinner" aria-hidden />
-              {progress || t('requirements.split.generating')}
-            </div>
+            <>
+              <div className="req-split-progress">
+                <span className="req-spinner" aria-hidden />
+                {streamLines.length > 0
+                  ? streamLines[streamLines.length - 1].content
+                  : t('requirements.split.generating')}
+              </div>
+
+              {/* ── 执行过程 ──
+                  The live SSE stream, one row per frame. Before this the
+                  running stage showed a single line that every new frame
+                  overwrote — the user could not see what the AI was doing. */}
+              <div className="req-split-stream">
+                <button
+                  type="button"
+                  className="req-split-stream-title"
+                  onClick={() => setStreamOpen((v) => !v)}
+                  aria-expanded={streamOpen}
+                >
+                  <span>{t('requirements.split.streamTitle')}</span>
+                  <span className="req-split-stream-toggle">
+                    {streamOpen
+                      ? t('requirements.split.streamCollapse')
+                      : t('requirements.split.streamExpand')}
+                  </span>
+                </button>
+                {streamOpen && (
+                  <div className="req-split-stream-body" ref={streamBodyRef}>
+                    {streamLines.length === 0 ? (
+                      <div className="req-split-stream-line req-split-stream-line--muted">
+                        {t('requirements.split.streamEmpty')}
+                      </div>
+                    ) : (
+                      streamLines.map((l, i) => (
+                        <div
+                          key={i}
+                          className={`req-split-stream-line req-split-stream-line--${l.type}`}
+                        >
+                          {l.content}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
           )}
 
           {error && <div className="req-split-error">{error}</div>}

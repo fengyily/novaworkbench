@@ -552,8 +552,13 @@ func TestSplit_RemoteFailureEndsJobWithError(t *testing.T) {
 		t.Errorf("job status = %q, want error; log = %v", jobStatus, jobLog)
 	}
 	// No candidates were published — the modal must not offer stale rows.
-	if candidates := h.splitState().results.get(jobID); len(candidates) != 0 {
-		t.Errorf("candidates = %v, want none", candidates)
+	if run := h.splitState().runs.get(jobID); run != nil && len(run.Candidates) != 0 {
+		t.Errorf("candidates = %v, want none", run.Candidates)
+	}
+	// The failure reason is recorded on the registry so the state endpoint
+	// can serve it after the modal is reopened.
+	if run := h.splitState().runs.get(jobID); run == nil || run.Error != "远端失败" {
+		t.Errorf("run error = %v, want 远端失败", run)
 	}
 }
 

@@ -1506,6 +1506,32 @@ export interface SplitTaskCandidate {
   depends_on: number[];
 }
 
+// 一次拆分运行的登记状态 —— 与后端 GET /api/requirements/{id}/split/state
+// 的响应一一对应。
+//
+// 这是拆分唯一的「状态可发现」入口：弹窗挂载时先查它，据此决定进入
+// 配置 / 运行中 / 候选复核 哪个阶段 —— 关掉弹窗再打开时，用户能看到上一轮
+// 拆分的状态与候选，而不是被迫重跑一次 AI。
+export interface SplitRunState {
+  /** none = 从没跑过；running / done / error = 最近一次拆分的状态。 */
+  status: 'none' | 'running' | 'done' | 'error';
+  /** 最近一次拆分的 job id —— 用来重挂 SSE（关掉弹窗再打开时接回同一轮）。 */
+  job_id?: string;
+  running: boolean;
+  /** 失败时后端给的用户可见中文原因（后端 error_message 字段）。 */
+  error_message?: string;
+  /** 候选列表；后端保证是数组（不会吐 null）。 */
+  candidates: SplitTaskCandidate[];
+  /** 实际生效的模型（persona 默认值或用户覆盖值）。 */
+  model?: string;
+  /** local | agent-server */
+  exec_env?: 'local' | 'agent-server';
+  agent_server_id?: string;
+  /** Unix 毫秒。0 = 还没发生。 */
+  created_at?: number;
+  finished_at?: number;
+}
+
 // 落库结果 —— 每个子需求的 id / 基线 / 前置 id。
 export interface SplitConfirmResult {
   children: Array<{
@@ -1633,7 +1659,8 @@ export const requirementsApi = {
   // ── 方案拆分 ────────────────────────────────────────────────────────────
   // split: start the AI split. Returns { job_id }; the candidate list arrives
   // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
-  // carries `result.tasks`.
+  // carries `result.tasks` (an object with a tasks array) plus
+  // `error_message` (the backend's user-visible failure reason).
   //
   // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
   // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
@@ -1652,6 +1679,14 @@ export const requirementsApi = {
   // structured payload on the terminal frame.
   splitStreamUrl: (id: string, jobId: string) =>
     `${API_BASE}/api/requirements/${id}/split/${jobId}/stream`,
+  // splitState: 最近一次拆分的状态（状态 / 候选 / 失败原因）。
+  //
+  // 弹窗挂载时先查它，据此决定进入「配置 / 运行中 / 候选复核」哪个阶段 ——
+  // 关掉弹窗再打开时能看到上一轮拆分，而不是被迫重跑一次。
+  //
+  // 「没跑过」是正常状态：后端回 200 + {status:"none"}，不是 404。
+  splitState: (id: string) =>
+    api.get<SplitRunState>(`/api/requirements/${id}/split/state`),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

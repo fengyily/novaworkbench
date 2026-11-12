@@ -92,86 +92,12 @@ type ConfirmSplitReq struct {
 	SourceBranch string `json:"source_branch"`
 }
 
-// splitJobResults — 拆分结果在进程内的暂存。
-//
-// 结果是「内存态」：刷新页面即丢（方案的 R15 接受这一点 —— 重跑一次比维护
-// 第二套状态机便宜）。进程重启后 map 为空 → SSE 的 done 帧带 result=null →
-// 前端提示「拆分结果已失效，请重新生成」。
-type splitJobResults struct {
-	mu   sync.RWMutex
-	byID map[string][]prompt.SplitTask
-}
-
-func newSplitJobResults() *splitJobResults {
-	return &splitJobResults{byID: map[string][]prompt.SplitTask{}}
-}
-
-func (r *splitJobResults) set(jobID string, tasks []prompt.SplitTask) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.byID[jobID] = tasks
-}
-
-func (r *splitJobResults) get(jobID string) []prompt.SplitTask {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	tasks, ok := r.byID[jobID]
-	if !ok {
-		return nil
-	}
-	out := make([]prompt.SplitTask, len(tasks))
-	copy(out, tasks)
-	return out
-}
-
-// splitLocks — 幂等锁：requirementID → 正在跑的 job id。
-//
-// 重复点击 / 多标签页并发拆分会产生两批重复子需求，所以同一需求的拆分在任一
-// 时刻只允许一个。锁在 job 结束时释放。
-type splitLocks struct {
-	mu    sync.Mutex
-	byReq map[string]string
-}
-
-func newSplitLocks() *splitLocks {
-	return &splitLocks{byReq: map[string]string{}}
-}
-
-// acquire returns the existing job id when a split is already running for
-// this requirement, and "" when the caller may proceed.
-func (l *splitLocks) acquire(reqID, jobID string) (existing string, ok bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.byReq == nil {
-		l.byReq = map[string]string{}
-	}
-	if cur, running := l.byReq[reqID]; running {
-		return cur, false
-	}
-	l.byReq[reqID] = jobID
-	return "", true
-}
-
-func (l *splitLocks) release(reqID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.byReq, reqID)
-}
-
-// peek reports the running job id for a requirement without taking the
-// lock. It lets the handler bail out BEFORE creating a job, so a refused
-// second split doesn't leave a stray job in the ring buffer.
-func (l *splitLocks) peek(reqID string) (jobID string, running bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	jobID, running = l.byReq[reqID]
-	return jobID, running
-}
-
 // splitState holds the per-handler mutable state of the split feature.
 type splitState struct {
-	results *splitJobResults
-	locks   *splitLocks
+	// runs — 权威登记处（状态 + 候选 + requirementID→jobID 映射）。
+	runs *splitRuns
+	// locks — 并发闸门（同一需求同时只允许跑一次拆分）。
+	locks *splitLocks
 }
 
 // splitState returns the handler's split state, creating it on first use.
@@ -186,7 +112,7 @@ func (h *WizardHandler) splitState() *splitState {
 	splitStateInitMu.Lock()
 	defer splitStateInitMu.Unlock()
 	if h.split == nil {
-		h.split = &splitState{results: newSplitJobResults(), locks: newSplitLocks()}
+		h.split = &splitState{runs: newSplitRuns(splitRunsCap), locks: newSplitLocks()}
 	}
 	return h.split
 }
@@ -254,12 +180,20 @@ func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
 
 	// The authoritative check (atomic). If another request won the race
 	// between the peek and here, finish our job and bail.
+	//
+	// The run is registered only AFTER the lock is won: registering first
+	// would let a job that never ran overwrite latest[reqID] and hide the
+	// run that IS running.
 	if existing, ok := st.locks.acquire(reqID, job.ID); !ok {
 		job.Finish(1, store.JobError)
 		writeError(w, http.StatusConflict, "SPLIT_IN_PROGRESS",
 			fmt.Sprintf("已有拆分任务在运行（job %s），请等待结束", existing))
 		return
 	}
+
+	// 登记 run —— 必须在 writeJSON 之前：前端拿到 job_id 后可能立刻查 state，
+	// 若此时还没登记，state 会误报 "none"，弹窗就会以为「从没跑过」。
+	st.runs.start(job.ID, reqID, strings.TrimSpace(body.Model), strings.TrimSpace(body.AgentServerID))
 
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
@@ -325,6 +259,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[split] %s: panic: %v", reqRow.ID, r)
+			st.runs.finish(job.ID, store.JobError, "拆分过程异常终止", nil)
 			job.Append(store.LogLine{Type: "error", Content: "拆分过程异常终止"})
 			job.Finish(1, store.JobError)
 		}
@@ -344,6 +279,9 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	if strings.TrimSpace(body.ClaudeConfigID) != "" {
 		configID = body.ClaudeConfigID
 	}
+	// The effective model is resolved here, not from the request body — the
+	// state endpoint must report the model that actually ran.
+	st.runs.update(job.ID, func(r *splitRun) { r.Model = modelName })
 
 	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing)
 	usage := h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID)
@@ -365,7 +303,9 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		tasks = tasks[:splitMaxCandidates]
 	}
 
-	st.results.set(job.ID, tasks)
+	// 登记终态必须在 job.Finish 之前 —— store.Job.Finish 会关闭所有订阅者
+	// channel，订阅者醒来时读到的必须是已填好的状态。
+	st.runs.finish(job.ID, store.JobDone, "", tasks)
 	job.Append(store.LogLine{Type: "message", Content: prompt.SplitSummary(tasks)})
 	job.Finish(0, store.JobDone)
 }
@@ -439,8 +379,12 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 }
 
 // finishSplitError reports a failed split on the job stream.
+//
+// The failure reason is recorded BOTH on the registry (so the state endpoint
+// can serve it after the modal is reopened) and as an "error" log line (so it
+// shows up in the live stream).
 func (h *WizardHandler) finishSplitError(job *store.Job, st *splitState, msg string) {
-	st.results.set(job.ID, nil)
+	st.runs.finish(job.ID, store.JobError, msg, nil)
 	job.Append(store.LogLine{Type: "error", Content: msg})
 	job.Finish(1, store.JobError)
 }
@@ -496,21 +440,100 @@ func (h *WizardHandler) StreamSplitJob(w http.ResponseWriter, r *http.Request) {
 	st := h.splitState()
 	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
 		var result any
-		if tasks := st.results.get(jobID); len(tasks) > 0 {
-			result = tasks
+		var errMsg string
+		if run := st.runs.get(jobID); run != nil {
+			errMsg = run.Error
+			// 终帧的 result 统一是对象 {"tasks":[...]}。
+			//
+			// 旧实现把候选裸数组塞进 result，而前端读的是 result.tasks ——
+			// 两者永远对不上，拆分在 UI 上一直是坏的（每次都报"结果已失效"）。
+			// 对象形态可扩展（将来加 model / exec_env 不破坏前端），前端
+			// 同时兼容裸数组 / {tasks} / {candidates} 三种形态。
+			tasks := run.Candidates
+			if tasks == nil {
+				tasks = []prompt.SplitTask{} // tasks 永远是数组，不是 null
+			}
+			result = map[string]any{"tasks": tasks}
 		}
 		doneData, _ := json.Marshal(map[string]interface{}{
 			"type":        "job_done",
 			"status":      string(status),
 			"exit_code":   exitCode,
 			"error_kind":  job.ErrorKind,
-			"started_at":  job.StartedAt.UnixMilli(),
-			"finished_at": job.FinishedAt.UnixMilli(),
-			"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
-			"result":      result,
+			// 新增：后端给的用户可见中文失败原因。前端拿它当错误条文案，
+			// 不用再拼一个空泛的"拆分失败："。
+			"error_message": errMsg,
+			"started_at":    job.StartedAt.UnixMilli(),
+			"finished_at":   job.FinishedAt.UnixMilli(),
+			"duration_ms":   job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
+			"result":        result,
 		})
 		return doneData
 	})
+}
+
+// ── GET /api/requirements/{id}/split/state ──────────────────────────────────
+
+// GetSplitState reports the most recent split run of a requirement.
+//
+// 这是拆分唯一的"状态可发现"入口：弹窗挂载时先查这里，据此决定进入
+// 配置 / 运行中 / 候选复核 三个阶段中的哪一个 —— 关掉弹窗再打开时，用户能看到
+// 上一轮拆分的状态与候选，而不是被迫重跑一次 AI。
+//
+// "没跑过"是正常状态不是错误：回 200 + {"status":"none"}，不是 404。
+func (h *WizardHandler) GetSplitState(w http.ResponseWriter, r *http.Request) {
+	reqID := r.PathValue("id")
+	st := h.splitState()
+	run := st.runs.latestFor(reqID)
+	if run == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "none",
+			"job_id":          "",
+			"running":         false,
+			"error_message":   "",
+			"candidates":      []prompt.SplitTask{},
+			"model":           "",
+			"exec_env":        "",
+			"agent_server_id": "",
+			"created_at":      int64(0),
+			"finished_at":     int64(0),
+		})
+		return
+	}
+	execEnv := "local"
+	if strings.TrimSpace(run.AgentServerID) != "" {
+		execEnv = "agent-server"
+	}
+	// 零值 time 的 UnixMilli 是个很大的负数 —— 用 IsZero() 归一成 0，
+	// 前端只在 finished_at > 0 时显示时间。
+	var created, finished int64
+	if !run.CreatedAt.IsZero() {
+		created = run.CreatedAt.UnixMilli()
+	}
+	if !run.FinishedAt.IsZero() {
+		finished = run.FinishedAt.UnixMilli()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          string(run.Status), // running | done | error
+		"job_id":          run.JobID,
+		"running":         run.Status == store.JobRunning,
+		"error_message":   run.Error,
+		"candidates":      splitCandidatesOrEmpty(run.Candidates), // 归一为 []，不吐 null
+		"model":           run.Model,
+		"exec_env":        execEnv, // local | agent-server
+		"agent_server_id": run.AgentServerID,
+		"created_at":      created,
+		"finished_at":     finished, // 0 = 还没结束
+	})
+}
+
+// splitCandidatesOrEmpty normalizes a nil candidate slice into an empty one —
+// the wire format must always carry an array, never null.
+func splitCandidatesOrEmpty(c []prompt.SplitTask) []prompt.SplitTask {
+	if c == nil {
+		return []prompt.SplitTask{}
+	}
+	return c
 }
 
 // ── POST /api/requirements/{id}/split/confirm ─────────────────────────────
@@ -679,6 +702,16 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	if len(children) > 0 {
 		effectiveBase = children[0].BaseBranch
 	}
+
+	// 候选已经落库，这一轮 run 就"用掉了" —— 标记为已消费，state 端点随即回
+	// status:none。用户重开弹窗回到配置阶段，不会看到一份已经落过库的旧候选
+	//（会误以为还能再创建一批）。
+	//
+	// 用 consumeLatest 而不是按 job_id 消费：ConfirmSplitReq 里没有 job_id，
+	// 而同一需求同时只允许跑一次拆分（splitLocks 保证），且确认后 dev_delegated
+	// 会让 splitPreconditionError 挡掉二次拆分 —— 所以"最近一次 run"就是被确认
+	// 的那一轮。
+	h.splitState().runs.consumeLatest(reqID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"children":    out,
