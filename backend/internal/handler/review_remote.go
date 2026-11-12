@@ -181,19 +181,22 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	return report, ""
 }
 
-// runRemoteWorkerStream POSTs one run to the agent host's nova-agent-worker
-// and parses the NDJSON stream back. Shared by the remote review and the
-// remote 追问 so the worker-readiness check, the Connection: close handling
-// and the error wording can never drift between them.
+// runRemoteWorkerStreamWith POSTs one run to the agent host's nova-agent-worker
+// and parses the NDJSON stream back.
+//
+// It is deliberately package-level (not a *ReviewHandler method) so the remote
+// Review / 追问 and the remote 方案拆分 (handler/requirement_split_remote.go)
+// share ONE implementation: the worker-readiness check, the Connection: close
+// handling and the error wording can never drift between them.
 //
 // Returns either a parsed outcome or a user-facing error message, never both.
-func (h *ReviewHandler) runRemoteWorkerStream(ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job, opts llm.StreamOpts, claudeConfigID, scope string, uctx *usageCtx, hb chan<- struct{}) (claudeStreamOutcome, string) {
+func runRemoteWorkerStreamWith(gw *llm.Gateway, ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job, opts llm.StreamOpts, claudeConfigID, scope string, uctx *usageCtx, hb chan<- struct{}) (claudeStreamOutcome, string) {
 	var zero claudeStreamOutcome
 	if err := ensureRemoteWorkerReady(ctx, client, srv, job); err != nil {
 		return zero, err.Error()
 	}
 
-	runBody := workerRunRequest(opts, h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, claudeConfigID), srv)
+	runBody := workerRunRequest(opts, gw.BuildRemoteEnvPairsWithConfig(opts.Model, claudeConfigID), srv)
 
 	const workerAddr = "127.0.0.1:7000"
 	bodyBytes, mErr := json.Marshal(runBody)
@@ -227,6 +230,15 @@ func (h *ReviewHandler) runRemoteWorkerStream(ctx context.Context, client *gossh
 		return out, out.errMsg
 	}
 	return out, ""
+}
+
+// runRemoteWorkerStream — the Review handler's thin forwarder to
+// runRemoteWorkerStreamWith. Kept so the existing call sites (the remote
+// review and the remote 追问) stay untouched.
+//
+// Returns either a parsed outcome or a user-facing error message, never both.
+func (h *ReviewHandler) runRemoteWorkerStream(ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job, opts llm.StreamOpts, claudeConfigID, scope string, uctx *usageCtx, hb chan<- struct{}) (claudeStreamOutcome, string) {
+	return runRemoteWorkerStreamWith(h.llm, ctx, client, srv, job, opts, claudeConfigID, scope, uctx, hb)
 }
 
 // resolveRemoteDiffRefs is resolveDiffRefs' remote twin: same origin-first /

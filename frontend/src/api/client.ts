@@ -1634,7 +1634,10 @@ export const requirementsApi = {
   // split: start the AI split. Returns { job_id }; the candidate list arrives
   // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
   // carries `result.tasks`.
-  split: (id: string, body: { model?: string; claude_config_id?: string } = {}) =>
+  //
+  // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
+  // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
+  split: (id: string, body: { model?: string; claude_config_id?: string; agent_server_id?: string } = {}) =>
     api.post<{ job_id: string }>(`/api/requirements/${id}/split`, body),
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +

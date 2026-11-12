@@ -28,8 +28,24 @@ import { useTranslation } from 'react-i18next';
 import { ApiError, requirementsApi, type SplitTaskCandidate } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { BranchPicker } from './BranchPicker';
+import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { IconClose } from './icons';
+import ModelSelect from './ModelSelect';
 import './RequirementSplitModal.css';
+
+/**
+ * The modal runs in three stages:
+ *
+ *   config  → the user picks the model / execution environment / source
+ *             branch. NOTHING is sent to the backend here.
+ *   running → the AI is producing the candidates (SSE progress).
+ *   review  → the candidate table; the user edits and confirms.
+ *
+ * The config stage exists because the split is the one entry point that used
+ * to fire the AI the instant the dialog opened — the user never got a say in
+ * which model ran, on which machine, or on top of which branch.
+ */
+type SplitStage = 'config' | 'running' | 'review';
 
 export interface RequirementSplitModalProps {
   open: boolean;
@@ -44,6 +60,15 @@ export interface RequirementSplitModalProps {
   masterBranch: string;
   /** Branch candidates for the source-branch picker. */
   branches: string[];
+  /** Ready Agent Servers (the parent already filters by status === 'ready'). */
+  agentServers: ExecEnvServer[];
+  /** Initial model / Claude config / execution environment, taken from the
+   *  page's design toolbar. */
+  initialModel?: string;
+  initialConfigId?: string;
+  initialAgentServerId?: string;
+  /** The real model name shown next to the empty (default model) option. */
+  initialModelName?: string;
   /** Fired after the candidates were persisted. */
   onConfirmed: () => void;
 }
@@ -100,29 +125,53 @@ export function RequirementSplitModal({
   baseBranch,
   masterBranch,
   branches,
+  agentServers,
+  initialModel,
+  initialConfigId,
+  initialAgentServerId,
+  initialModelName,
   onConfirmed,
 }: RequirementSplitModalProps) {
   const { t } = useTranslation();
 
   const [rows, setRows] = useState<Row[]>([]);
-  const [phase, setPhase] = useState('');
+  const [stage, setStage] = useState<SplitStage>('config');
+  /** The latest progress line pushed over SSE. */
+  const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [running, setRunning] = useState(false);
   /** Candidate pairs the user ticked for mutual reference: [a, b] ordinals. */
   const [references, setReferences] = useState<[number, number][]>([]);
   /** The branch the master's own dev branch is created from. */
   const [sourceBranch, setSourceBranch] = useState<string>(baseBranch || '');
+  /** The model this split run uses (empty = the architect persona default). */
+  const [model, setModel] = useState<string>(initialModel || '');
+  /** The claude_configs row this split run uses (empty = the active config). */
+  const [configId, setConfigId] = useState<string>(initialConfigId || '');
+  /** The execution environment (empty = this machine). */
+  const [agentServerId, setAgentServerId] = useState<string>(() => {
+    // Guard against an AgentServer id that has dropped off the ready list
+    // since the page last fetched — same fallback DesignCodingImmediateModal
+    // uses. A stale id would send the split to a target that no longer
+    // exists.
+    if (!initialAgentServerId) return '';
+    return agentServers.some((s) => s.id === initialAgentServerId)
+      ? initialAgentServerId
+      : '';
+  });
 
   const streamRef = useRef<EventStream | null>(null);
+  /** True once the modal unmounted — guards the async start() against
+   *  touching state that no longer exists. */
+  const cancelledRef = useRef(false);
 
   const close = useCallback(() => {
     streamRef.current?.close();
     streamRef.current = null;
     setRows([]);
-    setPhase('');
+    setStage('config');
+    setProgress('');
     setError('');
-    setRunning(false);
     setReferences([]);
     onClose();
   }, [onClose]);
@@ -134,72 +183,78 @@ export function RequirementSplitModal({
     setSourceBranch(baseBranch || '');
   }, [open, baseBranch]);
 
-  // Start the split as soon as the modal opens.
+  // The split no longer starts on its own: the user configures the run
+  // (model / execution environment / source branch) first and then presses
+  // the start button. This effect only tears the SSE stream down on unmount.
   useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-
-    const start = async () => {
-      setRows([]);
-      setPhase(t('requirements.split.generating'));
-      setError('');
-      setRunning(true);
-      setReferences([]);
-      try {
-        const { job_id } = await requirementsApi.split(requirementId);
-        if (cancelled) return;
-        const stream = createEventStream(
-          requirementsApi.splitStreamUrl(requirementId, job_id),
-          (data: any) => {
-            if (cancelled) return;
-            if (data?.type === 'phase' || data?.type === 'message' || data?.type === 'tool_call') {
-              if (data.content) setPhase(String(data.content));
-              return;
-            }
-            if (data?.type === 'job_done') {
-              if (data.status === 'error') {
-                setError(t('requirements.split.errGeneric', { msg: data.error_kind || '' }));
-                setRunning(false);
-                return;
-              }
-              const tasks: RawCandidate[] = Array.isArray(data?.result?.tasks)
-                ? data.result.tasks
-                : [];
-              if (tasks.length === 0) {
-                // The candidate list is in-process state — a backend restart
-                // (or an eviction from the job ring buffer) loses it.
-                setError(t('requirements.split.errExpired'));
-                setRunning(false);
-                return;
-              }
-              const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
-              setRows(next.map((r, i) => ({ ...r, order: i + 1 })));
-              setPhase(t('requirements.split.generated', { count: next.length }));
-              setRunning(false);
-              return;
-            }
-          },
-          () => {
-            if (cancelled) return;
-            setError(t('requirements.split.errGeneric', { msg: '' }));
-            setRunning(false);
-          },
-        );
-        streamRef.current = stream;
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
-        setRunning(false);
-      }
-    };
-
-    void start();
+    cancelledRef.current = false;
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       streamRef.current?.close();
       streamRef.current = null;
     };
-  }, [open, requirementId, t]);
+  }, []);
+
+  // start kicks off one split run with the configuration the user picked.
+  // The SSE handling below is the original one, moved verbatim — only the
+  // trigger changed.
+  const start = useCallback(async () => {
+    setRows([]);
+    setProgress(t('requirements.split.generating'));
+    setError('');
+    setReferences([]);
+    setStage('running');
+    try {
+      const { job_id } = await requirementsApi.split(requirementId, {
+        model: model || undefined,
+        claude_config_id: configId || undefined,
+        agent_server_id: agentServerId || undefined,
+      });
+      if (cancelledRef.current) return;
+      const stream = createEventStream(
+        requirementsApi.splitStreamUrl(requirementId, job_id),
+        (data: any) => {
+          if (cancelledRef.current) return;
+          if (data?.type === 'phase' || data?.type === 'message' || data?.type === 'tool_call') {
+            if (data.content) setProgress(String(data.content));
+            return;
+          }
+          if (data?.type === 'job_done') {
+            if (data.status === 'error') {
+              setError(t('requirements.split.errGeneric', { msg: data.error_kind || '' }));
+              setStage('config');
+              return;
+            }
+            const tasks: RawCandidate[] = Array.isArray(data?.result?.tasks)
+              ? data.result.tasks
+              : [];
+            if (tasks.length === 0) {
+              // The candidate list is in-process state — a backend restart
+              // (or an eviction from the job ring buffer) loses it.
+              setError(t('requirements.split.errExpired'));
+              setStage('config');
+              return;
+            }
+            const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
+            setRows(next.map((r, i) => ({ ...r, order: i + 1 })));
+            setProgress(t('requirements.split.generated', { count: next.length }));
+            setStage('review');
+            return;
+          }
+        },
+        () => {
+          if (cancelledRef.current) return;
+          setError(t('requirements.split.errGeneric', { msg: '' }));
+          setStage('config');
+        },
+      );
+      streamRef.current = stream;
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
+      setStage('config');
+    }
+  }, [requirementId, model, configId, agentServerId, t]);
 
   const update = (index: number, patch: Partial<Row>) => {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
@@ -317,7 +372,7 @@ export function RequirementSplitModal({
 
   if (!open) return null;
 
-  const canConfirm = !busy && !running && rows.length > 0 && rows.every((r) => r.title.trim() !== '');
+  const canConfirm = !busy && stage === 'review' && rows.length > 0 && rows.every((r) => r.title.trim() !== '');
 
   return (
     <div className="modal-overlay" onClick={() => !busy && close()}>
@@ -340,6 +395,56 @@ export function RequirementSplitModal({
         </div>
 
         <div className="req-split-body">
+          {/* ── Config stage ──
+              The model, the execution environment and the source branch are
+              picked BEFORE the AI is asked for candidates. Nothing is sent
+              to the backend from this block. */}
+          {stage === 'config' && (
+            <div className="req-split-config">
+              <div className="req-split-config-title">{t('requirements.split.configTitle')}</div>
+
+              <div className="req-split-config-field">
+                <span className="req-split-config-label">{t('requirements.split.modelLabel')}</span>
+                <ModelSelect
+                  value={model}
+                  onChange={setModel}
+                  stage="architect"
+                  defaultModelName={initialModelName || undefined}
+                  configId={configId || undefined}
+                  onConfigChange={setConfigId}
+                />
+              </div>
+
+              <div className="req-split-config-field">
+                <span className="req-split-config-label">{t('requirements.split.execEnvLabel')}</span>
+                <div className="preflight-field-card preflight-field-card--exec">
+                  <span className="preflight-field-chip" aria-hidden="true">ENV</span>
+                  <ExecEnvSelect
+                    className="preflight-field-input"
+                    servers={agentServers}
+                    value={agentServerId}
+                    onChange={setAgentServerId}
+                    localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                  />
+                </div>
+                {agentServers.length === 0 && (
+                  <small className="req-split-hint req-split-hint-muted">
+                    {t('requirements.split.execEnvEmptyHint')}
+                  </small>
+                )}
+                {agentServerId !== '' && (
+                  <small className="req-split-hint req-split-hint-muted">
+                    {t('requirements.split.execEnvRemoteHint')}
+                  </small>
+                )}
+              </div>
+
+              <div className="req-split-hint req-split-hint-muted">
+                {t('requirements.split.configScopeHint')}
+              </div>
+            </div>
+          )}
+
           {/* The source branch: the master's own dev branch is created from
               it (or aligned to it) and pushed to the remote. Every child
               then develops on that branch — stacked PRs. */}
@@ -365,16 +470,16 @@ export function RequirementSplitModal({
           </div>
           <div className="req-split-hint req-split-hint-muted">{t('requirements.split.parallelHint')}</div>
 
-          {running && (
+          {stage === 'running' && (
             <div className="req-split-progress">
               <span className="req-spinner" aria-hidden />
-              {phase || t('requirements.split.generating')}
+              {progress || t('requirements.split.generating')}
             </div>
           )}
 
           {error && <div className="req-split-error">{error}</div>}
 
-          {!running && rows.length > 0 && (
+          {stage === 'review' && rows.length > 0 && (
             <>
               <div className="req-split-table">
                 <div className="req-split-row req-split-row-head">
@@ -494,11 +599,33 @@ export function RequirementSplitModal({
           <button type="button" className="btn btn-sm" onClick={close} disabled={busy}>
             {t('requirements.split.cancel')}
           </button>
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirm()} disabled={!canConfirm}>
-            {busy
-              ? t('requirements.split.confirming')
-              : t('requirements.split.confirm', { count: rows.length })}
-          </button>
+          {stage === 'config' && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => void start()}>
+              {t('requirements.split.start')}
+            </button>
+          )}
+          {stage === 'running' && (
+            <button type="button" className="btn btn-primary btn-sm" disabled>
+              {t('requirements.split.generating')}
+            </button>
+          )}
+          {stage === 'review' && (
+            <>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setStage('config')}
+                disabled={busy}
+              >
+                {t('requirements.split.regenerate')}
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirm()} disabled={!canConfirm}>
+                {busy
+                  ? t('requirements.split.confirming')
+                  : t('requirements.split.confirm', { count: rows.length })}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
