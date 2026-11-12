@@ -438,16 +438,6 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 	return tasks, ""
 }
 
-// runRemoteSplitTasks runs the split on an Agent Server.
-//
-// Stub for now — the real implementation lands in requirement_split_remote.go
-// (scratch clone + nova-agent-worker, mirroring the remote Review path).
-// The signature is final: execSplitTasks already calls it.
-func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requirement, agentServerID,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
-	return nil, "远端拆分尚未实现，请切回本地执行后重新生成。"
-}
-
 // finishSplitError reports a failed split on the job stream.
 func (h *WizardHandler) finishSplitError(job *store.Job, st *splitState, msg string) {
 	st.results.set(job.ID, nil)
