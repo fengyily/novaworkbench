@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -1791,8 +1790,10 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 //     This is language-agnostic — it does not depend on parsing the CLI's
 //     English/Chinese error text — and it fires within one stream event of
 //     the deletion.
-//   - GuardToolUse: if a Bash command (or a Write with a destructive path)
-//     would delete/reset/move workDir or one of its ancestors, veto it.
+//   - GuardToolUse: if a Bash command would delete/reset/move workDir or one
+//     of its ancestors, veto it. The verdict is based on the path the
+//     destructive operation really points at (see destructive_guard.go), so
+//     removing a scratch worktree elsewhere stays possible.
 //
 // Both are deliberately conservative about workDir == "": an empty value
 // disables the checks rather than matching everything.
@@ -1830,83 +1831,10 @@ func (s subTaskSink) GuardToolUse(toolName string, input map[string]interface{})
 	return ""
 }
 
-// destructiveCommandReason inspects a Bash command string and reports why it
-// must not run inside workDir ("" = allowed).
-//
-// Scope note: this is a targeted guard against the failure mode that actually
-// happened — an agent deciding to delete its own working tree — not a general
-// shell sandbox. It only flags commands that name workDir itself (or a parent
-// of it), so ordinary cleanup like `rm -rf build/` or `git checkout -- .`
-// keeps working.
-// namesWorkDirOrAncestor reports whether cmd mentions workDir or any of its
-// parent directories. Deleting an ANCESTOR of the working directory destroys
-// it just as thoroughly as naming the directory itself — `rm -rf
-// ~/.novaworkbench/worktrees/proj` takes out req_abc with it.
-//
-// Single-segment ancestors are skipped so the check can never degrade into
-// "any command containing a common path word"; every candidate must keep at
-// least one separator.
-func namesWorkDirOrAncestor(cmd, workDir string) bool {
-	if cmd == "" || workDir == "" {
-		return false
-	}
-	for p := filepath.Clean(workDir); len(p) > 1 && strings.Count(p, string(filepath.Separator)) >= 1; p = filepath.Dir(p) {
-		if strings.Contains(cmd, p) {
-			return true
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			break
-		}
-	}
-	return false
-}
-
-func destructiveCommandReason(toolName, cmd, workDir string) string {
-	if toolName != "Bash" {
-		return ""
-	}
-	lower := strings.ToLower(cmd)
-
-	// A command that cannot touch workDir (or any of its ancestors) at all is
-	// allowed without further analysis. Cheap pre-filter so log-noise and
-	// false positives stay low.
-	targetsWorkDir := namesWorkDirOrAncestor(cmd, workDir) || strings.Contains(cmd, "WORKTREE") || strings.Contains(cmd, "$PWD")
-	if !targetsWorkDir {
-		// `git reset --hard` / `git clean -fdx` / `git worktree remove` act on
-		// the CURRENT directory and therefore always hit workDir.
-		switch {
-		case strings.Contains(lower, "git reset --hard"):
-			return "git reset --hard 会丢弃工作目录中的全部未提交改动。"
-		case strings.Contains(lower, "git clean -fdx") || strings.Contains(lower, "git clean -xfd"):
-			return "git clean -fdx 会删除工作目录中所有未跟踪文件。"
-		case strings.Contains(lower, "git worktree remove"):
-			return "git worktree remove 会移除工作目录本身。"
-		}
-		return ""
-	}
-
-	// Commands naming workDir (or an ancestor) explicitly: block the
-	// destructive families.
-	hasRmRecursive := (strings.Contains(lower, "rm -rf") || strings.Contains(lower, "rm -fr") ||
-		strings.Contains(lower, "rm -r -f") || strings.Contains(lower, "rm --recursive"))
-	switch {
-	case hasRmRecursive:
-		return "禁止删除工作目录或其父目录。"
-	case strings.Contains(lower, "rm -rf .") || strings.Contains(lower, "rm -rf ..") ||
-		strings.Contains(lower, "rm -fr .") || strings.Contains(lower, "rm -fr .."):
-		return "禁止用相对路径删除当前目录或其父目录。"
-	case strings.Contains(lower, "git reset --hard"):
-		return "git reset --hard 会丢弃工作目录中的全部未提交改动。"
-	case strings.Contains(lower, "git clean -fdx") || strings.Contains(lower, "git clean -xfd"):
-		return "git clean -fdx 会删除工作目录中所有未跟踪文件。"
-	case strings.Contains(lower, "git worktree remove"):
-		return "git worktree remove 会移除工作目录本身。"
-	case strings.HasPrefix(strings.TrimSpace(lower), "mv ") || strings.Contains(lower, " mv "):
-		return "禁止移动/重命名工作目录。"
-	}
-	return ""
-}
+// The destructive-command guard itself lives in destructive_guard.go: it
+// classifies the operator (cwd-implicit vs path-explicit) and decides on the
+// operand it really points at, instead of vetoing any command that merely
+// mentions the working directory.
 
 // staleSourceCandidates builds the fallback chain of source session IDs to
 // try when the primary source's JSONL is missing on disk.
@@ -2022,7 +1950,9 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 	case out.errMsg != "":
 		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ " + out.errMsg
+		// The guard messages already carry their own "❌" marker; prefixing
+		// another one produced "❌ ❌ 已阻止破坏性命令…".
+		artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 		if out.IdleTimeoutHit {
 			// v0.5.x: rolling idle ctx fired (streamEventCount > 0, then SIGKILL).

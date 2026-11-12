@@ -46,11 +46,13 @@ import "strings"
 //  3. Do not poll CI. Report the PR link and finish.
 //
 // This block is advisory (a prompt), not enforcement. The enforcement lives
-// in sub_task_runner.go (destructive-command interception + missing-cwd
-// detection); the prompt exists so a well-behaved model never needs it.
+// in the handler package (destructive-command interception in
+// destructive_guard.go + missing-cwd detection in sub_task_runner.go); the
+// prompt exists so a well-behaved model never needs it.
 const WorkingDirSafety = `## 工作目录安全约束（强制）
 - 当前工作目录是本次改动唯一的落盘位置。**严禁删除、移动、重命名、清空它，也严禁对其任何父目录做同样操作**。
-- 禁止对工作目录执行：` + "`rm -rf`" + `、` + "`rm -fr`" + `、` + "`git clean -fdx`" + `、` + "`git worktree remove`" + `、` + "`git reset --hard`" + `、` + "`mv`" + ` 目录。
+- 禁止对**当前工作目录**（及其父目录）执行：` + "`rm -rf`" + `、` + "`rm -fr`" + `、` + "`git clean -fdx`" + `、` + "`git worktree remove`" + `、` + "`git reset --hard`" + `、` + "`mv`" + ` 目录。
+- 例外：清理**你自己创建的其它临时 worktree**是允许的（例如 ` + "`git worktree remove /tmp/xxx`" + `），只要路径不在当前工作目录内即可；但绝不要动当前工作目录或它的父目录。
 - 如果工作目录消失或不可读（例如报 ` + "`No such file or directory`" + ` / ` + "`无法读取当前工作目录`" + ` / ` + "`Working directory ... was deleted`" + `）：**立即停止并如实报告**。不要删除后重新 clone，不要用任何方式自行「修复」目录 —— 那只会破坏证据并可能误删其它仓库。
 - 不要轮询等待 CI（例如 ` + "`gh pr checks`" + ` 循环、` + "`sleep`" + ` 后重试）。PR 创建成功即输出链接并结束；CI 状态由用户自己查看。`
 
