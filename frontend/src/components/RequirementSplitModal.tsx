@@ -325,7 +325,15 @@ export function RequirementSplitModal({
               const msg = String(data.error_message || data.error_kind || '');
               setError(msg);
               setRunState((prev) =>
-                prev ? { ...prev, status: 'error', running: false, error_message: msg } : prev,
+                prev
+                  ? {
+                      ...prev,
+                      status: 'error',
+                      running: false,
+                      error_message: msg,
+                      finished_at: Number(data.finished_at) || prev.finished_at,
+                    }
+                  : prev,
               );
               setStage('config');
               return;
@@ -349,6 +357,10 @@ export function RequirementSplitModal({
                     ...prev,
                     status: 'done',
                     running: false,
+                    // The terminal frame carries the completion time — without
+                    // it the strip's "generated N candidates · <time>" would
+                    // have no time for a run that finished in this session.
+                    finished_at: Number(data.finished_at) || prev.finished_at,
                     candidates: ordered.map((r) => ({
                       title: r.title,
                       description: r.description,
@@ -519,6 +531,15 @@ export function RequirementSplitModal({
         agent_server_id: agentServerId || undefined,
       });
       if (cancelledRef.current) return;
+      // Publish the fresh run into the status strip right away — the strip is
+      // meant to be there for the whole life of a split, not only after the
+      // modal was reopened.
+      setRunState({
+        status: 'running',
+        job_id,
+        running: true,
+        candidates: [],
+      });
       attachRef.current(job_id);
     } catch (err) {
       if (cancelledRef.current) return;
