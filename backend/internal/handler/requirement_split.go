@@ -336,7 +336,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 
 	out := runClaudeStream(jobSink{job}, cmd, "requirement-split",
 		h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID),
-		nil, nil, 0, splitSplitStallTimeout)
+		nil, nil, 0, withStallTimeout(splitSplitStallTimeout))
 
 	jsonPart, _ := extractTrailingJSON(out.finalResult)
 	if strings.TrimSpace(jsonPart) == "" {

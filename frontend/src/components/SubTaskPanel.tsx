@@ -11,12 +11,14 @@ import {
   knowledgeApi,
   reportArchiveApi,
   claudeSettingsPrefix,
+  wizardApi,
   DefaultModelLabel,
   type SubTask,
   type SubTaskStatus,
   type Requirement,
   type OrchestrationBatch,
   type AgentServer,
+  type RunJob,
 } from '../api/client';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { ExecEnvBadge } from './ExecEnvBadge';
@@ -393,6 +395,71 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   });
   flush(lines.length);
   return <div className="sub-log" ref={logRef}>{rendered}</div>;
+}
+
+// SubTaskJobDiagnostics renders the persisted job snapshot of a FAILED
+// sub-task: the exit code, the machine-readable failure reason and the
+// complete log.
+//
+// Why this exists: the in-memory job log is lost on a backend restart and
+// the live SSE stream only carries what happened *after* the page was
+// opened. Before this panel, a failed sub-task showed one line — a bare
+// "Claude exited abnormally: exit status 143" — with no way to tell
+// whether the CLI had crashed, been killed by the stall watchdog, or
+// terminated by NovaWorkbench itself.
+function SubTaskJobDiagnostics({ job }: { job: RunJob }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState<boolean>(false);
+
+  const kindLabel = (() => {
+    switch (job.error_kind) {
+      case 'stalled': return t('components.subTaskPanel.errorKindStalled');
+      case 'idle-timeout': return t('components.subTaskPanel.errorKindIdleTimeout');
+      case 'terminated': return t('components.subTaskPanel.errorKindTerminated');
+      default: return job.error_kind
+        ? `${t('components.subTaskPanel.errorKindUnknown')} (${job.error_kind})`
+        : '-';
+    }
+  })();
+
+  const duration = (() => {
+    const started = Date.parse(job.started_at || '');
+    const finished = Date.parse(job.finished_at || '');
+    if (Number.isNaN(started) || Number.isNaN(finished) || finished < started) return '-';
+    const ms = finished - started;
+    return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+  })();
+
+  const logText = (job.log || [])
+    .map((l) => (l.type === 'error' ? `❌ ${l.content}` : l.content))
+    .join('\n');
+
+  return (
+    <section className="sub-diag">
+      <div className="sub-diag-header">
+        <span className="sub-diag-title">{t('components.subTaskPanel.jobDiagnostics')}</span>
+        <span className="sub-diag-meta">
+          <span>{t('components.subTaskPanel.exitCode')}: {job.exit_code}</span>
+          <span>{t('components.subTaskPanel.errorKind')}: {kindLabel}</span>
+          <span>{t('components.subTaskPanel.duration')}: {duration}</span>
+        </span>
+      </div>
+      <div className="sub-diag-hint">{t('components.subTaskPanel.jobDiagnosticsHint')}</div>
+      <button
+        type="button"
+        className="sub-diag-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {open
+          ? t('components.subTaskPanel.fullLogCollapse')
+          : `${t('components.subTaskPanel.fullLog')} (${(job.log || []).length})`}
+      </button>
+      {open && (
+        <pre className="sub-diag-log">{logText || '-'}</pre>
+      )}
+    </section>
+  );
 }
 
 // v0.5.x: 三段折叠区组件——理解 / 实施 / 小结每段都是一个本地小组件。
@@ -956,6 +1023,12 @@ function SubTaskCard({
   // when the card has finished and SSE has gone quiet. We display
   // `live ?? fallback` so refresh-after-finish still shows the same bar.
   const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
+  // Durable job snapshot for a FAILED run. The in-memory JobStore is lost on
+  // a backend restart, but `job_logs` survives — so on failure we fetch
+  // /api/wizard/jobs/{id} once and render the exit code, the machine-readable
+  // error kind and the complete log. Before this existed a failed sub-task
+  // showed exactly one line (a bare "exit status 143") and nothing else.
+  const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
   // 'pending' now always means "queued behind the project's concurrency gate":
   // the orchestration tick deliberately leaves a row pending rather than
@@ -1021,6 +1094,14 @@ function SubTaskCard({
               at: Date.now(),
             }));
           }
+          // A failed run pulls the durable job snapshot: exit code,
+          // error_kind and the complete persisted log. The in-memory job is
+          // gone after a backend restart — job_logs is what survives.
+          if (evt && (evt as any).status === 'error' && st.job_id) {
+            wizardApi.getJob(st.job_id)
+              .then((job) => { setJobDiag(job); })
+              .catch(() => { /* diagnostics are best-effort */ });
+          }
           subTasksApi.get(st.requirement_id, st.id)
             .then((next) => { setArtifact(next.artifact); onChanged(next); })
             .catch(() => { /* keep last-known state */ });
@@ -1071,6 +1152,23 @@ function SubTaskCard({
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.job_id, st.id, st.requirement_id]);
+
+  // A row that was ALREADY failed when the card mounted (page refresh, or
+  // the failure happened while the browser tab was closed) has no live SSE
+  // history at all — pull the durable job snapshot so the diagnostics block
+  // shows up in that case too. job_logs survives a backend restart, so this
+  // is the only source of truth once the in-memory job is gone.
+  useEffect(() => {
+    if (streaming) return;
+    if (st.status !== 'error' || !st.job_id) return;
+    if (jobDiag) return;
+    let cancelled = false;
+    wizardApi.getJob(st.job_id)
+      .then((job) => { if (!cancelled) setJobDiag(job); })
+      .catch(() => { /* diagnostics are best-effort */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, st.status, st.job_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
@@ -1761,6 +1859,11 @@ function SubTaskCard({
             <div ref={logAnchorRef}>
               <SubTaskLogView lines={lines} />
             </div>
+          )}
+
+          {/* Run diagnostics — failed runs only, read from the durable job log. */}
+          {!streaming && jobDiag && (
+            <SubTaskJobDiagnostics job={jobDiag} />
           )}
 
           {/* v0.5.x: brief-result block — 手动子任务在「简洁」模式下（report_mode='brief'）

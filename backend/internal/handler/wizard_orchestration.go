@@ -1350,7 +1350,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			usage:         childUsage,
 		})
 	} else {
-		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, nil, 0, codingStallTimeout)
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 	}
 
 	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
@@ -1381,8 +1381,12 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	} else if out.errMsg != "" {
 		status = model.SubTaskStatusError
 		artifactBody = "❌ " + out.errMsg
-		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+		if out.IdleTimeoutHit {
+			job.SetErrorKind("idle-timeout")
+		} else if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 			job.SetErrorKind("stalled")
+		} else if out.killReason == killReasonTeardown || out.killReason == killReasonHardTimeout {
+			job.SetErrorKind("terminated")
 		}
 	} else if out.finalResult == "" {
 		status = model.SubTaskStatusError
@@ -1390,10 +1394,12 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	}
 	if status != model.SubTaskStatusError {
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		// "✅ 子任务完成！" only on the success path — see the matching note
+		// in SubTaskRunner.finishSubTask.
+		job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 	} else {
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 	}
-	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
 	tokens := model.SubTaskTokens{
@@ -1428,12 +1434,16 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// row was correctly terminal, and /api/wizard/active-jobs polled by
 	// the requirement detail page kept showing the "Claude 工作中"
 	// badge (job_logs.status is what the persistent view reads).
-	job.Finish(0, store.JobDone)
+	if status == model.SubTaskStatusError {
+		job.Finish(1, store.JobError)
+	} else {
+		job.Finish(0, store.JobDone)
+	}
 	lines, jstatus, exitCode := job.Snapshot()
-	if perr := h.jobLogSvc.Save(job.ID, reqID, string(jstatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
+	if perr := h.jobLogSvc.Save(job.ID, reqID, string(jstatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName, job.ErrorKind); perr != nil {
 		log.Printf("[orch-joblog] %s: persist failed job_id=%s err=%v", st.ID, job.ID, perr)
 	} else {
-		log.Printf("[orch-joblog] %s: persisted job_id=%s status=%s exit=%d", st.ID, job.ID, jstatus, exitCode)
+		log.Printf("[orch-joblog] %s: persisted job_id=%s status=%s exit=%d kind=%s", st.ID, job.ID, jstatus, exitCode, job.ErrorKind)
 	}
 	log.Printf("[orchestrate] child %s (batch %s seq %d) finished status=%s", st.ID, batch.ID, st.BatchSeq, status)
 }

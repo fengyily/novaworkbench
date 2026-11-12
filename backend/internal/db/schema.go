@@ -1137,6 +1137,14 @@ var alterColumns = []string{
 	// Review jobs are project-level (not bound to a requirement), so the review
 	// model is persisted on the durable job log instead of the requirement row.
 	`ALTER TABLE job_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+	// error_kind records WHY a job failed, in a machine-readable form:
+	// "stalled" (the stream went silent and the watchdog killed it),
+	// "idle-timeout" (the rolling idle ctx cancelled the run), or
+	// "terminated" (we stopped it ourselves and it never produced a result).
+	// Before this column existed a failed job was persisted as status=done /
+	// exit_code=0 with an "✅ 完成" line in the same log — the durable record
+	// contradicted the failure the user saw.
+	`ALTER TABLE job_logs ADD COLUMN error_kind TEXT NOT NULL DEFAULT ''`,
 	// Model pricing is bound to each Claude config (platform): the models
 	// column carries per-model input/output unit prices, and currency is the
 	// accounting unit for that platform (USD/CNY; empty = not yet set).

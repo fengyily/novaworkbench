@@ -104,7 +104,7 @@ func (h *MergeHandler) persistJob(job *store.Job, reqID, model string) {
 		return
 	}
 	lines, status, exitCode := job.Snapshot()
-	if perr := h.jobLogSvc.Save(job.ID, reqID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+	if perr := h.jobLogSvc.Save(job.ID, reqID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model, job.ErrorKind); perr != nil {
 		log.Printf("[merge] failed to persist job log %s: %v", job.ID, perr)
 	}
 }

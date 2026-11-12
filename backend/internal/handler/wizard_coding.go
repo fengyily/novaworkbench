@@ -482,7 +482,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// `model` local that would shadow the model package.
 		lines, status, exitCode := job.Snapshot()
 		log.Printf("[start-coding] defer-Save job_id=%s req_id=%s status=%s exit=%d lines=%d", job.ID, p.RequirementID, status, exitCode, len(lines))
-		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model, job.ErrorKind); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 		} else {
 			log.Printf("[start-coding] defer-Save OK job_id=%s", job.ID)
@@ -1647,7 +1647,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
-	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, nil, 0, codingStallTimeout)
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 
 	// No-branch mode promises "develop directly on <base>". The agent does not
 	// always honour that: on 2026-10-24 it created `fix/<reqID>`, pushed it,
@@ -2005,7 +2005,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			// Persist the finished job's full log so a backend restart doesn't
 			// wipe the adjustment record (same durability pattern as StartCoding).
 			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model, job.ErrorKind); perr != nil {
 				log.Printf("[adjust-coding] failed to persist job log %s: %v", job.ID, perr)
 			}
 			// Clear coding_job_id on terminal — keeps the column from
@@ -2152,7 +2152,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, nil, 0, codingStallTimeout)
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
 		// or too old). Surface a clear error rather than silently starting a
@@ -2372,7 +2372,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			// StartCoding / AdjustCoding). This is what "fills back" the lost
 			// development record after a restart.
 			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model, job.ErrorKind); perr != nil {
 				log.Printf("[continue-coding] failed to persist job log %s: %v", job.ID, perr)
 			}
 			// Clear coding_job_id on terminal — keeps the column from
@@ -2480,7 +2480,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, nil, 0, codingStallTimeout)
+		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 
 		// Stale --resume: the coding session file is gone. Surface a clear error
 		// rather than silently starting fresh — the user can still 重新开发

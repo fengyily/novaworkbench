@@ -85,7 +85,7 @@ func TestJobLogModelRoundTrip(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	status, exitCode, startedAt, finishedAt, model, gotLines, err := jobSvc.Get("job_abc")
+	status, exitCode, startedAt, finishedAt, model, errorKind, gotLines, err := jobSvc.Get("job_abc")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -95,10 +95,53 @@ func TestJobLogModelRoundTrip(t *testing.T) {
 	if status != "done" || exitCode != 0 {
 		t.Errorf("status=%q exitCode=%d", status, exitCode)
 	}
+	if errorKind != "" {
+		t.Errorf("errorKind = %q, want empty for a successful job", errorKind)
+	}
 	if len(gotLines) != 1 || gotLines[0].Content != "review body" {
 		t.Errorf("lines = %+v", gotLines)
 	}
 	if startedAt == "" || finishedAt == "" {
 		t.Errorf("timestamps empty: started=%q finished=%q", startedAt, finishedAt)
+	}
+}
+
+// TestJobLogErrorKindRoundTrip pins the durable failure reason. Before the
+// error_kind column existed, a failed job was persisted as status=done /
+// exit_code=0 — the record contradicted the failure the user actually saw.
+func TestJobLogErrorKindRoundTrip(t *testing.T) {
+	d := newTestDB(t)
+	jobSvc := NewJobLogService(d)
+
+	now := time.Now()
+	lines := []store.LogLine{{Type: "error", Content: "❌ Claude 异常退出: exit status 143"}}
+	if err := jobSvc.Save("job_fail", "", "error", 1, now, now, lines, "", "stalled"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	status, exitCode, _, _, _, errorKind, gotLines, err := jobSvc.Get("job_fail")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if status != "error" || exitCode != 1 {
+		t.Errorf("status=%q exitCode=%d, want error/1", status, exitCode)
+	}
+	if errorKind != "stalled" {
+		t.Errorf("errorKind = %q, want stalled", errorKind)
+	}
+	if len(gotLines) != 1 || gotLines[0].Type != "error" {
+		t.Errorf("lines = %+v", gotLines)
+	}
+
+	// A second Save on the same job must update the row, not duplicate it.
+	if err := jobSvc.Save("job_fail", "", "error", 1, now, now, lines, "", "terminated"); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	_, _, _, _, _, errorKind, _, err = jobSvc.Get("job_fail")
+	if err != nil {
+		t.Fatalf("get after re-save: %v", err)
+	}
+	if errorKind != "terminated" {
+		t.Errorf("errorKind after re-save = %q, want terminated", errorKind)
 	}
 }

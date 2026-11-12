@@ -847,7 +847,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				Resume:         true,
 				AddDirs:        h.grantDirsFor(reqID, ""),
 			})
-			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, nil, 0, codingStallTimeout)
+			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 		}
 
 		if out.staleSession {

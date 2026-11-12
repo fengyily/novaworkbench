@@ -1989,6 +1989,11 @@ export interface RunJob {
   // DefaultModelLabel literal). Present for review jobs; empty for wizard jobs that
   // predate the column or were never given one.
   model?: string;
+  // Machine-readable failure reason: "stalled" (the stream went silent and
+  // the watchdog killed it), "idle-timeout" (the rolling idle ctx cancelled
+  // the run) or "terminated" (we stopped it ourselves before it produced a
+  // result). Empty for a successful job.
+  error_kind?: string;
   started_at: string;
   finished_at: string;
 }

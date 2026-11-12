@@ -104,6 +104,19 @@ export const components = {
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
     stalledHint: "Claude stream went silent and the watchdog terminated the sub-task. Use Continue or Redo to retry, or check whether the task triggered an unusually long IO (npm install, large file edit).",
+    // Run diagnostics block — the persisted job snapshot of a failed sub-task
+    // (exit code / machine-readable failure reason / complete log).
+    jobDiagnostics: 'Run diagnostics',
+    jobDiagnosticsHint: 'The complete run record of this failed sub-task, read from the durable job log (it survives a backend restart).',
+    exitCode: 'Exit code',
+    errorKind: 'Failure reason',
+    duration: 'Duration',
+    fullLog: 'Full log',
+    fullLogCollapse: 'Collapse full log',
+    errorKindStalled: 'Stream went silent (watchdog terminated it)',
+    errorKindIdleTimeout: 'Idle timeout (idle watchdog terminated it)',
+    errorKindTerminated: 'Terminated by NovaWorkbench before any result',
+    errorKindUnknown: 'Unknown reason',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 Main agent is generating the summary report…',
     bannerSummaryFailed: '❌ Summary report generation failed — click to retry',

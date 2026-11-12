@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -55,6 +56,129 @@ func resolveStallTimeout(override []time.Duration) time.Duration {
 	return defaultStallTimeout
 }
 
+// Kill reasons.
+//
+// runClaudeStream can terminate the claude subprocess from several places.
+// Until now the only thing the caller saw was the resulting exit code, which
+// made every early termination look identical: the Claude Code CLI installs
+// `process.on("SIGTERM", … this.shutdown(143))`, so a SIGTERM shows up as a
+// *normal* exit with code 143 — i.e. Go reports "exit status 143", not
+// "signal: terminated". Any run whose stdout stream ended early was therefore
+// reported as "Claude 异常退出: exit status 143", which blames the CLI for a
+// kill *we* performed.
+//
+// These constants let the post-mortem name the actual cause.
+const (
+	// killReasonNone means "nobody killed it" — the CLI exited on its own.
+	killReasonNone = ""
+	// killReasonWatchdog means the stall watchdog fired (stream went silent).
+	killReasonWatchdog = "watchdog"
+	// killReasonGuard means the run was aborted by a safety guard.
+	killReasonGuard = "guard"
+	// killReasonTeardown means the stream ended without a result and we
+	// terminated the (still-running) process group during cleanup.
+	killReasonTeardown = "teardown"
+	// killReasonHardTimeout means the sub-task's absolute wall-clock cap fired.
+	killReasonHardTimeout = "hard-timeout"
+)
+
+const (
+	// streamExitGrace is how long we wait for the claude CLI to exit on its
+	// own after the stdout stream ended without a result. Only after this
+	// grace period do we terminate the process group ourselves — so the exit
+	// code we report is the CLI's own truth whenever it managed to exit.
+	streamExitGrace = 1500 * time.Millisecond
+	// streamExitHardGrace is how long we wait after SIGTERM before forcing
+	// the child down. The Claude CLI handles SIGTERM (it exits 143), but a
+	// wedged child must never hang the caller.
+	streamExitHardGrace = 5 * time.Second
+)
+
+// claudeStreamOpt tunes a single runClaudeStream call. Options replaced the
+// old trailing `stallTimeoutOverride ...time.Duration` variadic so callers can
+// also hand in their own kill-reason recorder (needed by the sub-task hard
+// timeout, which terminates the child from outside runClaudeStream).
+type claudeStreamOpt func(*claudeStreamCfg)
+
+// claudeStreamCfg collects the effective options of one runClaudeStream call.
+type claudeStreamCfg struct {
+	// stallTimeoutOverride holds the requested stall (silence) windows; the
+	// first one wins, matching resolveStallTimeout's historical contract.
+	stallTimeoutOverride []time.Duration
+	// killReason, when non-nil, is the recorder runClaudeStream must use so
+	// an externally performed kill is attributed to its real cause.
+	killReason *claudeKillReason
+}
+
+// withStallTimeout overrides the per-stream stall (silence) window.
+func withStallTimeout(d ...time.Duration) claudeStreamOpt {
+	return func(c *claudeStreamCfg) {
+		c.stallTimeoutOverride = append(c.stallTimeoutOverride, d...)
+	}
+}
+
+// withKillReason hands the caller its own kill-reason recorder. The recorder
+// is first-write-wins, so the caller's reason (e.g. "hard-timeout") is not
+// overwritten by runClaudeStream's later teardown kill.
+func withKillReason(k *claudeKillReason) claudeStreamOpt {
+	return func(c *claudeStreamCfg) { c.killReason = k }
+}
+
+// claudeKillReason records which code path terminated the claude subprocess.
+// First write wins: the watchdog / guard / hard-timeout are all "real" causes
+// and must not be overwritten by the later cleanup kill.
+type claudeKillReason struct {
+	mu sync.Mutex
+	s  string
+}
+
+// set records the kill reason. The first non-empty reason sticks.
+func (k *claudeKillReason) set(reason string) {
+	if k == nil || reason == "" {
+		return
+	}
+	k.mu.Lock()
+	if k.s == "" {
+		k.s = reason
+	}
+	k.mu.Unlock()
+}
+
+// get returns the recorded reason ("" when nobody killed the process).
+func (k *claudeKillReason) get() string {
+	if k == nil {
+		return ""
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.s
+}
+
+// syncBuffer is a concurrency-safe bytes.Buffer.
+//
+// os/exec copies the child's stderr into cmd.Stderr from its own goroutine,
+// while runClaudeStream's scan loop reads the same buffer from the caller's
+// goroutine. A plain bytes.Buffer is not safe for concurrent use, so the
+// stderr text we read for diagnostics was a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write implements io.Writer for os/exec's stderr copy goroutine.
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// String returns the captured stderr so far.
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // stallErrorMessage formats the post-loop user-facing error. When the
 // watchdog fired it returns a "stream went silent" message that names the
 // effective window; otherwise it returns the legacy "Claude 异常退出: ..."
@@ -70,20 +194,98 @@ func stallErrorMessage(wasStalled bool, stallTimeout time.Duration, exitErr erro
 	return msg
 }
 
+// terminationDiagnostics renders the one-line diagnostic that accompanies
+// every abnormal termination. It is deliberately terse: it goes straight into
+// the job log / sub-task artifact, where the user has to read it in a card.
+//
+// Field order is fixed so the line is greppable and diffable across runs.
+func terminationDiagnostics(o claudeStreamOutcome, exitCode int, stderrTrim string) string {
+	stderrPart := "(空)"
+	if s := strings.TrimSpace(stderrTrim); s != "" {
+		stderrPart = truncateStr(s, 500)
+	}
+	reasonPart := o.killReason
+	if reasonPart == "" {
+		reasonPart = "none"
+	}
+	return fmt.Sprintf(
+		"诊断：耗时=%s 事件数=%d 最后事件类型=%s stdout结束=%s stderr=%s 退出码=%d 终止原因=%s",
+		o.elapsed.Round(time.Millisecond), o.streamEventCount, emptyAsDash(o.lastEventType),
+		emptyAsDash(o.stdoutEnded), stderrPart, exitCode, reasonPart,
+	)
+}
+
+// emptyAsDash renders an empty string as "-" so the diagnostic line keeps a
+// stable column layout.
+func emptyAsDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// terminationMessage builds the user-facing error for a run that ended
+// without a result.
+//
+// The four cases are deliberately distinct, because conflating them is what
+// produced the useless "Claude 异常退出: exit status 143" the user hit:
+//
+//  1. watchdog fired     → "流静默" (stallErrorMessage's watchdog branch)
+//  2. we killed it       → "被 NovaWorkbench 中止" — NOT a CLI crash
+//  3. the CLI exited     → legacy "Claude 异常退出: …" (kept verbatim so
+//     on its own          existing log-grep alerts keep matching)
+//  4. idle timeout       → handled by the caller (IdleTimeoutHit)
+//
+// A diagnostic line is appended to every case.
+func terminationMessage(o claudeStreamOutcome, stallTimeout time.Duration, exitErr error, stderrTrim string) string {
+	var msg string
+	switch {
+	case o.stalledByWatchdog != nil && o.stalledByWatchdog.Load():
+		msg = stallErrorMessage(true, stallTimeout, exitErr, stderrTrim)
+	case o.killReason == killReasonTeardown:
+		msg = "Claude 未返回结果即被中止（NovaWorkbench 收尾时终止了进程组）；不是 Claude 自己崩溃。请查看下方诊断信息。"
+	case o.killReason == killReasonHardTimeout:
+		msg = "Claude 未返回结果即被中止（达到子任务总时长上限）；请查看下方诊断信息。"
+	default:
+		msg = stallErrorMessage(false, stallTimeout, exitErr, stderrTrim)
+	}
+	return msg + "\n\n" + terminationDiagnostics(o, exitCodeOf(exitErr), stderrTrim)
+}
+
+// exitCodeOf extracts the numeric exit code from an *exec.ExitError.
+// Returns -1 when the error isn't an exit error (or the process was killed by
+// a signal, in which case Go reports "signal: …" instead of a code).
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
 // runStallWatchdog owns the timer/heartbeat/kill loop used by runClaudeStream.
 // It is a separate function (instead of an inline goroutine) so tests can
 // inject a fake beatFn / killFn / short timeout and assert behavior in
 // milliseconds instead of minutes.
 //
-// The returned *atomic.Bool is flipped to true the instant the timer fires
-// and killFn is invoked. Callers read it after stopping the watchdog so they
-// can branch on whether the kill was due to a stall vs. another abnormal
-// exit. The goroutine itself is intentionally fire-and-forget; the caller is
+// The stalled flag is flipped to true the instant the timer fires and killFn
+// is invoked. The flag is passed IN by the caller (and also returned) so the
+// caller can read the very same atomic the watchdog flips — the previous
+// wiring created its own atomic inside the helper and dropped it on the
+// floor, which left `error_kind=stalled` and the "流静默" message as dead
+// code.
+//
+// The goroutine itself is intentionally fire-and-forget; the caller is
 // expected to coordinate its lifetime via the heartbeats channel (close to
 // stop cleanly) and an outer watchdogDone close (matching the inline shape
 // the previous implementation had).
-func runStallWatchdog(scope string, stallTimeout time.Duration, heartbeats <-chan struct{}, killFn func()) *atomic.Bool {
-	stalled := &atomic.Bool{}
+func runStallWatchdog(scope string, stallTimeout time.Duration, heartbeats <-chan struct{}, killFn func(), stalled *atomic.Bool) *atomic.Bool {
+	if stalled == nil {
+		stalled = &atomic.Bool{}
+	}
 	go func() {
 		// Arming matches the inline implementation the helper replaced:
 		// the timer doesn't start counting until the first heartbeat arrives
@@ -533,7 +735,31 @@ type claudeStreamOutcome struct {
 	eventCount       int    // total NDJSON events parsed (any type)
 	streamEventCount int    // subset that are stream_event
 	lastEventType    string // type field of the most recent event, used for EOF postmortem
-	planContent      string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// killReason names the code path that terminated the claude subprocess
+	// (killReasonWatchdog / killReasonGuard / killReasonTeardown /
+	// killReasonHardTimeout). Empty means "the CLI exited on its own" — the
+	// only case where its exit code is a genuine death cause. See
+	// claudeKillReason.
+	killReason string
+	// stdoutEnded explains why the stdout scan loop stopped:
+	// "result" (a result event arrived), "eof" (the CLI closed stdout),
+	// "scan-error" (reading stdout failed), "guard" (a safety guard aborted
+	// the run). Distinguishing eof from scan-error is what tells us whether
+	// the CLI closed its output or our pipe broke.
+	stdoutEnded string
+	// scanErr holds scanner.Err() when the stdout read failed. Never
+	// checked before this change, so the real cause of an early loop exit
+	// was silently swallowed.
+	scanErr string
+	// elapsed is the wall-clock duration of the run.
+	elapsed time.Duration
+	// stderrText holds the child's stderr (trimmed) at the end of the run.
+	stderrText string
+	// sawAssistant is true once an assistant or result event was seen —
+	// i.e. the model was actually reached. A run that fails without it
+	// never got a model response.
+	sawAssistant bool
+	planContent  string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// streamText accumulates every text fragment the assistant emits via
 	// stream_event text_delta or assistant-event text blocks. Populated as
 	// text lands so a plan-mode run whose model streamed the plan but did
@@ -816,13 +1042,23 @@ type streamGuard interface {
 	GuardToolUse(toolName string, input map[string]interface{}) string
 }
 
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, toolResultMax int, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, toolResultMax int, opts ...claudeStreamOpt) claudeStreamOutcome {
+	cfg := claudeStreamCfg{}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	runStart := time.Now()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
 	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	// syncBuffer, not bytes.Buffer: os/exec writes the child's stderr from
+	// its own copy goroutine while this function reads it from the caller's
+	// goroutine.
+	stderrBuf := &syncBuffer{}
+	cmd.Stderr = stderrBuf
 	// Put the claude subprocess in its own process group so we can kill the
 	// whole group (claude + any tool/MCP subprocesses it spawned). Some
 	// third-party proxies keep the upstream connection open after the model's
@@ -852,7 +1088,20 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 
 	var out claudeStreamOutcome
 	var tk thinkingCollector
-	out.stalledByWatchdog = &atomic.Bool{}
+	// The atomic the watchdog actually flips. It MUST be the same object we
+	// hand to out.stalledByWatchdog — otherwise the "流静默" message and
+	// error_kind=stalled stay dead code.
+	stalledFlag := &atomic.Bool{}
+	out.stalledByWatchdog = stalledFlag
+	// killReason records who terminated the subprocess (see claudeKillReason).
+	// When the caller supplied its own recorder (e.g. the sub-task hard
+	// timeout, which kills the child from the outside) we use that one, so
+	// the attribution survives into the final message.
+	var localKillReason claudeKillReason
+	killReason := &localKillReason
+	if cfg.killReason != nil {
+		killReason = cfg.killReason
+	}
 	// thinkingTokens tracks the last token count we reported so we can
 	// throttle thinking_tokens progress messages (every 50 tokens).
 	var lastThinkingReport int
@@ -869,7 +1118,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// The actual timer/heartbeat/kill loop lives in runStallWatchdog (see
 	// file header comment) so the behavior is unit-testable without spawning
 	// a real subprocess.
-	stallTimeout := resolveStallTimeout(stallTimeoutOverride)
+	stallTimeout := resolveStallTimeout(cfg.stallTimeoutOverride)
 	log.Printf("[%s] stall watchdog window=%v", scope, stallTimeout)
 	var heartbeats chan struct{}
 	var ownHeartbeats bool
@@ -887,7 +1136,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
-		runStallWatchdog(scope, stallTimeout, heartbeats, func() { killProcessGroup(cmd) })
+		runStallWatchdog(scope, stallTimeout, heartbeats, func() {
+			killReason.set(killReasonWatchdog)
+			killProcessGroup(cmd)
+		}, stalledFlag)
 	}()
 	beat := func() {
 		select {
@@ -915,6 +1167,8 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			if reason := guard.CheckStreamHealth(); reason != "" {
 				log.Printf("[%s] guard aborted run: %s", scope, reason)
 				out.errMsg = reason
+				out.stdoutEnded = "guard"
+				killReason.set(killReasonGuard)
 				killProcessGroup(cmd)
 				break
 			}
@@ -1009,6 +1263,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				}
 			}
 		case "assistant":
+			// The model was reached — record it so the post-mortem can tell
+			// "the request never left the machine" from "it was sent and the
+			// reply never came".
+			out.sawAssistant = true
 			// The "assistant" event is a batched summary of the full turn. When the
 			// model supports streaming (stream_event/content_block_delta), text is
 			// already delivered incrementally and we skip it here. When the model
@@ -1041,6 +1299,8 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 						if reason := guard.GuardToolUse(toolName, input); reason != "" {
 							log.Printf("[%s] guard blocked tool %s: %s", scope, toolName, reason)
 							out.errMsg = reason
+							out.stdoutEnded = "guard"
+							killReason.set(killReasonGuard)
 							killProcessGroup(cmd)
 							break // out of the content-block loop
 						}
@@ -1123,6 +1383,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			}
 			tk.endTurn()
 		case "result":
+			out.sawAssistant = true
 			subtype, _ := evt["subtype"].(string)
 			// The CLI sometimes emits subtype:"success" even when the upstream
 			// proxy rejected the request — it carries api_error_status (a number),
@@ -1229,15 +1490,24 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		}
 	}
 
-	// Stop the stall watchdog and tear the process group down. The CLI may
-	// still be alive (proxy held the connection open), and tool/MCP
-	// grandchildren may still hold the stdout pipe open; killing the group
-	// unblocks cmd.Wait() and lets us return what we captured.
+	// Why did the stdout scan loop stop? Without this the post-mortem only
+	// knows "exit status 143", which says nothing about who killed the CLI.
+	if serr := scanner.Err(); serr != nil {
+		out.scanErr = serr.Error()
+		out.stdoutEnded = "scan-error"
+	} else if out.stdoutEnded == "" {
+		if gotResult {
+			out.stdoutEnded = "result"
+		} else {
+			out.stdoutEnded = "eof"
+		}
+	}
+
+	// Stop the stall watchdog before tearing the process group down.
 	if ownHeartbeats {
 		close(heartbeats)
 	}
 	<-watchdogDone
-	killProcessGroup(cmd)
 	// If the caller passed in an external heartbeats channel (rolling ctx
 	// from llm.GenerateCode), close it now so the watcher's select{ok}
 	// branch fires and the goroutine exits cleanly.
@@ -1245,14 +1515,63 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		close(externalHeartbeats)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		stderrTrim := strings.TrimSpace(stderrBuf.String())
-		log.Printf("[%s] claude exited: %v stderr=%s", scope, err, stderrTrim)
+	// Two different teardown shapes, on purpose:
+	//
+	//   success path — the CLI already delivered its result. It may still be
+	//     alive (the proxy held the connection open) and tool/MCP
+	//     grandchildren may still hold the stdout pipe open, so we kill the
+	//     group to unblock cmd.Wait(). The exit code is not consulted here
+	//     (finalResult is already set), so this kill is harmless.
+	//
+	//   failure path — the stream ended without a result. We must NOT kill
+	//     first and then report the exit code: the Claude CLI treats SIGTERM
+	//     as a *normal* exit (code 143), and the only local SIGTERM source is
+	//     our own teardown kill. Killing first therefore rewrote every early
+	//     exit into a bogus "Claude 异常退出: exit status 143" that blamed the
+	//     CLI for our own SIGTERM. Instead we give the CLI a short grace
+	//     window to exit on its own, so its exit code is its own truth; only
+	//     if it is still alive do we terminate it — and then we say so.
+	var waitErr error
+	if gotResult {
+		killProcessGroup(cmd)
+		waitErr = cmd.Wait()
+	} else {
+		waitCh := make(chan error, 1)
+		go func() { waitCh <- cmd.Wait() }()
+		select {
+		case waitErr = <-waitCh:
+			// The CLI exited on its own — killReason stays empty and the
+			// exit code is genuinely the CLI's.
+		case <-time.After(streamExitGrace):
+			killReason.set(killReasonTeardown)
+			killProcessGroup(cmd)
+			select {
+			case waitErr = <-waitCh:
+			case <-time.After(streamExitHardGrace):
+				// The CLI ignored SIGTERM — force it so the caller never
+				// hangs on a wedged child.
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				waitErr = <-waitCh
+			}
+		}
+	}
+
+	out.killReason = killReason.get()
+	out.elapsed = time.Since(runStart)
+	out.stderrText = strings.TrimSpace(stderrBuf.String())
+
+	if waitErr != nil {
+		stderrTrim := out.stderrText
+		log.Printf("[%s] claude exited: %v stderr=%s | elapsed=%s events=%d last=%s stdout=%s killReason=%s scanErr=%s assistant=%t",
+			scope, waitErr, stderrTrim, out.elapsed.Round(time.Millisecond), out.streamEventCount,
+			emptyAsDash(out.lastEventType), emptyAsDash(out.stdoutEnded),
+			emptyAsDash(out.killReason), emptyAsDash(out.scanErr), out.sawAssistant)
 		// A non-zero exit is only fatal if we never got a result; some error
-		// events still carry a usable result field. When the stall watchdog
-		// was the cause of the kill, prefer a "stream went silent" message
-		// over the generic "signal: terminated" so the user (and the UI's
-		// stalled-banner branch) can tell the two cases apart.
+		// events still carry a usable result field. The wording distinguishes
+		// "we terminated it" from "it died on its own", so the UI can show a
+		// dedicated banner instead of blaming the CLI for our SIGTERM.
 		if out.finalResult == "" && out.errMsg == "" {
 			wasStalled := out.stalledByWatchdog.Load()
 			// Idle-timeout heuristic: the rolling ctx in llm.GenerateCode
@@ -1262,9 +1581,13 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			// activity before the silence, surface the "idle 超时" message
 			// instead of "异常退出" so the UI's banner / error_kind branch
 			// can pick a dedicated diagnostic.
+			//
+			// The killReason check matters: when *we* killed the child (hard
+			// timeout → ctx cancel → SIGKILL), the SIGKILL is our own doing,
+			// not evidence of stream idleness.
 			idleHit := false
-			if !wasStalled && out.streamEventCount > 0 {
-				if exitErr, ok := err.(*exec.ExitError); ok {
+			if !wasStalled && out.killReason == "" && out.streamEventCount > 0 {
+				if exitErr, ok := waitErr.(*exec.ExitError); ok {
 					if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 						if ws.Signaled() && ws.Signal() == syscall.SIGKILL {
 							idleHit = true
@@ -1276,7 +1599,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				out.IdleTimeoutHit = true
 				out.errMsg = fmt.Sprintf("本地 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时；最后事件类型=%q", out.streamEventCount, out.lastEventType)
 			} else {
-				out.errMsg = stallErrorMessage(wasStalled, stallTimeout, err, stderrTrim)
+				out.errMsg = terminationMessage(out, stallTimeout, waitErr, stderrTrim)
 			}
 		}
 	}
