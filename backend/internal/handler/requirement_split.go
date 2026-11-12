@@ -33,8 +33,12 @@ import (
 // JobStore（jobs），这四样 WizardHandler 全都有；RequirementHandler 缺前两样。
 //
 // 主路径是本地 claude CLI（禁写工具，只能读仓库把文件路径坐实）；CLI 不可用
-// 时降级到直接 HTTP LLM 通道。v1 仅本地执行 —— 拆分只需要主需求的设计文档，
-// 不需要远端环境（对 CLAUDE.md 的「ExecEnv 约定」的显式豁免，与阶段答疑同款）。
+// 时降级到直接 HTTP LLM 通道。
+//
+// 执行环境由用户在 UI 上选：留空 = 本机执行（上面的主路径）；填了
+// agent_server_id = 跑在那台 Agent Server 上。远端路径是**只读**运行 ——
+// scratch clone + 一次 nova-agent-worker 调用，与远端 Review 同构
+// （见 requirement_split_remote.go）。
 
 // splitSplitStallTimeout — 拆分这一轮的静默看门狗时限。
 //
@@ -51,7 +55,27 @@ type SplitReq struct {
 	Model string `json:"model"`
 	// ClaudeConfigID — 用户在 UI 上选的 Claude 配置（空 = 用当前激活配置）。
 	ClaudeConfigID string `json:"claude_config_id"`
+	// AgentServerID — 用户在 UI 上选的执行环境（空 = 本机执行）。
+	// 拆分是只读运行，远端走 scratch clone + nova-agent-worker，
+	// 与远端 Review 同构（见 requirement_split_remote.go）。
+	AgentServerID string `json:"agent_server_id"`
 }
+
+// splitExecTarget 描述这一轮拆分跑在哪里。
+type splitExecTarget struct {
+	// Remote = true 表示跑在 Agent Server 上。
+	Remote bool
+	// AgentServerID — Remote 为 true 时非空。
+	AgentServerID string
+}
+
+// splitExecFunc — 拆分这一轮「跑一次 AI + 解析候选」的执行体。
+//
+// 生产为 nil → execSplitTasks 走默认实现（本地 claude CLI / 远端 nova-agent-worker）。
+// 测试注入假实现来断言「用户选的执行环境有没有被真正用上」—— WizardHandler.llm
+// 是具体类型 *llm.Gateway、SSH 也是具体类型 *gossh.Client，没有别的替身方式。
+type splitExecFunc func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string)
 
 // ConfirmSplitReq — POST /api/requirements/{id}/split/confirm 的请求体。
 type ConfirmSplitReq struct {
@@ -287,8 +311,12 @@ func splitPreconditionError(req *model.Requirement) (code, msg string) {
 	return "", ""
 }
 
-// runSplit is the goroutine body: build the prompt, run the CLI (falling back
-// to the HTTP channel), parse the result and publish it on the job.
+// runSplit is the goroutine body: build the prompt, run the split (locally or
+// on an Agent Server), parse the result and publish it on the job.
+//
+// It is deliberately split into three phases — prepare / execute / publish —
+// so the execution layer (execSplitTasks) is the single place where the
+// "local vs remote" decision lives.
 func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body SplitReq, st *splitState) {
 	defer st.locks.release(reqRow.ID)
 
@@ -318,9 +346,60 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	}
 
 	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing)
-	workDir := h.splitWorkDir(reqRow)
+	usage := h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID)
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在分析方案并拆分任务…"})
+
+	tasks, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, usage)
+	if errMsg != "" {
+		h.finishSplitError(job, st, errMsg)
+		return
+	}
+	if len(tasks) == 0 {
+		h.finishSplitError(job, st, "未能从技术方案中解析出候选子需求，请调整方案后重试")
+		return
+	}
+
+	if len(tasks) > splitMaxCandidates {
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⚠️ 候选超过 %d 条，已截断", splitMaxCandidates)})
+		tasks = tasks[:splitMaxCandidates]
+	}
+
+	st.results.set(job.ID, tasks)
+	job.Append(store.LogLine{Type: "message", Content: prompt.SplitSummary(tasks)})
+	job.Finish(0, store.JobDone)
+}
+
+// execSplitTasks is the single place where the split's execution environment
+// is decided: an empty agent_server_id means "run on this machine", anything
+// else means "run on that Agent Server".
+//
+// The injectable h.splitExec short-circuits the whole thing — production
+// leaves it nil and the default local / remote implementations run.
+func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement, body SplitReq,
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	target := splitExecTarget{AgentServerID: strings.TrimSpace(body.AgentServerID)}
+	target.Remote = target.AgentServerID != ""
+	if h.splitExec != nil {
+		return h.splitExec(job, reqRow, target, promptText, systemPrompt, modelName, configID, usage)
+	}
+	if target.Remote {
+		return h.runRemoteSplitTasks(job, reqRow, target.AgentServerID, promptText, systemPrompt, modelName, configID, usage)
+	}
+	return h.runLocalSplitTasks(job, reqRow, promptText, systemPrompt, modelName, configID, usage)
+}
+
+// runLocalSplitTasks runs the split on this machine: the claude CLI with the
+// write tools disabled (it may only read the repository so it can ground the
+// scope in real file paths), falling back to the direct HTTP LLM channel when
+// the CLI produced nothing parseable.
+//
+// The fallback is the local path's last line of defense — it can only reach
+// the HTTP channel from here, which is why the remote path has no such
+// fallback (see requirement_split_remote.go).
+func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Requirement,
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	workDir := h.splitWorkDir(reqRow)
 
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:         promptText,
@@ -334,9 +413,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
 	})
 
-	out := runClaudeStream(jobSink{job}, cmd, "requirement-split",
-		h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID),
-		nil, nil, 0, splitSplitStallTimeout)
+	out := runClaudeStream(jobSink{job}, cmd, "requirement-split", usage, nil, nil, 0, splitSplitStallTimeout)
 
 	jsonPart, _ := extractTrailingJSON(out.finalResult)
 	if strings.TrimSpace(jsonPart) == "" {
@@ -350,24 +427,15 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		job.Append(store.LogLine{Type: "phase", Content: "⚠️ 本地 CLI 未产出可解析的拆分结果，改用直接 LLM 通道重试…"})
 		raw, ferr := h.llm.ExtractSubRequirementsFromDesign(reqRow.DesignDocs, out.errMsg)
 		if ferr != nil {
-			h.finishSplitError(job, st, "拆分失败: "+ferr.Error())
-			return
+			return nil, "拆分失败: " + ferr.Error()
 		}
 		tasks = prompt.NormalizeSplitTasks(raw)
 		if len(tasks) == 0 {
-			h.finishSplitError(job, st, "未能从技术方案中解析出候选子需求，请调整方案后重试")
-			return
+			return nil, "未能从技术方案中解析出候选子需求，请调整方案后重试"
 		}
 	}
 
-	if len(tasks) > splitMaxCandidates {
-		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⚠️ 候选超过 %d 条，已截断", splitMaxCandidates)})
-		tasks = tasks[:splitMaxCandidates]
-	}
-
-	st.results.set(job.ID, tasks)
-	job.Append(store.LogLine{Type: "message", Content: prompt.SplitSummary(tasks)})
-	job.Finish(0, store.JobDone)
+	return tasks, ""
 }
 
 // finishSplitError reports a failed split on the job stream.

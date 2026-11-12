@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -363,5 +365,213 @@ func TestListChildren_ReturnsChildrenAndDependencies(t *testing.T) {
 	}
 	if len(resp.Data.Dependencies) != 1 {
 		t.Fatalf("got %d dependencies, want 1", len(resp.Data.Dependencies))
+	}
+}
+
+// ── 执行环境（本地 / Agent Server）分流 ────────────────────────────────────
+//
+// The split used to run the claude CLI on this machine and nothing else —
+// the UI had no way to say "run it over there". Now the request body carries
+// an agent_server_id and the handler routes accordingly.
+//
+// These tests inject a fake executor through h.splitExec. That is the ONLY
+// way to assert the routing without spawning a real claude subprocess or
+// opening an SSH connection: WizardHandler.llm is a concrete *llm.Gateway and
+// the SSH client is a concrete *gossh.Client — neither has an interface to
+// substitute.
+
+// splitStartJob runs the Split handler with a custom request body and returns
+// the HTTP status plus the id of the job the handler created.
+//
+// splitErrorCode covers the refusal path (it always posts "{}" and reads the
+// error envelope); this one covers the happy path, where the response carries
+// a job id instead of an error code.
+func splitStartJob(t *testing.T, h *WizardHandler, reqID, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/"+reqID+"/split", strings.NewReader(body))
+	req.SetPathValue("id", reqID)
+	rec := httptest.NewRecorder()
+	h.Split(rec, req)
+	if rec.Code != http.StatusOK {
+		return rec.Code, ""
+	}
+	var env struct {
+		Data struct {
+			JobID string `json:"job_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	return rec.Code, env.Data.JobID
+}
+
+// waitSplitJob polls the job store until the split job reaches a terminal
+// state. The split runs in a goroutine, so the HTTP response comes back long
+// before the AI run finishes.
+//
+// The status and the log come from Job.Snapshot() — the job's exported
+// fields are written under the job's own lock, so reading them directly from
+// the test would be a data race.
+func waitSplitJob(t *testing.T, h *WizardHandler, jobID string) (store.JobStatus, []store.LogLine) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		job, ok := h.jobs.Get(jobID)
+		if !ok {
+			t.Fatalf("job %s is not in the store", jobID)
+		}
+		log, status, _ := job.Snapshot()
+		if status != store.JobRunning {
+			return status, log
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s did not finish within 3s (status = %q)", jobID, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The agent server the user picked in the UI must actually reach the
+// execution layer — together with the model / claude config the user picked.
+func TestSplit_UsesSelectedAgentServer(t *testing.T) {
+	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+
+	type captured struct {
+		target   splitExecTarget
+		model    string
+		configID string
+	}
+	got := make(chan captured, 1)
+	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		got <- captured{target: target, model: modelName, configID: configID}
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+	}
+
+	status, jobID := splitStartJob(t, h, "req_m",
+		`{"agent_server_id":"agent_x","model":"m2","claude_config_id":"c2"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if jobID == "" {
+		t.Fatal("the response carries no job_id")
+	}
+
+	var c captured
+	select {
+	case c = <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the split executor was never called")
+	}
+	if !c.target.Remote {
+		t.Errorf("target.Remote = false, want true")
+	}
+	if c.target.AgentServerID != "agent_x" {
+		t.Errorf("target.AgentServerID = %q, want agent_x", c.target.AgentServerID)
+	}
+	if c.model != "m2" {
+		t.Errorf("model = %q, want m2", c.model)
+	}
+	if c.configID != "c2" {
+		t.Errorf("configID = %q, want c2", c.configID)
+	}
+
+	jobStatus, jobLog := waitSplitJob(t, h, jobID)
+	if jobStatus != store.JobDone {
+		t.Errorf("job status = %q, want done; log = %v", jobStatus, jobLog)
+	}
+}
+
+// Without an agent server the split stays on this machine — and the model the
+// user picked still wins over the architect persona's default.
+func TestSplit_WithoutAgentServerRunsLocally(t *testing.T) {
+	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+
+	type captured struct {
+		target splitExecTarget
+		model  string
+	}
+	got := make(chan captured, 1)
+	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		got <- captured{target: target, model: modelName}
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+	}
+
+	status, jobID := splitStartJob(t, h, "req_m", `{"model":"m2"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if jobID == "" {
+		t.Fatal("the response carries no job_id")
+	}
+
+	var c captured
+	select {
+	case c = <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the split executor was never called")
+	}
+	if c.target.Remote {
+		t.Errorf("target.Remote = true, want false")
+	}
+	if c.target.AgentServerID != "" {
+		t.Errorf("target.AgentServerID = %q, want empty", c.target.AgentServerID)
+	}
+	if c.model != "m2" {
+		t.Errorf("model = %q, want m2", c.model)
+	}
+
+	jobStatus, jobLog := waitSplitJob(t, h, jobID)
+	if jobStatus != store.JobDone {
+		t.Errorf("job status = %q, want done; log = %v", jobStatus, jobLog)
+	}
+}
+
+// A failed remote run must end the job as an error and leave no candidates
+// behind — the UI reads the candidate list off the job result.
+func TestSplit_RemoteFailureEndsJobWithError(t *testing.T) {
+	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+
+	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		return nil, "远端失败"
+	}
+
+	status, jobID := splitStartJob(t, h, "req_m", `{"agent_server_id":"agent_x"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if jobID == "" {
+		t.Fatal("the response carries no job_id")
+	}
+
+	jobStatus, jobLog := waitSplitJob(t, h, jobID)
+	if jobStatus != store.JobError {
+		t.Errorf("job status = %q, want error; log = %v", jobStatus, jobLog)
+	}
+	// No candidates were published — the modal must not offer stale rows.
+	if candidates := h.splitState().results.get(jobID); len(candidates) != 0 {
+		t.Errorf("candidates = %v, want none", candidates)
+	}
+}
+
+// The remote path needs the agent-server service; without it the split must
+// fail with a message that names the missing piece instead of panicking.
+func TestRunRemoteSplitTasks_WithoutAgentServerService(t *testing.T) {
+	h := &WizardHandler{}
+	job := store.NewJobStore(1).Create("req_m")
+	reqRow := &model.Requirement{ID: "req_m", ProjectID: "proj_split"}
+
+	tasks, errMsg := h.runRemoteSplitTasks(job, reqRow, "agent_x", "prompt", "", "m", "c", nil)
+	if errMsg == "" {
+		t.Fatal("expected an error message, got none")
+	}
+	if !strings.Contains(errMsg, "Agent 服务器") {
+		t.Errorf("error = %q, want it to mention Agent 服务器", errMsg)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("tasks = %v, want none", tasks)
 	}
 }

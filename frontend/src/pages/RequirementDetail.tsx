@@ -6943,6 +6943,15 @@ export default function RequirementDetail() {
           baseBranch={req.base_branch || project?.default_branch || ''}
           masterBranch={req.branch_name || defaultBranchName(req.id, kindOf(req))}
           branches={availableBranches}
+          // The split runs against a model / execution environment the user
+          // picks in the modal's config stage. Seed them from the design
+          // toolbar so the modal opens on the same choices the page already
+          // made for this requirement.
+          agentServers={agentServers}
+          initialModel={architectModel}
+          initialConfigId={architectConfigId}
+          initialAgentServerId={designAgentServerId}
+          initialModelName={architectDefaultModel}
           onConfirmed={() => {
             setSplitOpen(false);
             // The split created new children — bump the panel's reload token
