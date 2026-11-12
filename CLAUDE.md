@@ -92,9 +92,9 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `settings` / `claude_configs` / `weekly_reports` / `job_logs` / `token_usage` | (PK=key) / `ccfg_` / - / (PK=job_id) / `tu_` | KV 设置 / 多 Claude 配置 / 项目周报 / Job 持久化日志 / LLM token 用量 |
 | `users` / `acl_role_permissions` / `acl_user_roles` / `user_projects` / `sessions` | `usr_` / 复合 PK / 复合 PK / 复合 PK / 32-byte hex | ACL 用户(含 `locale`) / 角色-权限 / 用户-角色 / 用户-项目授权 / **session token**(非 JWT) |
 | `project_stars` | 复合 PK(`user_id`+`project_id`) | **按用户**的项目星标(`/projects` 置顶 + Dashboard 排序);`user_id` 刻意不加外键(`NOVA_AUTH_DISABLED` 注入的合成 `admin` 在 `users` 中无行),`Purge` 显式清理 |
-| `skills` / `agent_servers` / `sub_tasks` / `orchestration_batches` / `scheduled_tasks` | `skill_` / `agent_` / `st_` / `ob_` / `sched_` | AI Skills(`.claude/agents/`) / 远端 Agent 主机(凭据 AES-256-GCM 加密) / 需求子任务 / 子任务批派发 / 定时任务(design/coding/design_and_coding) |
+| `skills` / `agent_servers` / `sub_tasks` / `orchestration_batches` / `scheduled_tasks` | `skill_` / `agent_` / `st_` / `ob_` / `sched_` | AI Skills(`.claude/agents/`) / 远端 Agent 主机(凭据 AES-256-GCM 加密) / 需求子任务(`task_kind` 区分普通实现 / 需求级 Review 轮次) / 子任务批派发 / 定时任务(design/coding/design_and_coding) |
 | `issue_monitors` / `issue_monitor_pending_launches` | `im_` / `imp_` | GitHub Issue 监控配置 / 待启动开发的 Issue 队列 |
-| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定 + `claude_session_id` 供追问 `--resume`) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
+| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review + **需求级 Review**(`review_type='requirement'`,带 `requirement_id`/`role_key`)共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定 + `claude_session_id` 供追问 `--resume`) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
 | `code_review_followups` | `crf_` | **Review 追问**(一行一问一答,`resumed` 记录是否续接了原 Review 会话;`CodeReviewService.Delete` 显式清理,不依赖 SQLite 不生效的 FK CASCADE) |
 | `code_review_revisions` | `crr_` | **Review 报告版本**(一行一版,`rev_no` 按 review 从 1 递增,`trigger_kind` 区分 `initial`/`regenerate`;`code_reviews` 只存「当前版」,所有既有读路径不变,本表是其身后的历史——这正是「基于对话重新生成」敢点的原因:被替换的那版仍可读、可切回。`trigger_kind` 而非 `trigger`,后者在 MySQL 是保留字) |
 | `requirement_qa_turns` | `qat_` | **阶段答疑轮次**(一行一问一答,`stage` 区分 design/coding;`session_id` 是本轮运行的 QA 会话(首问 fork 时预铸),`source_session_id` 是 fork 来源的阶段会话快照,`resumed` 记录本轮是否真的续接了会话上下文;源会话重跑后 `source_session_id` 失配 → 自动重新 fork,旧轮保留。**本表 `session_id` 是答疑流程唯一写入的会话列**——`requirements.design_session_id`/`coding_session_id` 全程只读,答疑零污染) |
@@ -153,6 +153,45 @@ Review 有**两个入口、一套管线**,统一落到 `code_reviews` 表(`handl
 UI 由 `ProjectDetail` 的 Review tab 以 `<ProjectCodeReview projectId={id} project={project} />` 挂载 —— 对齐 `ProjectWeeklyReport` / `ProjectIssueMonitor` 的同类范式。`AttachmentPanel` 加了 `resource` prop(`'requirements' | 'code-reviews'`)复用整个面板。
 
 `ProjectCodeReview.tsx` 本身只是**容器**:持有 state / SSE / handler,四块面板拆在 `pages/codeReview/`(`ReviewComposer` 范围+验证材料+高级 / `ReviewReport` 结论+证据+图+问题清单 / `ReviewChat` 追问+重新生成 / `ReviewHistory`),外加 `shared.ts`(`SEVERITIES` / `deriveVerdict` / `extractMermaidBlocks` / `isBlankDraft`)。几条不显然的约定:**草稿行自动创建**——`crv_` 行只是附件的 owner,从前要用户先点「创建草稿」,等于把表结构当成了工作流步骤;现在选定分支后防抖自动建,`ensureDraft` 用 ref 缓存在途 promise,让防抖定时器与「开始 Review」按钮抢同一行(否则在防抖窗口内点开始会多出一行空草稿),没填任何内容的空草稿由 `isBlankDraft` 从历史表里过滤掉并提供一键清理。**导出**走 `utils/reviewExport.ts` 的 `buildReviewMarkdown`,它会把报告**重新拼装**(元信息 + 分级统计 + goal_checks + 由 `findings_json` 渲染的问题清单 + `result_md` + 追问附录)—— 契约块已经被后端从 `result_md` 里剥掉了,只导 `result_md` 会交出一份没有问题清单的报告;`.md` 走 Blob,PDF 复用 `exportDesignPdf`(它会预渲染 mermaid,所以改动概览图能进 PDF)。该文件里的 `rt()` 包装**不叫 `t`**:`scripts/check-i18n-keys.mjs` 扫字面量 `t('…')`,会把这些短 key 当成顶层 key。
+
+### 需求级 Review(Review 作为子任务 · 可选题身份/模型 → 修复子子任务 → 回归 Review)
+
+需求开发完成后,**在需求详情页**直接以「子任务」的方式发起 Review —— 不再需要记住分支名跑到项目页手写一遍「改动目标」。链路:
+
+```
+需求详情页 · 子任务面板 · 切「🔍 Review」→ 选身份/模型 → 启动
+  → code_reviews 行(review_type='requirement',requirement_id=req)
+  → sub_tasks 行(task_kind='review',review_id=crv,review_round=N)
+  → findings 转成修复子子任务(parent_subtask_id = 该 Review 子任务)
+  → 回归 Review(parent = 上一轮,round +1)→ 直到 P0/P1 清零
+```
+
+**不新造 Review 管线**:执行面复用 `SubTaskRunner`(闸门/会话/远端/thinking/计费/SSE 全现成),报告面复用 `code_reviews` 表 + `prompt.BuildReviewPrompt` + `review_parse.go` 的契约解析 —— 追问 / 重新生成 / 版本 / 导出 / 项目级历史全部零改动复用。
+
+关键设计点:
+
+- **`sub_tasks.task_kind`**(`'code'`|`'review'`)与 `source` 正交:`source` 记「派发来源」,`task_kind` 记「任务类型」。复用 `source` 会破坏 `FindRecentPushForReq` / `phaseEnabledForSource` 的既有语义。DEFAULT `'code'` ⇒ 存量行行为逐字不变。配套列:`review_id`(→ `code_reviews.id`)、`review_round`(回归轮次,修复子任务恒为 0)。**双向指针**:`code_reviews.requirement_id` + `sub_tasks.review_id`。
+- **`code_reviews.requirement_id` / `role_key`** —— `requirement_id` 空 = 项目级 Review(`ListByProject` 已加 `AND requirement_id = ''`,项目级历史列表不受影响);`role_key` = 用的哪个 AI persona(`roles.key`,默认 `reviewer`)。
+- **`subTaskRunSpec` 重构**(`handler/sub_task_runner.go`)—— `Run` 的 15 个位置参数收敛成结构体,`Run` 保留为**薄封装**(2 个调用点签名不变),新增 `RunReview` 复用同一骨架。差异只有三处:prompt(审查契约 vs `## 子任务`)、persona(用户选的身份 vs executor)、终态落库(报告写回 `code_reviews`)。`phaseEnabledForRun(kind, source)` 对 review 型恒 false —— 三段式指令会污染审查 prompt 并破坏尾部 JSON 契约。
+- **工作区范围模式**(`handler/review_scope.go`)—— 修复子任务改的是**未提交**的工作区,`git diff base...head` 看不到 ⇒ 回归 Review 会复核旧代码、「直到通过」永远不收敛。故范围是三段式:`base...head` + `git diff HEAD` + `git ls-files --others --exclude-standard`(未跟踪文件必须 Read)。ScopeBlock 会**替换** `BuildReviewPrompt` 默认的「对比区间 + 操作步骤」两段(不是追加),否则模型会按旧指令只看 diff。无本地 worktree 时降级 `refs` 模式并在 prompt / UI 明示「只覆盖已提交的改动」。
+- **v1 仅本地执行** —— 远端 Agent Server 只看得到 `origin`,回归 Review 会复核旧代码;选远端直接 400。需求本身在远端开发时,Review 仍跑本地(只覆盖本地可见的改动),job 日志明确提示。
+- **会话策略** —— 默认 `with_context`(新会话 + 需求/方案上下文块),**不 fork 开发者会话**:让 Reviewer 以独立身份看代码,这正是「身份可选择」的产品意义。
+- **通过判定** = `p0==0 && p1==0`(`service.ReviewVerdict`),**非持久化**字段 `verdict`,读时计算 —— 与前端 `pages/codeReview/shared.ts` 的 `deriveVerdict` 口径一致,不产生第二真相源。
+- **修复子任务**(`prompt.BuildFixPrompt`)—— 一条 finding 一个子任务;`session_mode='fork'` + 源会话 = `requirements.coding_session_id`(拿的是**开发者**的上下文,不是 Reviewer 的);执行环境跟随本地工作区(与下一次 Review 同树,否则循环不收敛)。
+- **findings_json 是数组** —— `code_reviews.findings_json` 存的是 `[]ReviewFinding`(从契约块里摘出来的),不是契约对象。解析要用 `parseFindingsArray`,**不是** `parseFindings`(后者解契约对象,喂数组必失败)。`parseFindingsArray` 同时做等级白名单(丢 P2 之类)。
+- **重启自愈** —— 后端重启会留下 `running` 的 Review 行:`CodeReviewService.RecoverInterruptedRunning()`(boot 时跑)把它翻成 `error`;子任务行由既有的 `SubTaskService.RecoverInterrupted()` 负责。
+- **通用重做/续接/追加调整对 review 型行一律 409**(`REVIEW_ROW`)—— 重跑一个 Review 子任务必须走「回归 Review」(新开一轮),否则会用 executor 人设跑出没人要的东西。
+
+**API**(`handler/review_subtask.go`,`RequirementReviewHandler`):
+
+| Method | Path | Body | 返回 |
+|---|---|---|---|
+| POST | `/api/requirements/{id}/reviews` | `{description, role_key?, model?, claude_config_id?, agent_server_id?, base_branch?, session_mode?}` | `{job_id, sub_task_id, review_id}` |
+| GET | `/api/requirements/{id}/reviews` | — | `[{review_id, sub_task_id, review_round, status, verdict, p0/p1/p3_count, goal_met, title, model, role_key, created_at, finished_at}]` |
+| POST | `/api/requirements/{id}/reviews/{rid}/fixes` | `{finding_ref?, severities?[]}` | `{sub_task_ids: [...]}` |
+| POST | `/api/requirements/{id}/reviews/{rid}/recheck` | `{model?, claude_config_id?, role_key?}` | `{job_id, sub_task_id, review_id}` |
+
+前端:`components/RequirementReviewCard.tsx`(verdict 横幅 / 分级 ledger / 问题清单 / 生成修复子任务 / 回归 Review)+ `components/ReviewIdentitySelect.tsx`(身份下拉)+ `SubTaskPanel` 的「普通子任务 | 🔍 Review」模式切换。**Review 模式只在 done 阶段的那次 `SubTaskPanel` 挂载开放**(`allowReview` prop)—— 需求页挂载了两次面板,否则同一页会出现两个 Review 入口。
 
 ### Role config (`roles` 表 + `acl_roles` 表 — 两个"角色"含义不同)
 
@@ -267,6 +306,24 @@ API：`POST /api/wizard/qa-chat`（返回 `{job_id, turn_id}`，流复用 `GET /
 - **vite.config.ts** — dev server proxies `/api` → `:9527`。
 - **Dockerfile** — `dev` (npm install + `vite --host`), `build` (tsc + vite build), `prod` (nginx serving `dist`)。
 
+### UI 一致性审计 (`scripts/ui-audit/`)
+
+全局复查前端「哪里不统一」的工具,只读、不改 UI。流程:**取证 → 判定 → 复核 → 落盘 → 建单**。
+
+- **取证** — `playwright-core` 驱动 Chromium 逐路由截图(`screenshots/<route>.png`),同时在页面内注入探针采集每个语义控件(`btn-primary` / `input-text` / `card` / `badge` …)的**计算样式指纹**;`manifest.json` 记录 git commit 与每张图的 sha256,证据可校验。
+- **判定** — 两类证据:**静态规则**(R1–R10、R13:调色板外硬编码色、令牌被写字面量、类名两套写法、通用类名落在页面私有样式表里、状态色双套词汇表、`<MarkdownRender>` 未挂 `.md-prose`…)与**运行时漂移**(R11:同一控件在不同页面的 computed style 不一致——这是用户真正感知的「不统一」)。`run.mjs check` 只跑静态规则,无需浏览器、无需模型、**也无需 npm install**(`run.mjs` 对浏览器驱动是懒加载),可作 CI 门禁(与 `baseline.json` 比对,只对**新增**违规失败)。每条规则自带稳定 `signature`(标识发现本身——类名、语义角色——而不是它提到的文件),否则改任何一个无关文件都会误报「新增违规」。
+- **复核** — `claude -p ... --dangerously-skip-permissions` 让模型 **Read 工具真的打开 PNG** 复核,剔除误报并把标题/描述/建议改写成用户视角;失败即降级为规则文案,不阻断建单。
+- **落盘 + 建单** — 截图与报告推到专用分支 `audit/ui-<run-id>` 的 `docs/ui-audit/<run-id>/`,Issue 正文用 raw 绝对 URL 嵌图;每条不一致点**单独**建一个 GitHub Issue(label `ui-audit` + 严重度),run-id 写进正文(`<!-- ui-audit-run: … -->`)用于去重。推送走**临时 git worktree**:不动当前 checkout 的分支,也不要求工作树干净(否则工具自己没提交时就推不了自己的证据)。分支**不要删**——Issue 里的截图链接指向它。
+
+```bash
+make ui-audit-deps                                     # 装 playwright-core(复用系统 Chrome,不下载浏览器)
+make ui-audit BASE_URL=http://localhost:9527            # 跑全流程并建 Issue
+make ui-audit-review  RUN_ID=20261025-2015             # 复用已有采集,只重跑模型复核
+make ui-audit-publish RUN_ID=20261025-2015             # 复用已有采集,只推证据+建单
+make ui-audit-check                                    # CI 门禁(无浏览器、无模型、无 npm install)
+```
+
+**约定**:新增样式一律走 `index.css` 的 `var(--token)`,通用类名(`btn-*` / `form-*` / `input-*`)必须定义在 `frontend/src/index.css` 而不是页面私有样式表——历史上 `.btn-secondary` 落在 `pages/Settings.css`,导致没 import 那张表的其他页面拿不到样式,同一个按钮在不同页面高度从 27px 到 54px 不等。
 ## Key Conventions
 
 - **API envelope**: every JSON response is `{success: bool, data: T, error: {code, message, suggestion?}}` via `writeJSON`/`writeError`. Throw on the client if `success` is false.

@@ -6722,6 +6722,11 @@ export default function RequirementDetail() {
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
+                  // The done-stage mount is the ONE that offers the
+                  // requirement-level Review. The developing-stage mount
+                  // above leaves it off, so the page never shows two Review
+                  // entry points at once.
+                  allowReview
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
@@ -6943,6 +6948,15 @@ export default function RequirementDetail() {
           baseBranch={req.base_branch || project?.default_branch || ''}
           masterBranch={req.branch_name || defaultBranchName(req.id, kindOf(req))}
           branches={availableBranches}
+          // The split runs against a model / execution environment the user
+          // picks in the modal's config stage. Seed them from the design
+          // toolbar so the modal opens on the same choices the page already
+          // made for this requirement.
+          agentServers={agentServers}
+          initialModel={architectModel}
+          initialConfigId={architectConfigId}
+          initialAgentServerId={designAgentServerId}
+          initialModelName={architectDefaultModel}
           onConfirmed={() => {
             setSplitOpen(false);
             // The split created new children — bump the panel's reload token

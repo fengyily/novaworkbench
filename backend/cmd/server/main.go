@@ -180,6 +180,7 @@ func main() {
 		log.Printf("[main] 回收了 %d 个因服务重启而中断的子任务", n)
 	}
 
+
 	// Seed the RBAC catalog (permissions / roles / bindings) and a default
 	// admin account on first run. The default admin password is printed once
 	// so the first login can bootstrap user/project assignment.
@@ -273,6 +274,16 @@ func main() {
 	// the user-written 改动目标 description, landing spot for the graded
 	// (P0/P1/P3) report.
 	codeReviewSvc := service.NewCodeReviewService(database, reviewAttachmentSvc)
+	// A requirement-level Review runs in an in-memory goroutine too, and its
+	// report lives in a DIFFERENT table (code_reviews). The sub-task orphan
+	// recovery (above) fixes the card; this one fixes the round's status, so
+	// the requirement page doesn't show a spinner for a round that died with
+	// the backend.
+	if n, err := codeReviewSvc.RecoverInterruptedRunning(); err != nil {
+		log.Printf("[main] requirement review orphan recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] 回收了 %d 个因服务重启而中断的需求级 Review", n)
+	}
 	// 追问 thread of a finished review — persisted because the JobStore that
 	// carries the live stream is memory-only.
 	codeReviewFollowupSvc := service.NewCodeReviewFollowupService(database)
@@ -485,6 +496,14 @@ func main() {
 	// tests keep working — and so a build that disables the requirement
 	// service simply exposes no /issues endpoint.
 	reviewH.SetRequirementSvc(reqSvc)
+	// 需求级 Review（Review 作为子任务）——独立的 handler，因为它拥有的是
+	// 「轮次链」这一层编排：建 Review 行 → 建 task_kind='review' 的子任务 →
+	// findings 转修复子子任务 → 回归 Review（round +1）。执行面复用同一个
+	// subTaskRunner，报告面复用同一张 code_reviews 表。
+	reqReviewH := handler.NewRequirementReviewHandler(
+		reqSvc, projectSvc, subTaskSvc, codeReviewSvc, codeReviewRevisionSvc,
+		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs,
+	)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
@@ -611,6 +630,16 @@ func main() {
 	mux.HandleFunc("POST /api/code-reviews/{rid}/issues", reviewH.CreateIssuesFromReview)
 	mux.HandleFunc("PUT /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.UpdateDescription)
 	mux.HandleFunc("DELETE /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.Delete)
+
+	// 需求级 Review: the requirement detail page can launch a Review as a
+	// SUB-TASK (task_kind='review'), turn its findings into fix sub-tasks,
+	// and re-review until P0/P1 are clear. The report itself lives in the
+	// same code_reviews table, so 追问 / 重新生成 / 版本 / 导出 keep working
+	// unchanged. See handler/review_subtask.go.
+	mux.HandleFunc("POST /api/requirements/{id}/reviews", reqReviewH.StartReview)
+	mux.HandleFunc("GET /api/requirements/{id}/reviews", reqReviewH.ListReviews)
+	mux.HandleFunc("POST /api/requirements/{id}/reviews/{rid}/fixes", reqReviewH.CreateFixes)
+	mux.HandleFunc("POST /api/requirements/{id}/reviews/{rid}/recheck", reqReviewH.Recheck)
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)

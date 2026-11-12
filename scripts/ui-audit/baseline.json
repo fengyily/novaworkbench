@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2026-11-01T12:05:45.422Z",
+  "note": "Known UI-convention violations at the time of writing. `run.mjs check` fails only on violations NOT listed here.",
+  "signatures": [
+    "R10::markdown::host",
+    "R13::shared-vocabulary::outside-global",
+    "R1::color::off-palette",
+    "R2::color::literal-token",
+    "R3::color::multi-spelling",
+    "R4::missing-style::.form-label",
+    "R4::missing-style::.input",
+    "R4::missing-style::.modal-label",
+    "R4::missing-style::.test-result",
+    "R5::naming::badge",
+    "R5::naming::btn",
+    "R5::naming::card",
+    "R5::naming::input",
+    "R5::naming::panel",
+    "R6::naming::box",
+    "R7::naming::header",
+    "R8::status::outside-badge:kind-badge,status-active,status-badge,status-chips,status-error",
+    "R8::status::parallel-vocabulary",
+    "R9::inline-style::density"
+  ]
+}

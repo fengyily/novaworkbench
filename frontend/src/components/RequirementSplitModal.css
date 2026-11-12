@@ -149,6 +149,45 @@
   gap: 4px 12px;
 }
 
+/* ── Config stage ──
+   The block that holds the model picker and the execution-environment
+   picker. It is shown BEFORE the AI split starts, so the user picks the
+   run's model / machine first. The BranchPicker (chip + rail vocabulary)
+   is defined in RequirementDetail.css; the rules below only stretch the
+   execution-environment card to the full width so it lines up with the
+   model card above it. */
+.req-split-config {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm);
+}
+.req-split-config-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.req-split-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.req-split-config-field:last-of-type {
+  margin-bottom: 8px;
+}
+.req-split-config-label {
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+}
+.req-split-config .preflight-field-card {
+  width: 100%;
+}
+.req-split-config .req-split-hint-muted {
+  display: block;
+  padding-top: 0;
+}
+
 @media (max-width: 900px) {
   .req-split-modal {
     min-width: 0;

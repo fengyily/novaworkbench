@@ -4,6 +4,7 @@ import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
 import {
   subTasksApi,
+  requirementReviewsApi,
   subTaskCliCommand,
   subTaskAdjustCommand,
   claudeApi,
@@ -22,6 +23,8 @@ import {
 } from '../api/client';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { ExecEnvBadge } from './ExecEnvBadge';
+import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentitySelect';
+import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { modelContextWindow } from '../utils/modelWindow';
@@ -33,6 +36,7 @@ import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
+import { stripArtifactHeader, stripArtifactCodeFence } from '../utils/subTaskArtifact';
 import './SubTaskPanel.css';
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
@@ -81,6 +85,15 @@ interface Props {
   // The composer defaults the choice to the parent requirement's
   // agent_server_id (inheritance) but lets the user override per sub-task.
   agentServers?: AgentServer[];
+  // Whether this panel may launch a requirement-level Review.
+  //
+  // The requirement page mounts the panel TWICE: once for the developing
+  // stage and once for the done stage. A Review is a "the work is finished,
+  // now grade it" action, so it belongs to the done-stage mount only —
+  // otherwise the user would find two Review entry points on the same page
+  // and have to guess which one to use. The developing-stage mount leaves
+  // this false and therefore shows no mode switch at all.
+  allowReview?: boolean;
 }
 
 // Tree-form lineage marker — Adjust / Redo / Continue produce a NEW
@@ -184,56 +197,7 @@ function extractFirstURL(s: string): string | null {
   return m ? m[0].replace(/[)\]]+$/, '') : null;
 }
 
-// stripArtifactHeader removes the 4-line Markdown header that
-// `buildSubTaskArtifact` (backend/internal/handler/wizard_subtask.go:1329-1351)
-// prepends to every artifact. The structured ReportHeader renders those
-// fields itself, so the body only carries Claude's raw output.
-//
-// Header shape (note \n\n between fields):
-//   # 子任务: <title>
-//   <blank>
-//   **提示词**: <prompt>
-//   <blank>
-//   **完成时间**: YYYY-MM-DD HH:MM:SS  **模型**: <model>
-//   <blank>
-//   ---
-//   <blank>
-//   <body>
-//
-// If the regex does not match (older artifact without # 子任务: line),
-// return md unchanged so the UI degrades to the legacy inline-bold view.
-function stripArtifactHeader(md: string): string {
-  if (!md) return md;
-  const header = /^# 子任务:[^\n]*\n\n(?:\*\*提示词\*\*:[^\n]*\n\n)?(?:\*\*完成时间\*\*:[^\n]*\*\*模型\*\*:[^\n]*\n\n)?---\n+/;
-  return md.replace(header, '');
-}
 
-// stripArtifactCodeFence unwraps a single triple-backtick code fence when
-// the artifact body is entirely wrapped in one. The LLM sometimes emits
-// its full response inside ```...``` (a formatting slip that's especially
-// common when the user asked for a Markdown table — the model wraps the
-// table "as code" to preserve column alignment). Without this, ReactMarkdown
-// treats the whole body as a single code block: tables, headings, lists all
-// collapse into monospace text and the user's "表格的形式输出" never renders
-// as a real <table>.
-//
-// Heuristic: the (trimmed) body must start with a single opening fence
-// (``` with optional language identifier) and end with a single closing
-// fence. We strip both, leaving the inner content — including any nested
-// ```code blocks``` from the assistant's thinking — untouched. We do NOT
-// fire when the body opens with a fence but lacks the matching closing
-// fence (that's a real code block the user asked for).
-function stripArtifactCodeFence(body: string): string {
-  if (!body) return body;
-  const trimmed = body.replace(/^\s+|\s+$/g, '');
-  // Anchored to ^ and $; non-greedy *? combined with the $ anchor still
-  // finds the LAST closing ``` because the engine expands the inner match
-  // until the suffix fits. This is exactly what we want for artifacts that
-  // contain nested code blocks — we only strip the outermost wrapper.
-  const m = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
-  if (!m) return body;
-  return m[1];
-}
 
 // timeAgo renders a small "N seconds ago / N minutes ago / N hours ago"
 // label, falling back to a full localized timestamp for very old rows.
@@ -705,6 +669,12 @@ interface CardProps {
   st: SubTask;
   index: number;
   total: number;
+  // The owning requirement id — the Review card needs it to call the
+  // requirement-scoped review endpoints (fixes / recheck).
+  requirementId: string;
+  // Whether this row is the TIP of the requirement's Review round chain.
+  // Only the tip may start the next round (see the panel-level derivation).
+  isLatestReviewRound?: boolean;
   // Depth inside the parent → children tree. 0 = root card; non-zero cards
   // are visually indented and get a left-edge connector line so the
   // hierarchy is glanceable. Driven by buildTree at the panel root; a
@@ -890,6 +860,8 @@ function SubTaskCard({
   st,
   index,
   total,
+  requirementId,
+  isLatestReviewRound = true,
   depth = 0,
   childCount = 0,
   isCollapsed = false,
@@ -1920,14 +1892,31 @@ function SubTaskCard({
             </section>
           )}
 
+          {/* The requirement-level Review round card — verdict / severity
+              ledger / findings list / create-fix-sub-tasks / re-check. The
+              report itself lives in the code_reviews row (the authoritative
+              source); this renders its STRUCTURED view. The full report plus
+              the follow-ups / regeneration / versions live on /reviews/:id. */}
+          {!streaming && (st.task_kind === 'review') && st.review_id && (
+            <RequirementReviewCard
+              requirementId={requirementId}
+              reviewId={st.review_id}
+              st={st}
+              isLatest={isLatestReviewRound}
+              onChanged={() => onCreated?.()}
+            />
+          )}
+
           {/* Finished-report card — replaces the legacy .sub-card-artifact
               dark slab with a structured white card: report header → metadata
               strip → body. stopped rows also flow through this branch since
               they have an artifact (with the "⏹ 用户中止" banner prefix).
               手动子任务（phase_emitted=true）已通过上方三段卡片完整呈现内容，
               此处隐藏 artifact body 以避免与三段卡片内容重复。brief 模式
-              （report_mode='brief'）也走上面的 sub-result 块，不进这里。 */}
-          {!streaming && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
+              （report_mode='brief'）也走上面的 sub-result 块，不进这里。
+              A Review round has its own card (above), so the prose body is
+              only a fallback here. */}
+          {!streaming && st.task_kind !== 'review' && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
             <div className={`sub-report is-status-${st.status}`}>
               <div className="sub-report-header">
                 <div className="sub-report-header-row">
@@ -1981,7 +1970,7 @@ function SubTaskCard({
               window is misleading: the row IS done, we just haven't
               fetched the artifact Markdown yet. The guard below matches
               the one above so the two branches stay symmetric. */}
-          {!streaming && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
+          {!streaming && st.task_kind !== 'review' && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
             <div className="sub-report-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
@@ -2102,7 +2091,7 @@ function isLongSummary(raw: string | undefined): boolean {
   return lines > 12 || chars > 1200;
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [] }: Props) {
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [], allowReview = false }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
   // Configured automatic-redo cap (设置 → 子任务). Read once per mount purely to
@@ -2117,6 +2106,19 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     return () => { cancelled = true; };
   }, []);
   const [prompt, setPrompt] = useState('');
+  // Composer mode. 'code' = an ordinary implementation sub-task (the
+  // historical behaviour); 'review' = a requirement-level Review launched
+  // as a sub-task.
+  //
+  // The two share one composer (one textarea, one model picker) but not one
+  // submit action: a Review needs a change-goal description and an identity,
+  // and it must NOT inherit the implementation sub-task's session-mode /
+  // report-mode knobs — a review has its own contract and its own report
+  // shape.
+  const [composerMode, setComposerMode] = useState<'code' | 'review'>('code');
+  // The AI persona the review runs under (roles.key). Default 'reviewer' —
+  // the same default the project-level Review uses.
+  const [reviewRoleKey, setReviewRoleKey] = useState(DEFAULT_REVIEW_ROLE_KEY);
 
   // --- Screenshot ingestion (paste / drop / file picker) -----------------
   // Parity with the create-requirement form's RichDescriptionEditor: any
@@ -2720,6 +2722,22 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setSubmitting(true);
     setError(null);
     try {
+      if (composerMode === 'review') {
+        // A requirement-level Review goes through its own endpoint: the
+        // backend creates the code_reviews row + the task_kind='review'
+        // sub-task and starts it. The live log reuses the existing job
+        // stream channel.
+        await requirementReviewsApi.start(requirementId, {
+          description: p,
+          role_key: reviewRoleKey || DEFAULT_REVIEW_ROLE_KEY,
+          ...(createModel ? { model: createModel } : {}),
+          ...(createConfigId ? { claude_config_id: createConfigId } : {}),
+        });
+        setPrompt('');
+        reset();
+        await loadList();
+        return;
+      }
       // No title field on the composer — the backend derives a card-header
       // title from the prompt's first 40 chars when title is omitted, so
       // the sub-task row still has a human-readable header downstream.
@@ -2763,7 +2781,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
+  }, [prompt, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -2775,6 +2793,21 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const reSplitEsRef = useRef<EventStream | null>(null);
 
   const anyAlive = !!items?.some((s) => s.status === 'running' || s.status === 'pending');
+
+  // isLatestReviewRound reports whether a review sub-task sits at the TIP of
+  // the requirement's round chain.
+  //
+  // Only the tip may start the next round: the chain grows at its tip, so
+  // re-checking an OLD round would mint a duplicate round number and fork
+  // the chain in two. The tip is the row with the highest review_round — the
+  // same rule the backend uses when it anchors a new round.
+  const isLatestReviewRound = useCallback((node: SubTask): boolean => {
+    if (node.task_kind !== 'review') return true;
+    const round = node.review_round || 0;
+    return !(items ?? []).some(
+      (it) => it.task_kind === 'review' && (it.review_round || 0) > round,
+    );
+  }, [items]);
 
   const onReSplit = useCallback(async () => {
     if (reSplitBusy) return;
@@ -3081,19 +3114,70 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {/* Mode switch — ordinary sub-task / Review.
+            A requirement-level Review is launched FROM this panel (as a
+            sub-task), so the entry point lives next to the ordinary
+            sub-task composer the user already knows. */}
+        {allowReview && (
+        <div className="sub-session-mode">
+          <span className="sub-session-mode-label" id="sub-composer-mode-label">
+            {t('components.subTaskPanel.composerMode.label')}
+          </span>
+          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-composer-mode-label">
+            {(['code', 'review'] as const).map((m) => {
+              const active = composerMode === m;
+              return (
+                <label
+                  key={m}
+                  className={`sub-session-mode-option${active ? ' is-active' : ''}`}
+                  title={t(`components.subTaskPanel.composerMode.${m}Hint`)}
+                >
+                  <input
+                    type="radio"
+                    name="composerMode"
+                    value={m}
+                    checked={active}
+                    onChange={() => setComposerMode(m)}
+                    disabled={submitting || reSplitBusy}
+                  />
+                  <span className="sub-session-mode-option-text">
+                    {t(`components.subTaskPanel.composerMode.${m}`)}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <span className="sub-session-mode-desc" role="note">
+            {t(`components.subTaskPanel.composerMode.${composerMode}Hint`)}
+          </span>
+        </div>
+        )}
         {/* Composer textarea — title field removed; opening a sub-task
             only needs a description. The backend auto-derives a card-header
-            title from the prompt's first 40 chars when title is omitted. */}
+            title from the prompt's first 40 chars when title is omitted.
+            In Review mode the same box carries the change-goal description —
+            the sole yardstick the reviewer grades "goal met" against. */}
         <AtMentionTextarea
           ref={promptAreaRef}
           value={prompt}
           onChange={setPrompt}
-          placeholder={t('components.subTaskPanel.composerPlaceholder')}
+          placeholder={t(composerMode === 'review'
+            ? 'components.subTaskPanel.reviewComposerPlaceholder'
+            : 'components.subTaskPanel.composerPlaceholder')}
           rows={4}
           disabled={submitting}
           onPaste={handlePaste}
           className="sub-composer-textarea"
         />
+        {/* The review identity (an AI persona). Review mode only — an
+            ordinary sub-task always runs as the executor role. */}
+        {composerMode === 'review' && (
+          <ReviewIdentitySelect
+            value={reviewRoleKey}
+            onChange={setReviewRoleKey}
+            disabled={submitting || reSplitBusy}
+          />
+        )}
         {/* Sub-task model picker — the SINGLE picker for the panel's
             composer row. It applies to BOTH the "Start sub-task" and
             "Re-split" buttons (they share the same claude_configs
@@ -3124,7 +3208,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             Defaults to the parent requirement's environment; switching to a
             different one runs the child from a fresh origin checkout of the
             requirement branch (see execEnvHint). */}
-        {agentServers.length > 0 && (
+        {composerMode === 'review' ? (
+          /* A requirement-level Review runs locally only: a remote host
+             sees just origin, so it cannot see the uncommitted fixes and a
+             re-check would re-grade stale code. */
+          <span className="sub-composer-env-hint" role="note">
+            {t('components.subTaskPanel.reviewLocalOnlyHint')}
+          </span>
+        ) : agentServers.length > 0 && (
           <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
             <span>{t('components.subTaskPanel.execEnvLabel')}</span>
             <ExecEnvSelect
@@ -3155,6 +3246,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             selected mode. Descriptions used to live inside every option as
             full-width hint spans, which made the block wrap into a ragged
             multi-row grid that looked unrelated to the rest of the composer. */}
+        {composerMode === 'code' && (
         <div className="sub-session-mode">
           <span className="sub-session-mode-label" id="sub-session-mode-label">
             {t('components.subTaskPanel.sessionMode.label')}
@@ -3196,9 +3288,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             </span>
           )}
         </div>
+        )}
         {/* v0.5.x: 报告详略分段控件——视觉与文案镜像上面的 session-mode
             控件（同一组 .sub-session-mode-* 类），只改 key。auto 是默认；
             brief 跳过三段指令和 phase tracker；full 强制三段。 */}
+        {composerMode === 'code' && (
         <div className="sub-session-mode">
           <span className="sub-session-mode-label" id="sub-report-mode-label">
             {t('components.subTaskPanel.reportMode.label')}
@@ -3227,6 +3321,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           </div>
           <span className="sub-session-mode-desc" role="note">{activeReportMode.desc}</span>
         </div>
+        )}
         {uploads.length > 0 && (
           <div className="sub-composer-uploads">
             {uploads.map((u) => (
@@ -3265,22 +3360,28 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onChange={handleFilesPicked}
           />
           {error && <span className="sub-composer-err">{error}</span>}
-          <button
-            type="button"
-            className="btn btn-secondary sub-composer-resplit"
-            onClick={onReSplit}
-            disabled={reSplitBusy || submitting || anyAlive}
-            title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
-          >
-            {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
-          </button>
+          {composerMode === 'code' && (
+            <button
+              type="button"
+              className="btn btn-secondary sub-composer-resplit"
+              onClick={onReSplit}
+              disabled={reSplitBusy || submitting || anyAlive}
+              title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
+            >
+              {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary sub-composer-submit"
             onClick={onCreate}
             disabled={submitting || reSplitBusy || !prompt.trim()}
           >
-            {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
+            {submitting
+              ? t('components.subTaskPanel.submitBusy')
+              : composerMode === 'review'
+                ? t('components.subTaskPanel.reviewSubmitBtn')
+                : t('components.subTaskPanel.submitBtn')}
           </button>
         </div>
       </div>
@@ -3299,6 +3400,8 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             st={tn.node}
             index={i}
             total={flat.length}
+            requirementId={requirementId}
+            isLatestReviewRound={isLatestReviewRound(tn.node)}
             depth={tn.depth}
             childCount={countDescendants(tn)}
             isCollapsed={collapsed.has(tn.node.id)}

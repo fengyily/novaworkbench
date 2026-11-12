@@ -76,3 +76,20 @@ jobs:
 
       - name: Typecheck + build
         run: npm run build
+
+  ui-audit:
+    name: ui-audit (convention gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The gate reads the frontend source and compares it against the
+      # recorded baseline. It needs neither a browser, nor the model, nor an
+      # npm install — `run.mjs` imports the browser driver lazily, so the
+      # check mode runs on a bare node.
+      - name: UI convention gate
+        run: node scripts/ui-audit/run.mjs check

@@ -61,6 +61,11 @@ type WizardHandler struct {
 	// idempotency lock. Initialized by NewWizardHandler; lazily created by
 	// splitState() for the partial handlers that tests build.
 	split *splitState
+	// splitExec — 拆分这一轮「跑一次 AI + 解析候选」的可注入执行体。
+	// nil = 走默认实现（本地 claude CLI / 远端 nova-agent-worker）。
+	// 仅供同包测试注入：WizardHandler.llm 是具体类型 *llm.Gateway、SSH 也是
+	// 具体类型 *gossh.Client，没有别的替身方式，所以分流只能靠这个接缝断言。
+	splitExec splitExecFunc
 	// batchSvc is the persistence layer for orchestration_batches — the
 	// coordinator row that groups N sub_tasks into one restart-safe dispatch
 	// run. tryAutoOrchestrate writes one alongside N sub_tasks in a single

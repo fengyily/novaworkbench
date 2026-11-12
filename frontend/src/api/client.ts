@@ -690,6 +690,43 @@ export interface SubTask {
   // 替换成 brief 或 full）。undefined = 老后端或非手动行，按 brief 不渲染
   // 三段区即可——配合 !phase_emitted 已覆盖。
   report_mode?: 'auto' | 'brief' | 'full';
+  // What KIND of work this row does: 'code' (the default — an ordinary
+  // implementation sub-task) or 'review' (a requirement-level Review round).
+  // Older backends omit the field; the panel then treats the row as 'code',
+  // so nothing changes for them.
+  task_kind?: 'code' | 'review';
+  // The code_reviews.id this row produced (only set on task_kind='review'
+  // rows). That table is the authoritative report; this field is just the
+  // pointer the sub-task card uses to fetch its own report.
+  review_id?: string;
+  // The regression round of a Review sub-task (1 for the first round, +1 per
+  // re-check). Fix sub-tasks stay at 0, so the round chain is made of Review
+  // nodes only.
+  review_round?: number;
+}
+
+// 需求级 Review 的一轮。GET /api/requirements/{id}/reviews 的元素类型。
+//
+// 它是 code_reviews 行的扁平投影：需求页用它渲染轮次链，完整报告另外从
+// GET /api/code-reviews/{rid} 取。
+export interface ReviewRound {
+  review_id: string;
+  sub_task_id: string;
+  review_round: number;
+  status: 'draft' | 'running' | 'done' | 'error';
+  // 'pass' (no P0/P1 left) / 'fail' (P0 or P1 outstanding) / 'pending' (still
+  // running) / 'error' (the run failed). Computed by the backend from the
+  // counts — the frontend never derives a second source of truth.
+  verdict: 'pass' | 'fail' | 'pending' | 'error';
+  p0_count: number;
+  p1_count: number;
+  p3_count: number;
+  goal_met: string;
+  title: string;
+  model: string;
+  role_key: string;
+  created_at: string;
+  finished_at?: string;
 }
 
 export const subTasksApi = {
@@ -829,6 +866,64 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/stream`,
       onMessage,
       onClose,
+    ),
+};
+
+// requirementReviewsApi — 需求级 Review（以子任务的方式发起）。
+//
+// 报告的权威源是 code_reviews 表，所以追问 / 重新生成 / 版本 / 导出全部复用
+// 既有的 codeReviewsApi；这里只有「以子任务的方式发起 / 转修复任务 / 回归」
+// 这三个需求级动作。
+export const requirementReviewsApi = {
+  // Start the first Review round. Returns a JobStore job_id (reuse
+  // /api/wizard/jobs/{job_id}/stream for the live log), a sub-task id and a
+  // code_reviews row id.
+  //
+  // agent_server_id is local-only for now: a remote host only sees origin, so
+  // it cannot see the uncommitted fixes and a re-check would re-grade stale
+  // code. The backend refuses a remote pick explicitly.
+  start: (
+    requirementId: string,
+    data: {
+      description: string;
+      role_key?: string;
+      model?: string;
+      claude_config_id?: string;
+      agent_server_id?: string;
+      base_branch?: string;
+      session_mode?: 'fork' | 'with_context';
+    },
+  ) =>
+    api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
+      `/api/requirements/${requirementId}/reviews`,
+      data,
+    ),
+  // The requirement's Review round chain, newest first.
+  list: (requirementId: string) =>
+    api.get<ReviewRound[]>(`/api/requirements/${requirementId}/reviews`),
+  // Turn the selected findings into fix sub-tasks (nested under that
+  // Review's sub-task). Omitting finding_ref / severities converts every
+  // P0 + P1.
+  createFixes: (
+    requirementId: string,
+    reviewId: string,
+    data: { finding_ref?: string; severities?: string[] },
+  ) =>
+    api.post<{ sub_task_ids: string[] }>(
+      `/api/requirements/${requirementId}/reviews/${reviewId}/fixes`,
+      data,
+    ),
+  // Re-check: starts another round (round +1, parented to the previous one).
+  // The scope is resolved AGAIN — the fixes changed the working tree, so
+  // reusing the previous round's scope would re-grade the old code.
+  recheck: (
+    requirementId: string,
+    reviewId: string,
+    data: { model?: string; claude_config_id?: string; role_key?: string } = {},
+  ) =>
+    api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
+      `/api/requirements/${requirementId}/reviews/${reviewId}/recheck`,
+      data,
     ),
 };
 
@@ -1539,7 +1634,10 @@ export const requirementsApi = {
   // split: start the AI split. Returns { job_id }; the candidate list arrives
   // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
   // carries `result.tasks`.
-  split: (id: string, body: { model?: string; claude_config_id?: string } = {}) =>
+  //
+  // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
+  // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
+  split: (id: string, body: { model?: string; claude_config_id?: string; agent_server_id?: string } = {}) =>
     api.post<{ job_id: string }>(`/api/requirements/${id}/split`, body),
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +
@@ -2103,7 +2201,7 @@ export const reviewApi = {
 // The run itself streams over reviewApi.streamJobUrl — there is no separate
 // SSE channel for branch reviews.
 export type CodeReviewStatus = 'draft' | 'running' | 'done' | 'error';
-export type CodeReviewType = 'branch' | 'pr';
+export type CodeReviewType = 'branch' | 'pr' | 'requirement';
 /** Grading ladder. P2 is intentionally unused — see prompt/review.go. */
 export type ReviewSeverity = 'P0' | 'P1' | 'P3';
 /** '' means the model didn't answer the 目标达成 question. */
@@ -2174,6 +2272,17 @@ export interface CodeReview {
   claude_config_id: string;
   /** Execution environment: '' = 本地, otherwise an agent_servers.id. */
   agent_server_id: string;
+  /**
+   * The requirement this review belongs to. '' = a project-level review
+   * (every pre-existing row). Set on review_type='requirement' rows, which
+   * the requirement detail page launches as a SUB-TASK.
+   */
+  requirement_id?: string;
+  /**
+   * The AI persona (roles.key) the review ran under — the identity the user
+   * picked in the requirement page. '' = the default 'reviewer' persona.
+   */
+  role_key?: string;
   /**
    * claude session id of the review's last run. Follow-up questions resume
    * it; '' means a 追问 will run fresh with the report pasted into its prompt

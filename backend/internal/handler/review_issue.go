@@ -81,12 +81,14 @@ func (h *ReviewHandler) CreateIssuesFromReview(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体解析失败")
 		return
 	}
-	// Parse findings from the review's persisted contract block. parseFindings
-	// is the same routine the run-time uses to count severities, so the
-	// finding indices we expose here are exactly the ones the report renders
-	// against — there's no risk of "the button created an issue for the wrong
-	// finding" because of a count drift.
-	findings, _, ok := parseFindings(rv.FindingsJSON)
+	// Parse the review's persisted findings. The column holds the findings
+	// ARRAY (not the contract object the run-time parses) — see
+	// parseFindingsArray. The array is the very one buildReviewOutcome
+	// produced from the contract, so the finding indices we expose here are
+	// exactly the ones the report renders against — there's no risk of "the
+	// button created an issue for the wrong finding" because of a count
+	// drift.
+	findings, ok := parseFindingsArray(rv.FindingsJSON)
 	if !ok {
 		writeError(w, http.StatusUnprocessableEntity, "FINDINGS_UNAVAILABLE",
 			"该 Review 报告未输出分级 JSON，无法按条目建 issue")

@@ -162,6 +162,44 @@ func parseFindings(jsonPart string) (findings []model.ReviewFinding, goalMet str
 	return findings, goalMet, true
 }
 
+// parseFindingsArray decodes the PERSISTED findings array
+// (code_reviews.findings_json).
+//
+// It is a DIFFERENT shape from the contract block parseFindings decodes:
+// the contract is the whole `{"goal_met":…,"findings":[…]}` object, while
+// the persisted column holds ONLY the `findings` array, re-marshalled by
+// buildReviewOutcome. Feeding the array to parseFindings fails — an array
+// cannot unmarshal into the contract struct — which is why this function
+// exists.
+//
+// The severity normalisation is the same rule parseFindings applies: an
+// unknown bucket ("P2"…) is dropped, so the three-way grouping stays total.
+//
+// ok=false means the column holds something that is not a findings array
+// (the model broke the contract and the column is empty, or a legacy row
+// stores the raw contract object). Callers then report "no structured
+// findings" rather than pretending the report is empty.
+func parseFindingsArray(findingsJSON string) (findings []model.ReviewFinding, ok bool) {
+	findingsJSON = strings.TrimSpace(findingsJSON)
+	if findingsJSON == "" {
+		return nil, false
+	}
+	var raw []model.ReviewFinding
+	if err := json.Unmarshal([]byte(findingsJSON), &raw); err != nil {
+		return nil, false
+	}
+	out := make([]model.ReviewFinding, 0, len(raw))
+	for _, f := range raw {
+		sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+		if sev != prompt.SevP0 && sev != prompt.SevP1 && sev != prompt.SevP3 {
+			continue
+		}
+		f.Severity = sev
+		out = append(out, f)
+	}
+	return out, true
+}
+
 // countBySeverity denormalises the three bucket sizes for code_reviews'
 // p0/p1/p3_count columns, so the history table renders without parsing
 // findings_json per row.
