@@ -97,6 +97,91 @@ func phaseEnabledForSource(source string) bool {
 	return source == model.SubTaskSourceManual || source == ""
 }
 
+// phaseEnabledForRun is phaseEnabledForSource plus the KIND gate.
+//
+// A requirement-level Review (task_kind='review') is a MANUAL row — it would
+// pass phaseEnabledForSource — but the three-section instruction block would
+// be actively harmful there: it asks the reviewer to emit
+// <<<UNDERSTANDING>>> / <<<IMPLEMENTATION>>> / <<<SUMMARY>>> fences, which
+// both pollutes the review prompt and breaks the trailing-JSON contract the
+// report parser relies on (the fenced block would be the last ```json-free
+// fence, so extractTrailingJSON's brace-match fallback would still work, but
+// the report body would carry three useless sections).
+//
+// So the tracker is gated OFF for review rows, exactly as it is for auto /
+// push_pr rows. The kind check lives in one place so no call site can forget
+// it.
+func phaseEnabledForRun(kind, source string) bool {
+	if kind == model.SubTaskKindReview {
+		return false
+	}
+	return phaseEnabledForSource(source)
+}
+
+// subTaskRunSpec bundles the parameters of ONE sub-task run.
+//
+// It exists because the run has grown two shapes that don't fit the old
+// positional signature: the plain implementation sub-task, and the
+// requirement-level Review (task_kind='review'), which runs a different
+// prompt, a different persona, a different tool set and a different
+// terminal bookkeeping. Fifteen positional booleans and strings for that is
+// how the two paths get mixed up.
+//
+// Run stays as a thin wrapper with its historical signature so its two
+// callers (wizard_subtask.go / merge.go) keep working untouched; RunReview
+// fills the Review-only fields.
+type subTaskRunSpec struct {
+	// body is the user's free-text sub-task description (the prompt body).
+	body string
+	// modelOverride wins over the developer role's configured model.
+	modelOverride string
+	// configIDOverride pins the claude_configs row the run uses.
+	configIDOverride string
+	// adjust flips the prompt header between "## 子任务" and "## 追加调整".
+	adjust bool
+	// fork controls the session-derivation strategy (see Run's docstring).
+	fork bool
+	// freshSession starts a new session and injects the parent context block.
+	freshSession bool
+	// bare starts a new session with no context and no role system prompt.
+	bare bool
+	// parentSourceSID is the parent sub-task's own source_session_id.
+	parentSourceSID string
+	// reportMode is the report-detail policy (auto / brief / full).
+	reportMode string
+
+	// ── Review-only fields ────────────────────────────────────────────────
+	// taskKind is model.SubTaskKindCode (default) or model.SubTaskKindReview.
+	taskKind string
+	// promptOverride replaces the whole "## 子任务 + body" prompt assembly.
+	// For a Review it is the full review contract prompt
+	// (prompt.BuildReviewPrompt + the resolved scope block).
+	promptOverride string
+	// systemPromptOverride replaces the executor role's persona. For a
+	// Review it is the persona of the identity the user picked
+	// (roles.key → system_prompt).
+	systemPromptOverride string
+	// roleKey is the roles.key the run used. Recorded for the audit trail;
+	// empty means the executor role (the historical default).
+	roleKey string
+	// disallowedTools blocks tool names for this run. A Review must not
+	// modify the code it is reviewing.
+	disallowedTools []string
+	// workDirOverride pins the working directory. A Review sets it because
+	// its diff scope was resolved BEFORE the run started — the prompt already
+	// describes a specific directory's diff, so the run has to read that same
+	// directory (see resolveReviewWorkDir).
+	workDirOverride string
+	// transformReport rewrites the raw model output into the artifact body.
+	// For a Review it strips the trailing JSON contract block so the card
+	// renders the report body only — the same口径 as the project-level
+	// Review's result_md.
+	transformReport func(finalResult string) (artifactBody string)
+	// onFinished runs after the terminal state has been persisted. For a
+	// Review it writes the report back onto the code_reviews row.
+	onFinished func(st *model.SubTask, out claudeStreamOutcome, artifactBody string)
+}
+
 // extractPRURL scans Claude's free-text finalResult line-by-line and returns
 // the first trimmed line beginning with `http://` or `https://`. Returns ""
 // when no such line exists.
@@ -765,6 +850,99 @@ func (r *SubTaskRunner) Run(
 	parentSourceSID string,
 	reportMode string,
 ) {
+	r.run(req, st, job, newSID, sourceSID, subTaskRunSpec{
+		body:             body,
+		modelOverride:    modelOverride,
+		configIDOverride: configIDOverride,
+		adjust:           adjust,
+		fork:             fork,
+		freshSession:     freshSession,
+		bare:             bare,
+		parentSourceSID:  parentSourceSID,
+		reportMode:       reportMode,
+		taskKind:         model.SubTaskKindCode,
+	})
+}
+
+// RunReview executes a requirement-level Review sub-task.
+//
+// It reuses the ENTIRE execution skeleton of a normal sub-task — the project
+// gate, the process-wide semaphore, the worktree resolution, the credential
+// injection, the streaming, the token accounting — and only swaps the three
+// things that are genuinely different:
+//
+//   - the prompt (the review contract instead of "## 子任务 + body"),
+//   - the persona (the identity the user picked instead of the executor),
+//   - the terminal bookkeeping (the report is written back onto the
+//     code_reviews row, not just into sub_tasks.artifact).
+//
+// Re-implementing any of the execution machinery would guarantee that the
+// two paths drift — the Review would miss the worktree drift guard, the
+// queue, or the credential injection, and the difference would only show up
+// in production.
+func (r *SubTaskRunner) RunReview(req *model.Requirement, st *model.SubTask, job *store.Job, newSID, sourceSID string, spec subTaskRunSpec) {
+	spec.taskKind = model.SubTaskKindReview
+	// A Review never resumes in place and never uses the bare CLI mode:
+	// it starts a fresh session (forked from the requirement's coding session
+	// only when the user explicitly asked for it) so the reviewer sees the
+	// code with an independent mind.
+	spec.adjust = false
+	spec.bare = false
+	r.run(req, st, job, newSID, sourceSID, spec)
+}
+
+// promptPreview picks the text shown in the job log's "📝 提示词" line.
+//
+// A Review's real prompt is the whole review contract (thousands of
+// characters), and its `body` is empty — logging the body would show
+// nothing useful, so the override's first lines stand in for it.
+func promptPreview(body, override string) string {
+	if strings.TrimSpace(override) != "" {
+		return override
+	}
+	return body
+}
+
+// subTaskFinishHooks are the terminal-bookkeeping extensions a run can
+// install. They exist so the shared finish path stays generic: a plain
+// sub-task passes an empty struct, a Review passes the two callbacks it
+// needs. Keeping them out of the positional signature means the finish path
+// doesn't grow a "is this a review?" branch every time a new kind appears.
+type subTaskFinishHooks struct {
+	// transformReport rewrites the raw model output into the artifact body.
+	transformReport func(finalResult string) (artifactBody string)
+	// onFinished runs after the terminal state has been persisted.
+	onFinished func(st *model.SubTask, out claudeStreamOutcome, artifactBody string)
+}
+
+// run is the shared body of Run / RunReview. Every branch that differs
+// between the two kinds is keyed off spec.taskKind, so the two paths can
+// never grow a subtly different execution model.
+func (r *SubTaskRunner) run(
+	req *model.Requirement,
+	st *model.SubTask,
+	job *store.Job,
+	newSID string,
+	sourceSID string,
+	spec subTaskRunSpec,
+) {
+	isReview := spec.taskKind == model.SubTaskKindReview
+	body := spec.body
+	modelOverride := spec.modelOverride
+	configIDOverride := spec.configIDOverride
+	adjust := spec.adjust
+	fork := spec.fork
+	freshSession := spec.freshSession
+	bare := spec.bare
+	parentSourceSID := spec.parentSourceSID
+	reportMode := spec.reportMode
+	// The terminal-bookkeeping extensions this run installs. A plain
+	// sub-task installs nothing; a Review installs the report rewrite + the
+	// write-back onto its code_reviews row.
+	finishHooks := subTaskFinishHooks{
+		transformReport: spec.transformReport,
+		onFinished:      spec.onFinished,
+	}
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -794,6 +972,18 @@ func (r *SubTaskRunner) Run(
 			// Named `rec`, not `r`: `r` is this method's receiver.
 			log.Printf("[sub-task] panic recovered in job %s (sub_task %s): %v\n%s", job.ID, st.ID, rec, debug.Stack())
 			job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+			// A panic skips finishSubTask entirely, so the row would stay
+			// 'running' forever and the requirement page's Review card would
+			// spin indefinitely. Close the row here and run the terminal
+			// hooks, so a requirement-level Review lands in 'error' instead
+			// of hanging.
+			diag := "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)
+			if perr := r.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, diag, "", model.SubTaskTokens{}, 0, time.Time{}); perr != nil {
+				log.Printf("[sub-task] failed to persist panic finish for %s: %v", st.ID, perr)
+			}
+			if spec.onFinished != nil {
+				spec.onFinished(st, claudeStreamOutcome{errMsg: diag}, diag)
+			}
 		}
 		// Never leave the job in JobRunning. Idempotent Finish makes the happy
 		// path (the run already Finished) a no-op here.
@@ -873,14 +1063,33 @@ func (r *SubTaskRunner) Run(
 	if !fork {
 		role = "🤖 继续子任务执行..."
 	}
+	if isReview {
+		role = "🔍 Review 启动中..."
+	}
 	job.Append(store.LogLine{Type: "phase", Content: role})
-	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
+	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(promptPreview(body, spec.promptOverride), 240)})
 
 	// Resolve the effective execution environment for this sub-task through the
 	// single shared resolver — the orchestrated-child path
 	// (ExecuteOrchestratedChild) must produce the exact same answer, otherwise
 	// the card and the actual dispatch diverge. See resolveEffectiveAgentServer.
 	effectiveServerID := resolveEffectiveAgentServer(st, req)
+	if isReview && effectiveServerID != "" {
+		// A requirement-level Review is pinned to LOCAL execution in v1.
+		//
+		// The reason is not conservatism, it is arithmetic: the fix sub-tasks
+		// this Review spawns edit the working tree WITHOUT committing, and a
+		// remote Agent Server only ever sees `origin`. A 回归 Review running
+		// there would re-grade the pre-fix code, so "fix → re-review until it
+		// passes" would never converge — it would keep reporting the very
+		// findings the user just fixed.
+		//
+		// The scope block says so explicitly when the working tree could not be
+		// reached, so the user is never misled into thinking an uncommitted
+		// fix was reviewed.
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 需求级 Review v1 仅支持本地执行：回归 Review 必须看到工作区里未提交的修复。"})
+		effectiveServerID = ""
+	}
 	appendCrossEnvHint(job, effectiveServerID, req.AgentServerID, req.SyncMode)
 
 	// Resolve the developer role's model + its bound config id. The model
@@ -889,18 +1098,31 @@ func (r *SubTaskRunner) Run(
 	// bound to a different config than the executor role), the executor's
 	// binding would send the request to the wrong gateway. We resolve the
 	// matching config below so model and base URL always agree.
-	_, devModel, devCfgID := r.roleConfig("developer")
-	modelName := devModel
-	// Inherit the parent requirement's persisted developer model so a manual
-	// sub-task defaults to the SAME model the requirement was developed with
-	// (not the developer role / active-config default). Skip the '默认模型'
-	// sentinel — it means "no specific model", so we keep the role default.
-	// An explicit modelOverride (composer picker / redo) still wins below.
-	if req != nil && req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
-		modelName = req.DeveloperModel
-	}
-	if modelOverride != "" {
-		modelName = modelOverride
+	//
+	// A Review does NOT inherit the requirement's developer model: the user
+	// picks the Review's model explicitly (or the reviewer's role default
+	// applies), and inheriting the developer model would silently override a
+	// deliberate pick. The caller resolves it and hands it over via
+	// spec.modelOverride.
+	modelName := ""
+	devCfgID := ""
+	if isReview {
+		modelName = strings.TrimSpace(modelOverride)
+	} else {
+		var devModel string
+		_, devModel, devCfgID = r.roleConfig("developer")
+		modelName = devModel
+		// Inherit the parent requirement's persisted developer model so a manual
+		// sub-task defaults to the SAME model the requirement was developed with
+		// (not the developer role / active-config default). Skip the '默认模型'
+		// sentinel — it means "no specific model", so we keep the role default.
+		// An explicit modelOverride (composer picker / redo) still wins below.
+		if req != nil && req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+			modelName = req.DeveloperModel
+		}
+		if modelOverride != "" {
+			modelName = modelOverride
+		}
 	}
 	job.SetModel(modelName)
 
@@ -936,7 +1158,20 @@ func (r *SubTaskRunner) Run(
 	}
 
 	workDir := ""
+	if isReview && spec.workDirOverride != "" {
+		// A Review's directory is decided by the caller (resolveReviewWorkDir),
+		// because the diff scope in its prompt was resolved against exactly
+		// that directory. Re-deriving it here could pick a different one (the
+		// worktree-creation fallback below would even CREATE a fresh one),
+		// and the reviewer would then read a different tree than the prompt
+		// describes.
+		workDir = spec.workDirOverride
+		job.Append(store.LogLine{Type: "message", Content: "📁 工作目录: " + workDir})
+	}
 	switch {
+	case workDir != "":
+		// Already pinned by the caller (Review path).
+	case req.NoBranch:
 	case req.NoBranch:
 		// No-branch requirements develop on a DETACHED HEAD worktree since
 		// the 2026-10-24 no-branch isolation rework (see worktree_base.go's
@@ -1028,17 +1263,17 @@ func (r *SubTaskRunner) Run(
 	}
 	st.ReportMode = resolvedReportMode
 
-	phaseEnabled := phaseEnabledForSource(st.Source) && resolvedReportMode != model.SubTaskReportModeBrief
+	phaseEnabled := phaseEnabledForRun(st.TaskKind, st.Source) && resolvedReportMode != model.SubTaskReportModeBrief
 	var phaseTrack *phaseTracker
 	if phaseEnabled {
 		phaseTrack = &phaseTracker{}
 	}
-	log.Printf("[sub-task] phaseEnabled=%v source=%q reportMode=%q resolved=%q id=%s", phaseEnabled, st.Source, reportMode, resolvedReportMode, st.ID)
+	log.Printf("[sub-task] phaseEnabled=%v kind=%q source=%q reportMode=%q resolved=%q id=%s", phaseEnabled, st.TaskKind, st.Source, reportMode, resolvedReportMode, st.ID)
 
 	// Brief 模式给用户一个可见的提示：解释为什么这条子任务不会出三段报告。
 	// 仅手动路径且为 brief 时输出；auto / push_pr 行 phase 本来就不渲染，
 	// 不需要这条提示。
-	if phaseEnabledForSource(st.Source) && resolvedReportMode == model.SubTaskReportModeBrief {
+	if phaseEnabledForRun(st.TaskKind, st.Source) && resolvedReportMode == model.SubTaskReportModeBrief {
 		job.Append(store.LogLine{Type: "message", Content: "🪶 简洁模式：本子任务直接执行，不生成三段式报告。"})
 	}
 
@@ -1059,22 +1294,32 @@ func (r *SubTaskRunner) Run(
 	}
 
 	var prompt string
-	switch {
-	case !fork:
-		prompt = "## 继续执行\n\n" + body + "\n"
-	case adjust:
-		prompt = "## 追加调整\n\n" + body + "\n"
-	default:
-		prompt = "## 子任务\n\n" + body + "\n"
+	if isReview {
+		// A Review brings its OWN prompt: the review contract (checklist,
+		// severity ladder, output contract) plus the resolved diff scope. The
+		// "## 子任务" header and the executor's "you are the implementer"
+		// instruction would both contradict it — the reviewer must NOT be told
+		// to implement anything, and the report must NOT carry a
+		// "## 子任务" header.
+		prompt = spec.promptOverride
+	} else {
+		switch {
+		case !fork:
+			prompt = "## 继续执行\n\n" + body + "\n"
+		case adjust:
+			prompt = "## 追加调整\n\n" + body + "\n"
+		default:
+			prompt = "## 子任务\n\n" + body + "\n"
+		}
+		switch {
+		case phaseEnabled:
+			prompt += phaseInstructionsBlock
+		case phaseEnabledForRun(st.TaskKind, st.Source):
+			// 手动路径 + brief：注入简洁指令，让 claude 知道这次只回 1~3 句。
+			prompt += briefInstructionsBlock
+		}
+		prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	}
-	switch {
-	case phaseEnabled:
-		prompt += phaseInstructionsBlock
-	case phaseEnabledForSource(st.Source):
-		// 手动路径 + brief：注入简洁指令，让 claude 知道这次只回 1~3 句。
-		prompt += briefInstructionsBlock
-	}
-	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	// 工作目录安全约束：禁止删除/重置工作目录、工作目录消失即停止、禁止轮询 CI。
 	// 2026-10-24 事故的直接教训（子任务在真实仓库里跑 rm -rf + clone 恢复循环）。
 	prompt += "\n" + promptpkg.WorkingDirSafety + "\n"
@@ -1082,7 +1327,14 @@ func (r *SubTaskRunner) Run(
 	// context block (GitCommitConvention lives at the head of the rendered
 	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
 	// rule). Push-pr children get forPR=true so they also see PRLangRules.
-	prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
+	//
+	// A Review skips it: the block's job is to tell an IMPLEMENTER how to
+	// commit, and a reviewer has nothing to commit. The project context it
+	// also carries is nice-to-have, not worth the "commit your work" framing
+	// in a read-only run.
+	if !isReview {
+		prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
+	}
 	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
 	// 因此需判空后再追加——未满足时 prompt 与改动前逐字节一致。必须拼到 user prompt
 	// 而非 systemPrompt：bare 模式会把 systemPrompt 强制置空。
@@ -1158,7 +1410,18 @@ func (r *SubTaskRunner) Run(
 		prompt = llm.ApplyMentionedSkills(prompt, workDir, r.mentionedSkills(req.Title+" "+body))
 	}
 
-	execSystemPrompt, _, executorConfigID := r.roleConfig(executorRoleKey)
+	// The persona. A code sub-task always runs as the executor role; a Review
+	// runs as the identity the user picked (roles.key), and the caller passes
+	// the resolved system prompt in so the reviewer handler owns the whole
+	// "which persona" decision in one place.
+	roleKey := executorRoleKey
+	if strings.TrimSpace(spec.roleKey) != "" {
+		roleKey = strings.TrimSpace(spec.roleKey)
+	}
+	execSystemPrompt, _, roleConfigID := r.roleConfig(roleKey)
+	if strings.TrimSpace(spec.systemPromptOverride) != "" {
+		execSystemPrompt = spec.systemPromptOverride
+	}
 	// Pick the Claude config the resolved model actually belongs to, so the
 	// gateway (ANTHROPIC_BASE_URL / AUTH_TOKEN) always matches ANTHROPIC_MODEL:
 	//   1. caller-supplied configIDOverride (explicit pick — composer ModelSelect
@@ -1172,13 +1435,20 @@ func (r *SubTaskRunner) Run(
 	// Model and config must be resolved together: inheriting the parent's model
 	// while keeping the role's bound gateway was the "配置=默认配置 但模型=a模型"
 	// mismatch (and a 400 from the wrong base URL).
+	//
+	// A Review does NOT inherit the requirement's developer config: the
+	// Review's own persona binding (roleConfigID) is the meaningful fallback,
+	// and the developer config belongs to a different gateway binding.
 	parentDevCfgID := ""
-	if req != nil {
+	if !isReview && req != nil {
 		parentDevCfgID = req.DeveloperConfigID
+	}
+	if isReview {
+		devCfgID = roleConfigID
 	}
 	finalConfigID := configIDOverride
 	if finalConfigID == "" {
-		finalConfigID = pickConfigForModel(r.claudeCfg, modelName, parentDevCfgID, devCfgID, executorConfigID)
+		finalConfigID = pickConfigForModel(r.claudeCfg, modelName, parentDevCfgID, devCfgID, roleConfigID)
 	}
 	// Record the resolved config on the row (best-effort, before dispatch so an
 	// aborted/failed child still shows which gateway it was aimed at). The
@@ -1253,7 +1523,7 @@ func (r *SubTaskRunner) Run(
 				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
 			}
 		}
-		r.finishSubTask(st, job, out, modelName, startTime, nil)
+		r.finishSubTask(st, job, out, modelName, startTime, nil, finishHooks)
 		return
 	}
 
@@ -1317,7 +1587,7 @@ func (r *SubTaskRunner) Run(
 			adjust /*forkFlag*/, false,
 			freshSession, bare,
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-			addDirs,
+			addDirs, spec.disallowedTools,
 		)
 	} else {
 		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
@@ -1364,7 +1634,7 @@ func (r *SubTaskRunner) Run(
 				/*forkFlag*/ true,
 				freshSession, bare,
 				workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-				addDirs,
+				addDirs, spec.disallowedTools,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -1386,7 +1656,7 @@ func (r *SubTaskRunner) Run(
 				Content: "🔄 源会话已过期，自动尝试上一级会话..."})
 		}
 	}
-	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack)
+	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack, finishHooks)
 }
 
 // runLocalSubTaskAttempt launches a single claude subprocess for the local
@@ -1415,6 +1685,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	tracker *phaseTracker,
 	hardTimeout time.Duration,
 	addDirs []string,
+	disallowedTools []string,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -1457,9 +1728,13 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		Resume:        resumeFlag,
 		Fork:          forkFor,
 		ForkSessionID: newSID,
-		ExtraEnv:      credEnv,              // HTTPS git creds + committer identity
-		IdleTimeout:   subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
-		AddDirs:       addDirs,
+		// DisallowedTools: a requirement-level Review passes Write/Edit here so
+		// the reviewer CANNOT modify the code it is reviewing. The report comes
+		// back as the assistant's text, so nothing legitimate is lost.
+		DisallowedTools: disallowedTools,
+		ExtraEnv:        credEnv,              // HTTPS git creds + committer identity
+		IdleTimeout:     subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
+		AddDirs:         addDirs,
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
@@ -1679,7 +1954,7 @@ func staleSourceCandidates(sourceSID, parentSourceSID, reqCodingSID string) []st
 // saveThinking persists the captured reasoning for manual sub-tasks. Failure
 // is logged only — it must never affect the status already written.
 func (r *SubTaskRunner) saveThinking(st *model.SubTask, out claudeStreamOutcome) {
-	if out.thinking == "" || !phaseEnabledForSource(st.Source) {
+	if out.thinking == "" || !phaseEnabledForRun(st.TaskKind, st.Source) {
 		return
 	}
 	if err := r.subTaskSvc.SaveThinking(st.ID, out.thinking); err != nil {
@@ -1687,7 +1962,7 @@ func (r *SubTaskRunner) saveThinking(st *model.SubTask, out claudeStreamOutcome)
 	}
 }
 
-func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker) {
+func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker, hooks subTaskFinishHooks) {
 	tokens := model.SubTaskTokens{
 		Input:         out.lastUsage.InputTokens,
 		Output:        out.lastUsage.OutputTokens,
@@ -1710,6 +1985,14 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			log.Printf("[sub-task] failed to persist run-stats-on-stop for %s: %v", st.ID, perr)
 		}
 		r.saveThinking(st, out)
+		// The run was cancelled by the user. A requirement-level Review still
+		// has to leave the 'running' state on its code_reviews row — the
+		// requirement page reads that row's status to decide whether the
+		// round is "still going" or "stopped", and a row stuck at 'running'
+		// would never resolve.
+		if hooks.onFinished != nil {
+			hooks.onFinished(st, out, "")
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[sub-task] job %s already stopped for %s, kept stopped artifact", job.ID, st.ID)
 		return
@@ -1756,6 +2039,17 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	default:
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 		artifactBody = out.finalResult
+		// A Review rewrites the raw model output into the artifact body
+		// BEFORE the artifact is built: the trailing JSON contract block is
+		// machine payload, not report prose, and the card would render it as
+		// a stray code fence. The rewrite is exactly the project-level
+		// Review's `result_md`口径 (contract stripped), so both surfaces
+		// show the same thing.
+		if hooks.transformReport != nil {
+			if transformed := hooks.transformReport(out.finalResult); transformed != "" {
+				artifactBody = transformed
+			}
+		}
 		// push_pr 子任务的 prompt 只覆盖 git push + gh/glab/tea pr create,
 		// Claude 的 finalResult 里基本只有 PR/MR 链接是 http(s) URL。emit 一个
 		// 独立的 pr_link 事件让前端的 applyMergeSignals 能识别,同时把 URL
@@ -1775,7 +2069,7 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	// 调 FinishWithPhases 一次性写齐 4 列；其它路径继续走 Finish 保持行为不变。
 	// phase_emitted 也只在这里被写为 1——StartSubTask / Adjust / Redo / Continue
 	// 都走这条分支；auto / push_pr 路径上的 Finish 不动这列。
-	usePhaseFinish := phaseEnabledForSource(st.Source) && phaseTrack != nil
+	usePhaseFinish := phaseEnabledForRun(st.TaskKind, st.Source) && phaseTrack != nil
 	understanding, implementation, summary, phaseEmitted := func() (string, string, string, bool) {
 		if phaseTrack == nil {
 			return "", "", "", false
@@ -1801,6 +2095,17 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		}
 	}
 	r.saveThinking(st, out)
+	// The Review hook writes the report back onto its code_reviews row. It
+	// runs AFTER the sub-task row is terminal so the requirement page's card
+	// and the report never disagree about which run finished first.
+	//
+	// A hook failure is logged, never fatal: the sub-task row is already
+	// persisted, and losing the report write means the round shows up as
+	// "running" on the review row — recoverable by re-running, and strictly
+	// better than losing the finished artifact.
+	if hooks.onFinished != nil {
+		hooks.onFinished(st, out, artifactBody)
+	}
 	// Best-effort bump parent requirement updated_at on terminal sub-task
 	// transitions (done/error/stopped). A touch failure never blocks the
 	// sub-task lifecycle — the row + job are already persisted above.

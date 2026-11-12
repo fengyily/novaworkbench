@@ -193,6 +193,29 @@ type SubTask struct {
 	// ('auto') because their phase_emitted gate is already false; the column
 	// only matters for source='manual' rows.
 	ReportMode string `json:"report_mode,omitempty"`
+	// TaskKind discriminates what KIND of work this row performs. It is
+	// deliberately separate from Source (which records where the row came
+	// from): reusing Source would break FindRecentPushForReq / the phase
+	// tracker gate, whose semantics are about dispatch provenance.
+	//
+	//   - SubTaskKindCode    (default): an ordinary implementation sub-task.
+	//                          Every pre-existing row keeps this value, so
+	//                          existing behaviour is byte-for-byte unchanged.
+	//   - SubTaskKindReview: a requirement-level Review run. Its report lives
+	//                          in the code_reviews row pointed at by ReviewID
+	//                          (the authoritative source — 追问 / 重新生成 /
+	//                          版本 / 导出 all read that table), while Artifact
+	//                          holds a display copy for the sub-task card.
+	TaskKind string `json:"task_kind,omitempty"`
+	// ReviewID points at the code_reviews row this row produced (only set
+	// when TaskKind == SubTaskKindReview). Two-way pointer with
+	// code_reviews.requirement_id: the requirement page lists reviews by
+	// requirement, the sub-task card finds its report by review id.
+	ReviewID string `json:"review_id,omitempty"`
+	// ReviewRound is the regression round of a Review sub-task (1 for the
+	// first round, +1 per 回归 Review). Only set on TaskKind == review rows;
+	// fix sub-tasks stay at 0 so the round chain is made of Review nodes only.
+	ReviewRound int `json:"review_round,omitempty"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with
@@ -277,6 +300,19 @@ const (
 	SubTaskReportModeAuto  = "auto"
 	SubTaskReportModeBrief = "brief"
 	SubTaskReportModeFull  = "full"
+)
+
+// Sub-task KIND values — what the row does, as opposed to Source (where it
+// came from). The schema DEFAULT is 'code', so every pre-existing row keeps
+// the historical behaviour without a backfill.
+const (
+	// SubTaskKindCode is an ordinary implementation sub-task.
+	SubTaskKindCode = "code"
+	// SubTaskKindReview is a requirement-level Review run: the child is
+	// driven by the review contract (P0/P1/P3 grading + trailing JSON block)
+	// instead of the executor persona's implementation instructions, and its
+	// report is persisted as a code_reviews row.
+	SubTaskKindReview = "review"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

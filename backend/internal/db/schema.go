@@ -1451,6 +1451,28 @@ var alterColumns = []string{
 	// 门控本就不走三段，所以该列对它们没有意义；显式空串回落 auto 的语义与
 	// session_mode 一致。
 	`ALTER TABLE sub_tasks ADD COLUMN report_mode TEXT NOT NULL DEFAULT 'auto'`,
+	// 子任务类型：'code'（默认，历史全部行为）/ 'review'（需求级 Review 子任务）。
+	//
+	// 与 source 列语义正交：source 记录「派发来源」（manual / auto / push_pr /
+	// push_base），不是「任务类型」；复用 source 会破坏 FindRecentPushForReq 与
+	// phaseEnabledForSource 的既有语义。因此新增一列显式区分。
+	//
+	// DEFAULT 'code' 让所有存量行行为逐字不变。
+	`ALTER TABLE sub_tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'code'`,
+	// task_kind='review' 时指向 code_reviews.id（需求级 Review 会话行）。
+	// 报告的权威源是 code_reviews 行，本列只是子任务卡片拿回自己报告的指针。
+	// 空串 = 非 Review 子任务。
+	`ALTER TABLE sub_tasks ADD COLUMN review_id TEXT NOT NULL DEFAULT ''`,
+	// Review 回归轮次（仅 task_kind='review' 的行有值；首轮 = 1）。
+	// 修复子任务保持 0，所以轮次链只由 Review 型节点构成。
+	`ALTER TABLE sub_tasks ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0`,
+	// code_reviews 关联的需求：空串 = 项目级 Review（既有行不受影响）。
+	// 需求页要「按需求列 Review 轮次」需要这一列；code_reviews 本身是报告的
+	// 权威源，追问 / 重新生成 / 版本 / 导出全部只认这张表。
+	`ALTER TABLE code_reviews ADD COLUMN requirement_id TEXT NOT NULL DEFAULT ''`,
+	// 本次 Review 使用的 AI persona（roles.key）。空串 = 回退到 'reviewer'。
+	// 与 sub_tasks.task_kind 分离：身份是 Review 会话的属性，不是子任务的属性。
+	`ALTER TABLE code_reviews ADD COLUMN role_key TEXT NOT NULL DEFAULT ''`,
 	// 父子查询索引：未来「列出某个父任务的所有子任务」按此索引即可。
 	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_parent ON sub_tasks(parent_subtask_id)`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch

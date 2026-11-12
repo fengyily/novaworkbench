@@ -155,6 +155,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
 		ReportMode:       reportMode,
+		TaskKind:         model.SubTaskKindCode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -228,9 +229,117 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
 		ReportMode:       reportMode,
+		TaskKind:         model.SubTaskKindCode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
+}
+
+// CreateReviewTask inserts a requirement-level REVIEW sub-task: a row whose
+// task_kind is 'review' instead of 'code'.
+//
+// It is a sibling of Create, NOT a parameterisation of it: Create's twelve
+// positional parameters are called from a dozen places, and threading three
+// more (task_kind / review_id / review_round) through all of them would make
+// every call site noisier for a distinction only one caller cares about. The
+// shared INSERT body is factored out below so the two paths cannot drift on
+// the columns they write.
+//
+// The three new columns are:
+//   - task_kind    = 'review' (vs Create's implicit 'code')
+//   - review_id    = the code_reviews row this run produces
+//   - review_round = 1 for the first round, +1 per 回归 Review
+//
+// parentSubtaskID points at the PREVIOUS round's review sub-task, which is
+// what makes the round chain walkable from the sub-task tree.
+func (s *SubTaskService) CreateReviewTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID, reviewID string, reviewRound int) (*model.SubTask, error) {
+	if reqID == "" {
+		return nil, errors.New("requirement_id is required")
+	}
+	if prompt == "" {
+		return nil, errors.New("prompt is required")
+	}
+	if reviewID == "" {
+		return nil, errors.New("review_id is required for a review sub-task")
+	}
+	if title == "" {
+		title = truncateForTitle(prompt, 40)
+	} else {
+		title = capTitle(title, 80)
+	}
+	if sessionMode == "" {
+		sessionMode = model.SubTaskSessionModeWithContext
+	}
+	if reviewRound <= 0 {
+		reviewRound = 1
+	}
+	id := util.NewID("st")
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
+		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
+		session_mode, report_mode, task_kind, review_id, review_round, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
+		modelDisplay, sourceSID, model.SubTaskSourceManual, agentServerID,
+		sessionMode, model.SubTaskReportModeAuto, model.SubTaskKindReview, reviewID, reviewRound, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert review sub_task: %w", err)
+	}
+	// Notify SSE subscribers so the requirement page shows the new card right
+	// away. Create (the code path) historically did NOT notify — new rows
+	// showed up on the next 5s poll. A Review round is expected to appear
+	// immediately (the user just clicked a button), so this path notifies.
+	s.notifyChanged(reqID)
+	return &model.SubTask{
+		ID:               id,
+		RequirementID:    reqID,
+		ParentSubtaskID:  parentSubtaskID,
+		Title:            title,
+		Prompt:           prompt,
+		Status:           model.SubTaskStatusPending,
+		Model:            modelDisplay,
+		SourceSessionID:  sourceSID,
+		BatchID:          "",
+		BatchSeq:         0,
+		Source:           model.SubTaskSourceManual,
+		AgentServerID:    agentServerID,
+		AgentServerIDSet: true,
+		SessionMode:      sessionMode,
+		ReportMode:       model.SubTaskReportModeAuto,
+		TaskKind:         model.SubTaskKindReview,
+		ReviewID:         reviewID,
+		ReviewRound:      reviewRound,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}, nil
+}
+
+// ByReviewID returns the sub-task row that produced the given code_reviews
+// session, or nil when there is none.
+//
+// It is the reverse pointer of sub_tasks.review_id: the requirement page
+// lists review rounds (from code_reviews) and needs the sub-task id of each
+// so the card can be linked to the report it produced.
+//
+// Returns (nil, nil) when no row carries the pointer — a review created by an
+// older build, or a review whose sub-task row was deleted.
+func (s *SubTaskService) ByReviewID(reviewID string) (*model.SubTask, error) {
+	if strings.TrimSpace(reviewID) == "" {
+		return nil, nil
+	}
+	var id string
+	err := s.db.QueryRow(`SELECT id FROM sub_tasks WHERE review_id = ? ORDER BY created_at DESC LIMIT 1`, reviewID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	st, err := s.Get(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return st, err
 }
 
 // FindRecentPushForReq returns the most recent sub_tasks row tagged with
@@ -263,7 +372,8 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		agent_server_id, '' AS agent_server_name,
 		session_mode, retry_count,
 		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round
 		FROM sub_tasks
 		WHERE requirement_id = ?
 		  AND source = ?
@@ -347,7 +457,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
 		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -387,7 +498,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
 		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -446,7 +558,8 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
 			report_mode,
-			phase_understanding, phase_implementation, phase_summary, phase_emitted
+			phase_understanding, phase_implementation, phase_summary, phase_emitted,
+			task_kind, review_id, review_round
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -539,7 +652,8 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
 		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -844,7 +958,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
 			report_mode,
-			phase_understanding, phase_implementation, phase_summary, phase_emitted
+			phase_understanding, phase_implementation, phase_summary, phase_emitted,
+			task_kind, review_id, review_round
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
 			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
@@ -1744,6 +1859,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.SessionMode, &st.RetryCount,
 		&st.ReportMode,
 		&st.PhaseUnderstanding, &st.PhaseImplementation, &st.PhaseSummary, &st.PhaseEmitted,
+		&st.TaskKind, &st.ReviewID, &st.ReviewRound,
 	); err != nil {
 		return nil, err
 	}
