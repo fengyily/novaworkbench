@@ -48,7 +48,7 @@ import (
 // candidate list. It returns either the candidates or a user-facing error
 // message, never both.
 func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requirement, agentServerID,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
 	if h.agentSvrSvc == nil {
 		return nil, "Agent 服务器服务未初始化，无法在远端执行拆分。可切回本地执行后重新生成。"
 	}
@@ -121,6 +121,11 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
 		ClaudeConfigID: configID,
+		// Same grant as the local path: the attachment mirror that
+		// resolveAttachDir synced to this agent host + the directories the
+		// user authorized. Without them the manifest names files the remote
+		// run cannot read.
+		AddDirs: run.AddDirs,
 		// Read-only, same contract as the local split: the model may Read /
 		// Glob / Grep to ground the scope in real file paths, but it must not
 		// touch the repository.
