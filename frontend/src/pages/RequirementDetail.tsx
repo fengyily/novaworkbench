@@ -6722,6 +6722,11 @@ export default function RequirementDetail() {
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
+                  // The done-stage mount is the ONE that offers the
+                  // requirement-level Review. The developing-stage mount
+                  // above leaves it off, so the page never shows two Review
+                  // entry points at once.
+                  allowReview
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>

@@ -39,12 +39,19 @@ const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_num
 	title, description, status, job_id, result_md, findings_json,
 	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
 	model, claude_config_id,
-	agent_server_id, claude_session_id, created_by, created_at, updated_at, finished_at`
+	agent_server_id, claude_session_id, requirement_id, role_key,
+	created_by, created_at, updated_at, finished_at`
 
 // Create inserts a draft session. branch is required for branch reviews;
 // PR reviews carry pr_number instead and may leave branch blank only when
 // the caller genuinely has no head branch (the prompt then falls back to
 // the PR number alone).
+//
+// Requirement-level reviews (review_type='requirement') are exempt from the
+// branch requirement: their branch comes from the requirement row and is
+// filled in by the caller, but a requirement developed without a branch
+// ("不创建分支" mode) still deserves a Review — the scope resolver then
+// degrades to whatever refs exist.
 func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, error) {
 	if rv == nil {
 		return nil, errors.New("review is required")
@@ -65,11 +72,13 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 		title, description, status, job_id, result_md, findings_json,
 		p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
 		model, claude_config_id,
-		agent_server_id, claude_session_id, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, '', ?, ?, ?)`,
+		agent_server_id, claude_session_id, requirement_id, role_key,
+		created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
-		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.CreatedBy, now, now)
+		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.RequirementID, rv.RoleKey,
+		rv.CreatedBy, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert code_review: %w", err)
 	}
@@ -89,8 +98,13 @@ func (s *CodeReviewService) ListByProject(projectID string, limit int) ([]model.
 	if limit <= 0 {
 		limit = 50
 	}
+	// Requirement-level reviews (requirement_id != '') are EXCLUDED: they
+	// belong to the requirement page's round chain, not to the project's
+	// branch/PR review history. Mixing them in would put rows the project
+	// page cannot re-run (their branch lives in the requirement's worktree)
+	// into a list whose whole point is "re-run this review".
 	rows, err := s.db.Query(`SELECT `+codeReviewCols+`
-		FROM code_reviews WHERE project_id = ?
+		FROM code_reviews WHERE project_id = ? AND requirement_id = ''
 		ORDER BY created_at DESC, id DESC LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, err
@@ -105,6 +119,49 @@ func (s *CodeReviewService) ListByProject(projectID string, limit int) ([]model.
 		out = append(out, *rv)
 	}
 	return out, rows.Err()
+}
+
+// ListByRequirement returns every Review session bound to reqID, newest
+// first. It is what the requirement detail page reads to render the Review
+// round chain (第 1 轮 → 第 2 轮 → …).
+//
+// The rows come back with their Verdict already computed (see ReviewVerdict),
+// so the frontend renders the banner without re-deriving the pass rule.
+func (s *CodeReviewService) ListByRequirement(reqID string) ([]model.CodeReview, error) {
+	if strings.TrimSpace(reqID) == "" {
+		return []model.CodeReview{}, nil
+	}
+	rows, err := s.db.Query(`SELECT `+codeReviewCols+`
+		FROM code_reviews WHERE requirement_id = ?
+		ORDER BY created_at DESC, id DESC`, reqID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.CodeReview{}
+	for rows.Next() {
+		rv, err := scanCodeReview(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rv)
+	}
+	return out, rows.Err()
+}
+
+// MarkReviewFailed flips a session to the error terminal state after a run
+// that never produced a report (crash, timeout, unusable refs).
+//
+// It is MarkRegenerateFailed's counterpart for a FIRST run: there is no
+// previous report to preserve, so the error message is stored in result_md
+// (that is what the UI shows) and the counts stay zero. The sub-task row
+// carries the same message for the requirement page's card.
+func (s *CodeReviewService) MarkReviewFailed(id, msg string) error {
+	_, err := s.db.Exec(`UPDATE code_reviews
+		SET status = ?, result_md = ?, finished_at = ?, updated_at = ?
+		WHERE id = ?`,
+		model.ReviewStatusError, msg, time.Now().UTC(), time.Now().UTC(), id)
+	return err
 }
 
 // Update patches the user-editable fields (description / branches / title,
@@ -126,10 +183,13 @@ func (s *CodeReviewService) Update(id string, rv *model.CodeReview) (*model.Code
 	}
 	_, err = s.db.Exec(`UPDATE code_reviews
 		SET branch = ?, base_branch = ?, title = ?, description = ?,
-		    model = ?, claude_config_id = ?, agent_server_id = ?, updated_at = ?
+		    model = ?, claude_config_id = ?, agent_server_id = ?,
+		    role_key = CASE WHEN ? <> '' THEN ? ELSE role_key END,
+		    updated_at = ?
 		WHERE id = ?`,
 		rv.Branch, rv.BaseBranch, rv.Title, rv.Description,
-		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, time.Now().UTC(), id)
+		rv.Model, rv.ClaudeConfigID, rv.AgentServerID,
+		rv.RoleKey, rv.RoleKey, time.Now().UTC(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +325,36 @@ func (s *CodeReviewService) Delete(id string) error {
 	return err
 }
 
+// RecoverInterruptedRunning flips the requirement-level review rows that were
+// still 'running' when the backend died into the error terminal state.
+//
+// The reason is the same one SubTaskService.RecoverInterrupted exists for: a
+// Review is executed by an in-memory goroutine, so a restart orphans it. The
+// sub-task row is recovered by the sub-task service; the code_reviews row is
+// a DIFFERENT table and would otherwise stay 'running' forever — the
+// requirement page would show a spinner for a round that no longer exists.
+//
+// Only requirement-scoped rows (requirement_id != '') are touched: the
+// project-level Review has its own recovery story (its session can simply be
+// re-run from the history list, and flipping a row the user may re-run would
+// lose the draft state).
+//
+// Best-effort by contract — a failure here must never block the boot.
+func (s *CodeReviewService) RecoverInterruptedRunning() (int64, error) {
+	res, err := s.db.Exec(`UPDATE code_reviews
+		SET status = ?, result_md = ?, finished_at = ?, updated_at = ?
+		WHERE status = ? AND requirement_id != '' AND requirement_id IS NOT NULL`,
+		model.ReviewStatusError,
+		"❌ 服务在 Review 执行期间重启，本轮未产出报告。请重新发起 Review。",
+		time.Now().UTC(), time.Now().UTC(),
+		model.ReviewStatusRunning)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // rowScanner unifies *sql.Row and *sql.Rows for scanCodeReview.
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -277,7 +367,8 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
 		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
 		&rv.Model, &rv.ClaudeConfigID,
-		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.CreatedBy,
+		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.RequirementID, &rv.RoleKey,
+		&rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err
 	}
@@ -287,5 +378,29 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		t := finishedAt.Time
 		rv.FinishedAt = &t
 	}
+	rv.Verdict = ReviewVerdict(rv.Status, rv.P0Count, rv.P1Count)
 	return &rv, nil
+}
+
+// ReviewVerdict is the SINGLE source of truth for "did this Review pass".
+//
+// A round passes when neither P0 nor P1 was reported — P3 findings are
+// suggestions nobody has to fix before shipping, so they don't block. The
+// verdict is COMPUTED from the counts rather than stored, so it can never
+// disagree with the report the user is reading.
+//
+// It is deliberately a plain function over (status, p0, p1) rather than a
+// column: the counts are the persisted truth, and a second persisted truth
+// would be free to drift.
+func ReviewVerdict(status string, p0, p1 int) string {
+	switch status {
+	case model.ReviewStatusRunning, model.ReviewStatusDraft:
+		return "pending"
+	case model.ReviewStatusError:
+		return "error"
+	}
+	if p0 == 0 && p1 == 0 {
+		return "pass"
+	}
+	return "fail"
 }

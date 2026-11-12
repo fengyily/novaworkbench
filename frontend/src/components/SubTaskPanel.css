@@ -2073,3 +2073,174 @@
   color: var(--color-text-secondary, #64748B);
 }
 .sub-thinking-hint { font-size: 12px; color: var(--color-text-secondary, #64748B); }
+
+/* ── 需求级 Review 轮次卡片 (RequirementReviewCard) ─────────────────────────
+   The requirement page's view of one Review round: verdict → severity
+   ledger → findings → actions. It sits inside the ordinary sub-task card,
+   so it uses the panel's own surface tokens rather than the project-level
+   Review page's (those live in ProjectCodeReview.css). */
+.sub-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border);
+  border-radius: 8px;
+}
+.sub-review-pass { border-left-color: var(--color-success); }
+.sub-review-fail { border-left-color: var(--color-warning); }
+.sub-review-error { border-left-color: var(--color-error, #DC2626); }
+.sub-review-pending { border-left-color: var(--color-border); }
+
+.sub-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sub-review-badge { font-weight: 600; font-size: 13px; }
+.sub-review-chip {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  background: var(--color-hover);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.sub-review-spacer { flex: 1; }
+
+.sub-review-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sub-review-verdict strong { font-size: 14px; }
+.sub-review-verdict-sub {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.sub-review-error {
+  font-size: 12px;
+  color: var(--color-error, #DC2626);
+}
+
+/* Severity ledger — a zero bucket stays grey so the eye lands only on what
+   actually needs attention (same rule as the project-level Review view). */
+.sub-review-ledger {
+  display: flex;
+  gap: 8px;
+}
+.sub-review-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 52px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--color-hover);
+  font-size: 12px;
+}
+.sub-review-cell-num { font-size: 16px; font-weight: 600; }
+.sub-review-cell-tag { font-size: 10px; color: var(--color-text-muted); }
+.sub-review-cell.is-zero { opacity: 0.45; }
+.sub-review-cell-P0 { color: var(--color-error, #DC2626); }
+.sub-review-cell-P1 { color: var(--color-warning); }
+.sub-review-cell-P3 { color: var(--color-text-muted); }
+
+.sub-review-findings { display: flex; flex-direction: column; gap: 8px; }
+.sub-review-sev-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+}
+.sub-review-sev-badge {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--color-hover);
+}
+.sub-review-sev-badge-P0 { color: var(--color-error, #DC2626); }
+.sub-review-sev-badge-P1 { color: var(--color-warning); }
+.sub-review-sev-badge-P3 { color: var(--color-text-muted); }
+.sub-review-sev-count { font-size: 11px; }
+
+.sub-review-finding-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sub-review-finding {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.sub-review-finding-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  cursor: pointer;
+}
+.sub-review-finding-idx {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.sub-review-finding-title { font-size: 13px; }
+.sub-review-finding-loc {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  word-break: break-all;
+}
+.sub-review-finding-detail {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+}
+.sub-review-finding-suggestion {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.sub-review-finding-suggestion-tag {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+.sub-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sub-review-report {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.sub-review-report > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.sub-review-report-body { margin-top: 8px; }
+
+/* The composer's execution-environment hint. It was referenced by the
+   exec-env row but never had a rule, so it rendered as unstyled body text;
+   the requirement-level Review mode reuses it for its "local only" note. */
+.sub-composer-env-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
