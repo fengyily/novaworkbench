@@ -181,6 +181,13 @@ func canonicalPath(p string) string {
 // `git fetch` call cannot hang on credential prompts (GIT_TERMINAL_PROMPT=0
 // disables interactive auth) and is bounded by ~30s even when the remote is
 // unreachable. Failures return trimmed stderr so the caller can surface them.
+//
+// The timeout is only trustworthy because of configureGitProcess: a bare
+// exec.CommandContext kills the direct `git` process but leaves the
+// `git-remote-https` grandchild holding the stdout pipe, and cmd.Wait() then
+// blocks forever on that pipe — the deadline would be silently ignored and
+// the caller would hang (this is what wedged "拆分确认" on "创建中…").
+// See git_process_unix.go for the full story.
 func gitRunWithTimeout(dir string, timeout time.Duration, env []string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -192,6 +199,7 @@ func gitRunWithTimeout(dir string, timeout time.Duration, env []string, args ...
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	configureGitProcess(cmd)
 	if err := cmd.Run(); err != nil {
 		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}

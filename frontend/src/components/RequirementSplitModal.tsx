@@ -41,6 +41,17 @@ import ModelSelect from './ModelSelect';
 import './RequirementSplitModal.css';
 
 /**
+ * How long the confirm request may run before the UI gives up on it.
+ *
+ * The confirm prepares the stack-bottom branch and PUSHES it to origin, so
+ * it is the one call in this flow that talks to the network. The backend
+ * bounds its own git work, but the client must not sit on "创建中…" forever
+ * either — after this budget the request is aborted and the user is told to
+ * retry. 150s is comfortably above a legitimate slow push on a big repo.
+ */
+const SPLIT_CONFIRM_TIMEOUT_MS = 150_000;
+
+/**
  * The modal runs in four stages:
  *
  *   loading → the modal just opened and is asking the backend whether this
@@ -186,6 +197,9 @@ export function RequirementSplitModal({
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  /** Seconds the confirm request has been running — shown on the button so a
+   *  slow push reads as "working" rather than "stuck". */
+  const [confirmElapsed, setConfirmElapsed] = useState(0);
   /** Candidate pairs the user ticked for mutual reference: [a, b] ordinals. */
   const [references, setReferences] = useState<[number, number][]>([]);
   /** The branch the master's own dev branch is created from. */
@@ -248,6 +262,7 @@ export function RequirementSplitModal({
     setStage('config');
     setError('');
     setReferences([]);
+    setConfirmElapsed(0);
     setStreamLines([]);
     setRunState(null);
     setRestored(false);
@@ -628,6 +643,14 @@ export function RequirementSplitModal({
   const confirm = async () => {
     setBusy(true);
     setError('');
+    setConfirmElapsed(0);
+    // The confirm pushes the stack-bottom branch to origin — the one call
+    // here that talks to the network. Show the elapsed seconds so a slow
+    // push reads as "working", and abort it if it outstays its welcome:
+    // the user must never be stuck on "创建中…" with no way out.
+    const ticker = setInterval(() => setConfirmElapsed((n) => n + 1), 1000);
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), SPLIT_CONFIRM_TIMEOUT_MS);
     try {
       const tasks: SplitTaskCandidate[] = rows.map((r, i) => ({
         title: r.title.trim(),
@@ -638,11 +661,15 @@ export function RequirementSplitModal({
         order: i + 1,
         depends_on: r.dependsOn,
       }));
-      const res = await requirementsApi.confirmSplit(requirementId, {
-        tasks,
-        references,
-        source_branch: sourceBranch.trim() || undefined,
-      });
+      const res = await requirementsApi.confirmSplit(
+        requirementId,
+        {
+          tasks,
+          references,
+          source_branch: sourceBranch.trim() || undefined,
+        },
+        controller.signal,
+      );
       const warn = res.warnings && res.warnings.length > 0 ? res.warnings.join('；') : '';
       close();
       if (warn) {
@@ -652,8 +679,14 @@ export function RequirementSplitModal({
       }
       onConfirmed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
+      if (controller.signal.aborted) {
+        setError(t('requirements.split.confirmTimeout'));
+      } else {
+        setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
+      }
     } finally {
+      clearInterval(ticker);
+      clearTimeout(abortTimer);
       setBusy(false);
     }
   };
@@ -862,6 +895,11 @@ export function RequirementSplitModal({
             </>
           )}
 
+          {busy && (
+            <div className="req-split-hint req-split-hint-muted">
+              {t('requirements.split.confirmingHint')}
+            </div>
+          )}
           {error && <div className="req-split-error">{error}</div>}
 
           {stage === 'review' && rows.length > 0 && (
@@ -1006,7 +1044,7 @@ export function RequirementSplitModal({
               </button>
               <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirm()} disabled={!canConfirm}>
                 {busy
-                  ? t('requirements.split.confirming')
+                  ? t('requirements.split.confirming', { sec: confirmElapsed })
                   : t('requirements.split.confirm', { count: rows.length })}
               </button>
             </>

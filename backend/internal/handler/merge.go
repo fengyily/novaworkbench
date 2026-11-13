@@ -161,18 +161,21 @@ func (h *MergeHandler) loadReqProject(w http.ResponseWriter, r *http.Request) (r
 
 // ── git helpers (all run with git -C <dir>) ────────────────────────────────
 
+// gitDefaultTimeout bounds the helpers that have no explicit budget.
+//
+// These calls are mostly local plumbing (rev-parse / status / add), but they
+// share the failure mode of the networked ones: `git` spawns helpers that can
+// wedge the stdout pipe, and a helper that never exits used to hang the
+// caller forever. Five minutes is far above any legitimate local git call
+// and far below "the user gave up".
+//
+// A var (not a const) so the tests can shrink it — see git_process_test.go.
+var gitDefaultTimeout = 5 * time.Minute
+
 // gitRun runs a git command in dir and returns trimmed stdout. On failure the
 // error carries trimmed stderr so the caller can surface it.
 func gitRun(dir string, args ...string) (string, error) {
-	full := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", full...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return gitRunCtx(context.Background(), gitDefaultTimeout, dir, nil, args...)
 }
 
 // gitRunIdentity is gitRun with optional committer/author identity injected
@@ -191,14 +194,7 @@ func gitRunIdentity(dir, gitName, gitEmail string, args ...string) (string, erro
 		full = append(full, "-c", "user.email="+gitEmail)
 	}
 	full = append(full, args...)
-	cmd := exec.Command("git", full...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return gitRunCtx(context.Background(), gitDefaultTimeout, dir, nil, full[2:]...)
 }
 
 // gitRunWithEnv is gitRun with an arbitrary extra-env slice ("KEY=VALUE"
@@ -210,14 +206,36 @@ func gitRunIdentity(dir, gitName, gitEmail string, args ...string) (string, erro
 // caller's responsibility (the merge stage logs the failure and skips the
 // merge gate).
 func gitRunWithEnv(dir string, env []string, args ...string) (string, error) {
+	return gitRunCtx(context.Background(), gitDefaultTimeout, dir, env, args...)
+}
+
+// gitRunCtx is the single git execution primitive: it runs `git -C <dir>
+// <args>` under a context deadline and returns trimmed stdout.
+//
+// Every git helper in this package funnels through it so that the process
+// hardening lives in exactly one place:
+//
+//   - the child runs in its own process group and the group is SIGKILLed
+//     when the deadline fires (git's `git-remote-https` / ssh grandchildren
+//     would otherwise survive and hold the stdout pipe open), and
+//   - cmd.WaitDelay bounds the wait on those pipes, so even a leaked
+//     grandchild cannot wedge the caller forever.
+//
+// Without this, `git fetch` / `git push` against an unreachable remote hung
+// the request indefinitely — the "拆分确认" button sat on "创建中…" with no
+// error and no timeout. See git_process_unix.go.
+func gitRunCtx(parent context.Context, timeout time.Duration, dir string, env []string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	full := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", full...)
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd := exec.CommandContext(ctx, "git", full...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	configureGitProcess(cmd)
 	if err := cmd.Run(); err != nil {
 		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}

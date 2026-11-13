@@ -137,8 +137,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  // init — optional extra RequestInit (e.g. an AbortSignal for a call that
+  // may outlive the user's patience).
+  post: <T>(path: string, body: unknown, init?: RequestInit) =>
+    request<T>(path, { ...init, method: 'POST', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) =>
@@ -1669,8 +1671,12 @@ export const requirementsApi = {
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +
   // the master's dev_delegated flag).
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }) =>
-    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body),
+  //
+  // signal — optional AbortSignal. The confirm prepares the stack-bottom
+  // branch and PUSHES it to origin, so the request can take a while on a slow
+  // or unreachable remote; the caller aborts it instead of spinning forever.
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }, signal?: AbortSignal) =>
+    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body, signal ? { signal } : undefined),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>
     api.get<RequirementChildList>(`/api/requirements/${id}/children`),
