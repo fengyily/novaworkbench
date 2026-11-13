@@ -1007,15 +1007,25 @@ function SubTaskCard({
   // showed exactly one line (a bare "exit status 143") and nothing else.
   const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
-  // 'pending' now always means "queued behind the project's concurrency gate":
-  // the orchestration tick deliberately leaves a row pending rather than
-  // claiming one it can't run, and the manual runner flips to running only
-  // after it wins a slot. Hence the explicit "等待项目空闲" wording instead of
-  // the generic pending chip.
+  // 'pending' covers THREE distinct states, and conflating them is what made
+  // an orphaned row invisible for so long:
+  //
+  //   1. job_id set   → dispatched, waiting on the project's concurrency gate
+  //      (the manual runner flips to running only after it wins a slot);
+  //   2. batch_id set → an orchestrated child the 10s tick has not claimed yet;
+  //   3. NEITHER set  → nothing owns this row. No dispatcher will ever claim
+  //      it, and there is no UI affordance to start, cancel or delete it.
+  //
+  // State 3 is a bug, not a queue. The backend's orphan sweep re-dispatches
+  // it, but until it does, saying "排队中 · 等待项目空闲" is a lie: the row
+  // is not waiting for the project, it is waiting for nobody.
   const queued = st.status === 'pending';
-  const chipLabel = queued
-    ? t('components.subTaskCard.statusQueued')
-    : t(statusLabelKeys[st.status]);
+  const notDispatched = queued && !st.job_id && !st.batch_id;
+  const chipLabel = notDispatched
+    ? t('components.subTaskCard.statusNotDispatched')
+    : queued
+      ? t('components.subTaskCard.statusQueued')
+      : t(statusLabelKeys[st.status]);
   // Automatic-redo counter: only auto-orchestrated children are ever re-armed
   // by the backend, and only when the setting is on, so a non-zero value is
   // always worth surfacing (it explains why a card ran more than once).
@@ -1572,7 +1582,15 @@ function SubTaskCard({
               </span>
             </button>
           )}
-          <span className={statusChipClass[st.status]}>{chipLabel}</span>
+          <span
+            className={
+              notDispatched
+                ? `${statusChipClass[st.status]} sub-card-status-notdispatched`
+                : statusChipClass[st.status]
+            }
+          >
+            {chipLabel}
+          </span>
           {retryCount > 0 && (
             <span
               className="sub-card-retry"

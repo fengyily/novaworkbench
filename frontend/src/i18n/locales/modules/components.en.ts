@@ -213,6 +213,11 @@ export const components = {
     statusError: 'Error',
     statusStopped: 'Stopped',
     statusQueued: 'Queued · waiting for the project',
+    // A pending row that holds NEITHER a job nor a batch: nothing owns it, so
+    // no dispatcher will ever claim it. That is a stuck state, not a queue —
+    // the backend's orphan sweep re-dispatches it, and this wording says so
+    // instead of pretending the row is waiting for the project to go idle.
+    statusNotDispatched: 'Not dispatched yet',
     retryBadge: '🔁 Auto redo {{count}}/{{max}}',
     retryBadgeNoMax: '🔁 Auto redo ×{{count}}',
     retryBadgeTitle: 'The system automatically redid this failed sub-task {{count}} time(s) (limit {{max}}, configurable in Settings → Sub-tasks)',

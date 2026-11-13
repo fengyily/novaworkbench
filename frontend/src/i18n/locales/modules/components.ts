@@ -221,9 +221,16 @@ export const components = {
     statusDone: '已完成',
     statusError: '出错',
     statusStopped: '已停止',
-    // Shown instead of statusPending when the row is waiting on the project's
-    // concurrency gate (no job yet) — it makes "为什么不动" answerable at a glance.
+    // Shown instead of statusPending when the row is queued AND owned by a
+    // dispatcher: either it already holds a job and is waiting on the
+    // project's concurrency gate, or it is an orchestrated child the 10s tick
+    // has not claimed yet. It makes "为什么不动" answerable at a glance.
     statusQueued: '排队中 · 等待项目空闲',
+    // A pending row that holds NEITHER a job nor a batch: nothing owns it, so
+    // no dispatcher will ever claim it. That is a stuck state, not a queue —
+    // the backend's orphan sweep re-dispatches it, and this wording says so
+    // instead of pretending the row is waiting for the project to go idle.
+    statusNotDispatched: '等待启动 · 尚未派发',
     // Automatic failure redo counter (设置 → 子任务 → 失败自动重做).
     retryBadge: '🔁 自动重做 {{count}}/{{max}}',
     // Same badge when the configured cap couldn't be read (the count alone is

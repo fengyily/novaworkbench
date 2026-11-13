@@ -486,6 +486,15 @@
   background: var(--color-hover);
   color: var(--color-text-muted);
 }
+/* A pending row that no dispatcher owns (no job_id AND no batch_id). The
+   plain pending chip is a muted slate, which reads as "waiting" — but this
+   row is not waiting for anything, it was never dispatched. Amber makes the
+   stuck state visible at a glance instead of hiding it behind a neutral chip
+   that looks like an ordinary queue entry. */
+.sub-card-status-notdispatched {
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+}
 /* Stopped: user-initiated cancellation. Neutral slate (not the error red
    so it reads as "intentional" rather than "broken"). */
 .sub-card-status-stopped {
