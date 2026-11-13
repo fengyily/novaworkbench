@@ -120,6 +120,7 @@ export const components = {
     reviewScanBusy: 'Scanning…',
     reviewScanEmpty: 'The static checks reported nothing.',
     reviewLocalOnlyHint: 'Requirement-level Review v1 runs locally only: a re-review has to see the uncommitted fixes in the working tree.',
+    reviewNotDoneHint: 'A Review does not wait for the requirement to be marked "done" — it grades the branch as it stands (committed + uncommitted); whether that is good enough is your call.',
     reviewSubmitBtn: '🔍 Start Review',
     loading: 'Loading…',
     empty: 'No sub-tasks yet. Click "🔄 Re-split" to have the main agent decompose and dispatch, or create one manually above.',

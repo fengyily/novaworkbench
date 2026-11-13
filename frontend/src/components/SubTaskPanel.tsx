@@ -89,11 +89,13 @@ interface Props {
   // Whether this panel may launch a requirement-level Review.
   //
   // The requirement page mounts the panel TWICE: once for the developing
-  // stage and once for the done stage. A Review is a "the work is finished,
-  // now grade it" action, so it belongs to the done-stage mount only —
-  // otherwise the user would find two Review entry points on the same page
-  // and have to guess which one to use. The developing-stage mount leaves
-  // this false and therefore shows no mode switch at all.
+  // stage and once for the done stage. Whether the work counts as "finished"
+  // is a HUMAN judgement, so the Review is NOT gated on the requirement
+  // having been marked done — as soon as there is code to grade, the user
+  // may Review it (the review covers the requirement's own branch, pushed or
+  // not). Both mounts therefore pass allowReview; they live in mutually
+  // exclusive status blocks, so the page still shows exactly ONE Review
+  // entry point.
   allowReview?: boolean;
 }
 
@@ -3246,9 +3248,20 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           /* A requirement-level Review runs locally only: a remote host
              sees just origin, so it cannot see the uncommitted fixes and a
              re-check would re-grade stale code. */
-          <span className="sub-composer-env-hint" role="note">
-            {t('components.subTaskPanel.reviewLocalOnlyHint')}
-          </span>
+          <>
+            <span className="sub-composer-env-hint" role="note">
+              {t('components.subTaskPanel.reviewLocalOnlyHint')}
+            </span>
+            {/* A Review does NOT wait for the requirement to be marked
+                "开发完成" — whether the work is finished enough to grade is
+                the user's call. The hint says so explicitly, so the missing
+                "done" badge never reads as a missing precondition. */}
+            {requirement.status !== 'done' && (
+              <span className="sub-composer-env-hint" role="note">
+                {t('components.subTaskPanel.reviewNotDoneHint')}
+              </span>
+            )}
+          </>
         ) : agentServers.length > 0 && (
           <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
             <span>{t('components.subTaskPanel.execEnvLabel')}</span>

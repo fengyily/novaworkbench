@@ -202,7 +202,7 @@ UI 由 `ProjectDetail` 的 Review tab 以 `<ProjectCodeReview projectId={id} pro
 
 **身份下拉的样式** —— `ReviewIdentitySelect` 只渲染 `<select>`,`className="form-input"`(`index.css` 里**唯一**的表单控件类,`select.form-input` 有专门样式),由调用方提供 label 包装 —— 与 `ExecEnvSelect` 结构完全一致。第一版用了不存在的 `form-select` 类,渲染成浏览器原生下拉,在 composer 那一排里格外扎眼(用户标注的「样式不统一」)。
 
-前端:`components/RequirementReviewCard.tsx`(verdict 横幅 / 分级 ledger / 问题清单 / 生成修复子任务 / 回归 Review)+ `components/ReviewIdentitySelect.tsx`(身份下拉)+ `components/ReviewFocusChips.tsx`(候选要点 chip)+ `SubTaskPanel` 的「普通子任务 | 🔍 Review」模式切换。**Review 模式只在 done 阶段的那次 `SubTaskPanel` 挂载开放**(`allowReview` prop)—— 需求页挂载了两次面板,否则同一页会出现两个 Review 入口。Review 模式的输入框与普通子任务**分开存**(`reviewGoal` vs `prompt`),切模式不会毁掉另一边写的草稿。
+前端:`components/RequirementReviewCard.tsx`(verdict 横幅 / 分级 ledger / 问题清单 / 生成修复子任务 / 回归 Review)+ `components/ReviewIdentitySelect.tsx`(身份下拉)+ `components/ReviewFocusChips.tsx`(候选要点 chip)+ `SubTaskPanel` 的「普通子任务 | 🔍 Review」模式切换。**Review 模式不判断「开发是否完成」**——那交给人判断:代码一到手(分支有了、推没推都行)就能发起 Review,所以 `developing` 与 `done` 两次 `SubTaskPanel` 挂载都开放 `allowReview`;两次挂载分处**互斥**的状态块(`developing` vs `done`),所以同一页仍只有一个 Review 入口。Review 模式下若需求还没标记完成,composer 会给一行提示(`reviewNotDoneHint`)说明「够不够格由你判断」。配套:需求级 Review 跑在**需求自己的 worktree** 里,对比区间的 head 取**本地分支**而不是 `origin/<branch>`(`reviewScopeRequest.PreferLocalHead`,判定见 `preferLocalHeadFor`)——本地分支可能带着没推送的提交,拿 `origin/<branch>` 比对会静默 Review 掉「推送前的旧代码」,回归 Review 永远收敛不了;例外:**在 Agent Server 上开发**的需求保持 origin 优先(代码在远端并已推送,本地 worktree 只是分支隔离壳),无本地 worktree 的降级模式同理。项目级 Review 一律 origin 优先(PR 的两端都在服务端)。Review 模式的输入框与普通子任务**分开存**(`reviewGoal` vs `prompt`),切模式不会毁掉另一边写的草稿。
 
 ### Role config (`roles` 表 + `acl_roles` 表 — 两个"角色"含义不同)
 

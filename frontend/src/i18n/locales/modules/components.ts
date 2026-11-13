@@ -127,6 +127,7 @@ export const components = {
     reviewScanBusy: '扫描中…',
     reviewScanEmpty: '静态检查没有报出问题。',
     reviewLocalOnlyHint: '需求级 Review v1 仅在本地执行：回归 Review 必须看到工作区里未提交的修复。',
+    reviewNotDoneHint: '需求还没标记「开发完成」也能 Review —— 它以当前分支的现状（已提交 + 未提交）为准，够不够格由你判断。',
     reviewSubmitBtn: '🔍 启动 Review',
     loading: '加载中…',
     empty: '暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。',

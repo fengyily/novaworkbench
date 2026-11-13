@@ -139,6 +139,39 @@ func TestResolveReviewScope_MissingBranchIsAnError(t *testing.T) {
 	}
 }
 
+// TestResolveReviewScope_PrefersTheLocalHeadWhenAsked pins the wiring of
+// the local-head preference: a requirement-level Review that runs in the
+// requirement's own worktree must grade the LOCAL branch, because it may
+// carry commits the user never pushed — reviewing `origin/<branch>` there
+// would silently grade the pre-push code.
+func TestResolveReviewScope_PrefersTheLocalHeadWhenAsked(t *testing.T) {
+	work := newRefsFixture(t)
+	commitOnBranch(t, work, "feat/x", "x.txt")
+	gitIn(t, work, "push", "origin", "feat/x")
+	gitIn(t, work, "checkout", "feat/x")
+	if err := os.WriteFile(filepath.Join(work, "y.txt"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, work, "add", "y.txt")
+	gitIn(t, work, "commit", "-m", "local only")
+
+	sc, err := resolveReviewScope(t.Context(), reviewScopeRequest{
+		RepoDir:         work,
+		Branch:          "feat/x",
+		Base:            "main",
+		PreferLocalHead: true,
+	})
+	if err != nil {
+		t.Fatalf("resolveReviewScope: %v", err)
+	}
+	if sc.HeadRef != "feat/x" {
+		t.Fatalf("HeadRef = %q, want the local branch feat/x", sc.HeadRef)
+	}
+	if !strings.Contains(sc.Block, "feat/x") {
+		t.Fatalf("the scope block must name the reviewed head ref:\n%s", sc.Block)
+	}
+}
+
 // TestResolveReviewWorkDir_PrefersTheExistingWorktree pins the directory
 // choice: a Review must run in the directory its scope was resolved
 // against, and it must never be a freshly created worktree.

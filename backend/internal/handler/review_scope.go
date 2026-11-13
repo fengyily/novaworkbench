@@ -90,6 +90,19 @@ type reviewScopeRequest struct {
 	// commits onto the base branch itself, so the interesting diff is
 	// `base...HEAD` inside the checkout, not `base...some-feature-branch`.
 	HeadOverride string
+	// PreferLocalHead makes the head ref resolve to the LOCAL branch before
+	// its `origin/<branch>` twin.
+	//
+	// It is set when the Review runs in the requirement's own worktree: that
+	// tree is the code the user has in front of them, and its branch may
+	// carry commits that were never pushed. Resolving to `origin/<branch>`
+	// there would grade the pre-push code — the reviewer would report
+	// findings the user already fixed, and the 「修复 → 回归 Review」 loop
+	// would never converge.
+	//
+	// In the degraded mode (no local worktree) the pushed code is all there
+	// is, so the flag stays off and `origin/<branch>` wins as usual.
+	PreferLocalHead bool
 	// Env carries the askpass wiring for private HTTPS remotes.
 	Env []string
 }
@@ -113,7 +126,7 @@ func resolveReviewScope(ctx context.Context, req reviewScopeRequest) (reviewScop
 		}
 		headRef = req.HeadOverride
 	} else {
-		headRef, baseRef, fetchWarning, err = resolveDiffRefs(ctx, repoDir, req.Branch, req.Base, req.Env)
+		headRef, baseRef, fetchWarning, err = resolveDiffRefsPref(ctx, repoDir, req.Branch, req.Base, req.Env, req.PreferLocalHead)
 		if err != nil {
 			return reviewScope{}, err
 		}
