@@ -137,8 +137,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
+  // init — optional extra RequestInit (e.g. an AbortSignal for a call that
+  // may outlive the user's patience).
+  post: <T>(path: string, body: unknown, init?: RequestInit) =>
+    request<T>(path, { ...init, method: 'POST', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) =>
@@ -1258,6 +1260,12 @@ export interface Requirement {
   // 同一次「方案拆分」生成的子需求共享同一个批次 id（spb_<hex>）。空 = 该行
   // 不是拆分产物（人工创建 / 历史数据）。前端用它区分来源并按批次分组展示。
   split_batch_id?: string;
+  // 这一行在拆分批次里的序号（1 起算）—— 用户在确认界面上排好的顺序。
+  // 0 = 不属于任何有序批次（人工创建的子需求 / 历史数据 / 顶层需求）。
+  //
+  // 这一列是批次顺序**唯一**的持久化落点：同一批子需求共用一个 created_at，
+  // 只按创建时间排的话批内顺序是未定义的（实际退化成按随机 id 排，顺序会乱）。
+  split_order?: number;
   // 开发权已下放给子需求（true）时，本需求不再自己写代码 —— coding 闸门会
   // 拒绝它进入开发，主需求改为「全部子需求完成后才能标记完成」。
   dev_delegated?: boolean;
@@ -1542,6 +1550,45 @@ export interface SplitTaskCandidate {
   depends_on: number[];
 }
 
+// 一对「互相参考」的子需求 —— 由模型以架构师视角判断，用户只需要确认或微调。
+//
+// from / to 是**批次内序号**（1 起算，与候选列表的顺序一致），不是数据库 id。
+// 互相引用是无向的：后端已把 from / to 归一成 from < to。
+export interface SplitReference {
+  from: number;
+  to: number;
+  /** 模型给出的判断依据（一句话）。可能为空。 */
+  reason?: string;
+}
+
+// 一次拆分运行的登记状态 —— 与后端 GET /api/requirements/{id}/split/state
+// 的响应一一对应。
+//
+// 这是拆分唯一的「状态可发现」入口：弹窗挂载时先查它，据此决定进入
+// 配置 / 运行中 / 候选复核 哪个阶段 —— 关掉弹窗再打开时，用户能看到上一轮
+// 拆分的状态与候选，而不是被迫重跑一次 AI。
+export interface SplitRunState {
+  /** none = 从没跑过；running / done / error = 最近一次拆分的状态。 */
+  status: 'none' | 'running' | 'done' | 'error';
+  /** 最近一次拆分的 job id —— 用来重挂 SSE（关掉弹窗再打开时接回同一轮）。 */
+  job_id?: string;
+  running: boolean;
+  /** 失败时后端给的用户可见中文原因（后端 error_message 字段）。 */
+  error_message?: string;
+  /** 候选列表；后端保证是数组（不会吐 null）。 */
+  candidates: SplitTaskCandidate[];
+  /** 模型以架构师视角判断的「互相参考」建议；后端保证是数组（不会吐 null）。 */
+  references?: SplitReference[];
+  /** 实际生效的模型（persona 默认值或用户覆盖值）。 */
+  model?: string;
+  /** local | agent-server */
+  exec_env?: 'local' | 'agent-server';
+  agent_server_id?: string;
+  /** Unix 毫秒。0 = 还没发生。 */
+  created_at?: number;
+  finished_at?: number;
+}
+
 // 落库结果 —— 每个子需求的 id / 基线 / 前置 id。
 export interface SplitConfirmResult {
   children: Array<{
@@ -1669,7 +1716,8 @@ export const requirementsApi = {
   // ── 方案拆分 ────────────────────────────────────────────────────────────
   // split: start the AI split. Returns { job_id }; the candidate list arrives
   // on the job's SSE stream (splitStreamUrl). The terminal job_done frame
-  // carries `result.tasks`.
+  // carries `result.tasks` (an object with a tasks array) plus
+  // `error_message` (the backend's user-visible failure reason).
   //
   // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
   // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
@@ -1678,8 +1726,12 @@ export const requirementsApi = {
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +
   // the master's dev_delegated flag).
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }) =>
-    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body),
+  //
+  // signal — optional AbortSignal. The confirm prepares the stack-bottom
+  // branch and PUSHES it to origin, so the request can take a while on a slow
+  // or unreachable remote; the caller aborts it instead of spinning forever.
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }, signal?: AbortSignal) =>
+    api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body, signal ? { signal } : undefined),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>
     api.get<RequirementChildList>(`/api/requirements/${id}/children`),
@@ -1688,6 +1740,14 @@ export const requirementsApi = {
   // structured payload on the terminal frame.
   splitStreamUrl: (id: string, jobId: string) =>
     `${API_BASE}/api/requirements/${id}/split/${jobId}/stream`,
+  // splitState: 最近一次拆分的状态（状态 / 候选 / 失败原因）。
+  //
+  // 弹窗挂载时先查它，据此决定进入「配置 / 运行中 / 候选复核」哪个阶段 ——
+  // 关掉弹窗再打开时能看到上一轮拆分，而不是被迫重跑一次。
+  //
+  // 「没跑过」是正常状态：后端回 200 + {status:"none"}，不是 404。
+  splitState: (id: string) =>
+    api.get<SplitRunState>(`/api/requirements/${id}/split/state`),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

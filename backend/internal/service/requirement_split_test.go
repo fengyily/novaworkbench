@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/util"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -394,5 +395,167 @@ func TestUpdateStatus_MasterNeedsAllChildrenDone(t *testing.T) {
 	}
 	if _, err := svc.UpdateStatus("req_master", "done"); err != nil {
 		t.Fatalf("UpdateStatus(done) with all children done: %v", err)
+	}
+}
+
+// The batch order must SURVIVE the round trip — it is the only thing that
+// tells the user which child came first.
+//
+// The ids are pre-minted in REVERSE alphabetical order on purpose: an
+// implementation that ordered by id (the old "ORDER BY created_at, id", which
+// degenerated into an id sort because every child of one split shares a
+// single created_at) would hand the children back reversed, so this test
+// fails loudly if the order is derived from anything but the batch ordinal.
+func TestCreateChildren_PersistsBatchOrder(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+
+	tasks := splitTasks()
+	ids := []string{"req_zzz", "req_mmm", "req_aaa"} // sorted the other way round
+	for i := range tasks {
+		tasks[i].ID = ids[i]
+	}
+	children, err := svc.CreateChildren(master, tasks, nil, SplitCreateOpts{})
+	if err != nil {
+		t.Fatalf("CreateChildren: %v", err)
+	}
+
+	// The order is persisted on the rows themselves.
+	for i, c := range children {
+		if c.SplitOrder != i+1 {
+			t.Errorf("child %d (%s): split_order = %d, want %d", i, c.ID, c.SplitOrder, i+1)
+		}
+	}
+
+	// …and the read path hands them back in that order.
+	listed, err := svc.ListChildren("req_master")
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	want := []string{"子需求 A", "子需求 B", "子需求 C"}
+	if len(listed) != len(want) {
+		t.Fatalf("got %d children, want %d", len(listed), len(want))
+	}
+	for i, c := range listed {
+		if c.Title != want[i] {
+			t.Errorf("child %d: title = %q, want %q (order not preserved)", i, c.Title, want[i])
+		}
+		if c.SplitOrder != i+1 {
+			t.Errorf("child %d: split_order = %d, want %d", i, c.SplitOrder, i+1)
+		}
+	}
+}
+
+// The prerequisites come back in the batch order too — "还差哪些前置" must
+// read the same way as the split preview did.
+func TestUnmetDependencies_FollowsBatchOrder(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	tasks := splitTasks()
+	for i := range tasks {
+		tasks[i].ID = []string{"req_zzz", "req_mmm", "req_aaa"}[i]
+	}
+	children, err := svc.CreateChildren(master, tasks, nil, SplitCreateOpts{})
+	if err != nil {
+		t.Fatalf("CreateChildren: %v", err)
+	}
+	a, b, c := children[0], children[1], children[2]
+	for _, e := range []model.DependencyEdge{
+		{RequirementID: b.ID, DependsOnID: a.ID},
+		{RequirementID: c.ID, DependsOnID: a.ID},
+		{RequirementID: c.ID, DependsOnID: b.ID},
+	} {
+		if _, err := svc.db.Exec(
+			`INSERT INTO requirement_dependencies (id, requirement_id, depends_on_id, batch_id, created_at) VALUES (?, ?, ?, 'spb_x', CURRENT_TIMESTAMP)`,
+			util.NewID("dep"), e.RequirementID, e.DependsOnID); err != nil {
+			t.Fatalf("insert edge: %v", err)
+		}
+	}
+
+	unmet, err := svc.UnmetDependencies(c.ID)
+	if err != nil {
+		t.Fatalf("UnmetDependencies: %v", err)
+	}
+	if len(unmet) != 2 {
+		t.Fatalf("unmet = %v, want 2 entries", unmet)
+	}
+	// The batch order (a = split_order 1, b = 2) — an id-based order would
+	// hand them back the other way round (b = req_mmm sorts before a =
+	// req_zzz).
+	if unmet[0].ID != a.ID || unmet[1].ID != b.ID {
+		t.Errorf("unmet = [%s %s], want [%s %s] (the batch order)",
+			unmet[0].ID, unmet[1].ID, a.ID, b.ID)
+	}
+}
+
+// OrderSplitTasks is the single owner of the batch order: it sorts, renumbers
+// to a contiguous 1..N, and hands back the ordinal remap the caller needs to
+// translate depends_on / references.
+func TestOrderSplitTasks_SortsRenumbersAndRemaps(t *testing.T) {
+	tasks := []model.SplitTaskInput{
+		{Title: "C", Order: 7},
+		{Title: "A", Order: 2},
+		{Title: "B", Order: 5},
+	}
+	ordered, remap := OrderSplitTasks(tasks)
+
+	wantTitles := []string{"A", "B", "C"}
+	for i, tsk := range ordered {
+		if tsk.Title != wantTitles[i] {
+			t.Errorf("ordered[%d] = %q, want %q", i, tsk.Title, wantTitles[i])
+		}
+		if tsk.Order != i+1 {
+			t.Errorf("ordered[%d].Order = %d, want %d (contiguous 1..N)", i, tsk.Order, i+1)
+		}
+	}
+	// The old ordinal space (2, 5, 7) maps onto the new one (1, 2, 3).
+	for old, want := range map[int]int{2: 1, 5: 2, 7: 3} {
+		if remap[old] != want {
+			t.Errorf("remap[%d] = %d, want %d", old, remap[old], want)
+		}
+	}
+
+	// A dependency expressed in the old space follows the row it pointed at.
+	got := RemapSplitOrdinals([]int{7, 2, 999}, remap)
+	wantGot := []int{1, 3} // 7→3 (C), 2→1 (A); 999 points at nothing
+	if len(got) != len(wantGot) {
+		t.Fatalf("RemapSplitOrdinals = %v, want %v", got, wantGot)
+	}
+	for i := range wantGot {
+		if got[i] != wantGot[i] {
+			t.Errorf("RemapSplitOrdinals = %v, want %v", got, wantGot)
+		}
+	}
+}
+
+// A task without an order keeps its input position (the same rule the prompt
+// layer and the frontend use) instead of jumping to the front.
+func TestOrderSplitTasks_MissingOrderKeepsPosition(t *testing.T) {
+	tasks := []model.SplitTaskInput{
+		{Title: "A", Order: 0},
+		{Title: "B", Order: 3},
+		{Title: "C", Order: 0},
+	}
+	ordered, _ := OrderSplitTasks(tasks)
+	wantTitles := []string{"A", "B", "C"}
+	for i, tsk := range ordered {
+		if tsk.Title != wantTitles[i] {
+			t.Errorf("ordered[%d] = %q, want %q", i, tsk.Title, wantTitles[i])
+		}
+		if tsk.Order != i+1 {
+			t.Errorf("ordered[%d].Order = %d, want %d", i, tsk.Order, i+1)
+		}
 	}
 }

@@ -65,6 +65,16 @@ type Requirement struct {
 	// does NOT mean the master gave up development. Only the explicit split
 	// action does — the rule must be auditable.
 	DevDelegated bool `json:"dev_delegated"`
+	// SplitOrder is the row's 1-based ordinal inside its split batch — the
+	// order the user arranged the candidates in before confirming. 0 = the
+	// row is not part of an ordered batch (manual child / legacy row /
+	// top-level requirement).
+	//
+	// It exists because the batch order could not be recovered from
+	// created_at: every child of one split shares a single created_at, so
+	// "ORDER BY created_at" degenerated into ordering by the random
+	// req_<hex> id and the children came back shuffled.
+	SplitOrder int `json:"split_order"`
 	// ChildCount is a read-only derived count of non-archived children,
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`

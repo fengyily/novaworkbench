@@ -3959,3 +3959,25 @@ allowed so the row collapses cleanly on every viewport. */
   font-size: 12px;
   line-height: 1.4;
 }
+
+/* ── 拆分按钮的「运行中」徽标 ─────────────────────────────────────────
+   Shows that a 方案拆分 is in flight for this requirement even while the
+   modal is closed. Driven by the page's existing 5s active-jobs poll,
+   filtered on type === 'requirement_split'. */
+.req-split-btn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-primary, #4f46e5);
+  background: var(--color-active, #eef2ff);
+  animation: req-split-badge-pulse 1.4s ease-in-out infinite;
+}
+@keyframes req-split-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

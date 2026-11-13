@@ -654,6 +654,13 @@ export default function RequirementDetail() {
   // and the amber pulse animation on the status badge.
   const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
+  // The id of the split job currently running for THIS requirement (if any).
+  // Drives the 「运行中」 badge on the 拆分任务 button, so the user can see
+  // that a split is in flight even with the modal closed. The backend tags
+  // the job with type='requirement_split', so the same 5s poll that feeds
+  // activeReqIds can pick it out — no extra request needed.
+  const [activeSplitJobId, setActiveSplitJobId] = useState('');
+
   // Per-stage model selection (analyst / architect / developer). Seeded once
   // from the server-persisted stage model so each dropdown defaults to the
   // previously-set model; a user switch is sent with the next stage POST.
@@ -752,6 +759,12 @@ export default function RequirementDetail() {
         const { jobs } = await wizardApi.listActiveJobs();
         if (cancelled) return;
         setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+        // The split job carries type='requirement_split' (set by the backend's
+        // Split handler) — pick it out so the button can show a running badge.
+        const splitJob = jobs.find(
+          (j) => j.requirement_id === req?.id && j.type === 'requirement_split',
+        );
+        setActiveSplitJobId(splitJob?.job_id ?? '');
       } catch {
         /* transient network blip — keep the previous set until the next tick */
       }
@@ -5689,6 +5702,9 @@ export default function RequirementDetail() {
                     title={t('requirements.split.btnTitle')}
                   >
                     🧩 {t('requirements.split.btn')}
+                    {activeSplitJobId && (
+                      <span className="req-split-btn-badge">{t('requirements.split.running')}</span>
+                    )}
                   </button>
                 )}
               </div>

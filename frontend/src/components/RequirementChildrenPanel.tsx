@@ -80,11 +80,18 @@ export function RequirementChildrenPanel({
     if (onChildCountChange) onChildCountChange(data?.children.length ?? 0);
   }, [data, onChildCountChange]);
 
-  // Ordinal (1-based, by creation order) → child row, so the markers can
-  // point at "②" the way the split preview numbered them.
+  // Ordinal (1-based) → child row, so the markers can point at "②" the way
+  // the split preview numbered them.
+  //
+  // The number comes from the child's PERSISTED batch ordinal (split_order),
+  // not from its position in this array: the backend orders the children by
+  // that ordinal, so the two agree for a split batch — but a manually
+  // attached child has no split_order and falls back to its position.
   const ordinalOf = useMemo(() => {
     const map = new Map<string, number>();
-    (data?.children ?? []).forEach((c, i) => map.set(c.id, i + 1));
+    (data?.children ?? []).forEach((c, i) =>
+      map.set(c.id, c.split_order && c.split_order > 0 ? c.split_order : i + 1),
+    );
     return map;
   }, [data]);
 
@@ -149,10 +156,13 @@ export function RequirementChildrenPanel({
             const dependents = (dependedOnBy.get(c.id) ?? [])
               .map((id) => ordinalOf.get(id))
               .filter((n): n is number => n !== undefined);
+            // The badge shows the batch ordinal (the number the split
+            // preview used), not the array position.
+            const ordinal = ordinalOf.get(c.id) ?? i + 1;
             return (
               <div className="req-child-card" key={c.id}>
                 <div className="req-child-main">
-                  <span className="req-child-idx">{i + 1}</span>
+                  <span className="req-child-idx">{ordinal}</span>
                   <Link className="req-child-title" to={`/requirements/${c.id}`}>
                     {c.title || t('requirements.split.noTitle')}
                   </Link>

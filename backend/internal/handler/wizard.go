@@ -151,7 +151,7 @@ func NewWizardHandler(database *db.DB, projectSvc projectService, reqSvc *servic
 		subTaskRunner:          subTaskRunner,
 		batchSvc:               batchSvc,
 		settingSvc:             settingSvc,
-		split:                  &splitState{results: newSplitJobResults(), locks: newSplitLocks()},
+		split:                  &splitState{runs: newSplitRuns(splitRunsCap), locks: newSplitLocks()},
 		summaryKickIntervalSec: 5,
 	}
 }

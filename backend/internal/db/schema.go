@@ -1741,6 +1741,17 @@ var alterColumns = []string{
 	// 约定，保证三方言一致（TEXT 字面量默认值在 MySQL 上需要改写成
 	// DEFAULT ('…')，INTEGER 无此问题）。
 	`ALTER TABLE requirements ADD COLUMN dev_delegated INTEGER NOT NULL DEFAULT 0`,
+	// split_order: 这一行在「拆分批次」里的序号（1 起算）—— 也就是用户
+	// 在确认界面上排好的顺序。0 = 不属于任何有序批次（人工创建的子需求 /
+	// 历史数据 / 顶层需求）。
+	//
+	// 为什么必须有这一列：拆分落库时一批子需求**共用同一个 created_at**
+	// （一次事务、一个 now），所以「按创建时间排序」会退化成「按随机
+	// req_<hex> id 排序」—— 子需求回来时顺序是乱的，依赖标记（「依赖 ②」）
+	// 也跟着指错行。序号是唯一能把批次顺序**持久化**的地方：写进这一列，
+	// 读路径按它排序（ListChildren / 列表接口 / UnmetDependencies），
+	// 顺序才不会随进程重启或随机 id 漂移。
+	`ALTER TABLE requirements ADD COLUMN split_order INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (

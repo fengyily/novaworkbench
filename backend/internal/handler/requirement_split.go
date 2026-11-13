@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -75,10 +74,13 @@ type splitExecTarget struct {
 // 测试注入假实现来断言「用户选的执行环境有没有被真正用上」—— WizardHandler.llm
 // 是具体类型 *llm.Gateway、SSH 也是具体类型 *gossh.Client，没有别的替身方式。
 //
+// 返回 (候选, 互相参考建议, 错误原因)：三者至多其一非空 —— 失败时错误原因非空，
+// 成功时候选非空、参考建议可能为空（模型判断确实没有互相引用的子需求对）。
+//
 // run 携带这一轮的执行期素材（附件目录 / --add-dir 授权 / 上下文块），让注入
 // 的假实现也能断言「清单与授权是不是一起抵达了执行层」。
 type splitExecFunc func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string)
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string)
 
 // ConfirmSplitReq — POST /api/requirements/{id}/split/confirm 的请求体。
 type ConfirmSplitReq struct {
@@ -95,86 +97,12 @@ type ConfirmSplitReq struct {
 	SourceBranch string `json:"source_branch"`
 }
 
-// splitJobResults — 拆分结果在进程内的暂存。
-//
-// 结果是「内存态」：刷新页面即丢（方案的 R15 接受这一点 —— 重跑一次比维护
-// 第二套状态机便宜）。进程重启后 map 为空 → SSE 的 done 帧带 result=null →
-// 前端提示「拆分结果已失效，请重新生成」。
-type splitJobResults struct {
-	mu   sync.RWMutex
-	byID map[string][]prompt.SplitTask
-}
-
-func newSplitJobResults() *splitJobResults {
-	return &splitJobResults{byID: map[string][]prompt.SplitTask{}}
-}
-
-func (r *splitJobResults) set(jobID string, tasks []prompt.SplitTask) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.byID[jobID] = tasks
-}
-
-func (r *splitJobResults) get(jobID string) []prompt.SplitTask {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	tasks, ok := r.byID[jobID]
-	if !ok {
-		return nil
-	}
-	out := make([]prompt.SplitTask, len(tasks))
-	copy(out, tasks)
-	return out
-}
-
-// splitLocks — 幂等锁：requirementID → 正在跑的 job id。
-//
-// 重复点击 / 多标签页并发拆分会产生两批重复子需求，所以同一需求的拆分在任一
-// 时刻只允许一个。锁在 job 结束时释放。
-type splitLocks struct {
-	mu    sync.Mutex
-	byReq map[string]string
-}
-
-func newSplitLocks() *splitLocks {
-	return &splitLocks{byReq: map[string]string{}}
-}
-
-// acquire returns the existing job id when a split is already running for
-// this requirement, and "" when the caller may proceed.
-func (l *splitLocks) acquire(reqID, jobID string) (existing string, ok bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.byReq == nil {
-		l.byReq = map[string]string{}
-	}
-	if cur, running := l.byReq[reqID]; running {
-		return cur, false
-	}
-	l.byReq[reqID] = jobID
-	return "", true
-}
-
-func (l *splitLocks) release(reqID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.byReq, reqID)
-}
-
-// peek reports the running job id for a requirement without taking the
-// lock. It lets the handler bail out BEFORE creating a job, so a refused
-// second split doesn't leave a stray job in the ring buffer.
-func (l *splitLocks) peek(reqID string) (jobID string, running bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	jobID, running = l.byReq[reqID]
-	return jobID, running
-}
-
 // splitState holds the per-handler mutable state of the split feature.
 type splitState struct {
-	results *splitJobResults
-	locks   *splitLocks
+	// runs — 权威登记处（状态 + 候选 + requirementID→jobID 映射）。
+	runs *splitRuns
+	// locks — 并发闸门（同一需求同时只允许跑一次拆分）。
+	locks *splitLocks
 }
 
 // splitState returns the handler's split state, creating it on first use.
@@ -189,7 +117,7 @@ func (h *WizardHandler) splitState() *splitState {
 	splitStateInitMu.Lock()
 	defer splitStateInitMu.Unlock()
 	if h.split == nil {
-		h.split = &splitState{results: newSplitJobResults(), locks: newSplitLocks()}
+		h.split = &splitState{runs: newSplitRuns(splitRunsCap), locks: newSplitLocks()}
 	}
 	return h.split
 }
@@ -257,12 +185,20 @@ func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
 
 	// The authoritative check (atomic). If another request won the race
 	// between the peek and here, finish our job and bail.
+	//
+	// The run is registered only AFTER the lock is won: registering first
+	// would let a job that never ran overwrite latest[reqID] and hide the
+	// run that IS running.
 	if existing, ok := st.locks.acquire(reqID, job.ID); !ok {
 		job.Finish(1, store.JobError)
 		writeError(w, http.StatusConflict, "SPLIT_IN_PROGRESS",
 			fmt.Sprintf("已有拆分任务在运行（job %s），请等待结束", existing))
 		return
 	}
+
+	// 登记 run —— 必须在 writeJSON 之前：前端拿到 job_id 后可能立刻查 state，
+	// 若此时还没登记，state 会误报 "none"，弹窗就会以为「从没跑过」。
+	st.runs.start(job.ID, reqID, strings.TrimSpace(body.Model), strings.TrimSpace(body.AgentServerID))
 
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
@@ -328,6 +264,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[split] %s: panic: %v", reqRow.ID, r)
+			st.runs.finish(job.ID, store.JobError, "拆分过程异常终止", nil, nil)
 			job.Append(store.LogLine{Type: "error", Content: "拆分过程异常终止"})
 			job.Finish(1, store.JobError)
 		}
@@ -347,6 +284,9 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	if strings.TrimSpace(body.ClaudeConfigID) != "" {
 		configID = body.ClaudeConfigID
 	}
+	// The effective model is resolved here, not from the request body — the
+	// state endpoint must report the model that actually ran.
+	st.runs.update(job.ID, func(r *splitRun) { r.Model = modelName })
 
 	// The requirement's own material: attachments, granted directories and
 	// referenced requirements — plus the --add-dir grants that make the
@@ -366,7 +306,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在分析方案并拆分任务…"})
 
-	tasks, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, run, usage)
+	tasks, refs, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, run, usage)
 	if errMsg != "" {
 		h.finishSplitError(job, st, errMsg)
 		return
@@ -381,7 +321,9 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		tasks = tasks[:splitMaxCandidates]
 	}
 
-	st.results.set(job.ID, tasks)
+	// 登记终态必须在 job.Finish 之前 —— store.Job.Finish 会关闭所有订阅者
+	// channel，订阅者醒来时读到的必须是已填好的状态。
+	st.runs.finish(job.ID, store.JobDone, "", tasks, refs)
 	job.Append(store.LogLine{Type: "message", Content: prompt.SplitSummary(tasks)})
 	job.Finish(0, store.JobDone)
 }
@@ -393,7 +335,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 // The injectable h.splitExec short-circuits the whole thing — production
 // leaves it nil and the default local / remote implementations run.
 func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement, body SplitReq,
-	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	target := splitExecTarget{AgentServerID: strings.TrimSpace(body.AgentServerID)}
 	target.Remote = target.AgentServerID != ""
 	if h.splitExec != nil {
@@ -414,7 +356,7 @@ func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement
 // the HTTP channel from here, which is why the remote path has no such
 // fallback (see requirement_split_remote.go).
 func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Requirement,
-	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	workDir := h.splitWorkDir(reqRow)
 
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
@@ -439,29 +381,33 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 	if strings.TrimSpace(jsonPart) == "" {
 		jsonPart = out.planContent
 	}
-	tasks := prompt.NormalizeSplitTasks(jsonPart)
+	parsed := prompt.NormalizeSplitOutput(jsonPart)
 
-	if len(tasks) == 0 {
+	if len(parsed.Tasks) == 0 {
 		// CLI path produced nothing usable — fall back to the direct HTTP
 		// channel before giving up. The context block travels with it, so the
 		// fallback does not lose the requirement's material.
 		job.Append(store.LogLine{Type: "phase", Content: "⚠️ 本地 CLI 未产出可解析的拆分结果，改用直接 LLM 通道重试…"})
 		raw, ferr := h.llm.ExtractSubRequirementsFromDesign(reqRow.DesignDocs, run.ContextBlock, out.errMsg)
 		if ferr != nil {
-			return nil, "拆分失败: " + ferr.Error()
+			return nil, nil, "拆分失败: " + ferr.Error()
 		}
-		tasks = prompt.NormalizeSplitTasks(raw)
-		if len(tasks) == 0 {
-			return nil, "未能从技术方案中解析出候选子需求，请调整方案后重试"
+		parsed = prompt.NormalizeSplitOutput(raw)
+		if len(parsed.Tasks) == 0 {
+			return nil, nil, "未能从技术方案中解析出候选子需求，请调整方案后重试"
 		}
 	}
 
-	return tasks, ""
+	return parsed.Tasks, parsed.References, ""
 }
 
 // finishSplitError reports a failed split on the job stream.
+//
+// The failure reason is recorded BOTH on the registry (so the state endpoint
+// can serve it after the modal is reopened) and as an "error" log line (so it
+// shows up in the live stream).
 func (h *WizardHandler) finishSplitError(job *store.Job, st *splitState, msg string) {
-	st.results.set(job.ID, nil)
+	st.runs.finish(job.ID, store.JobError, msg, nil, nil)
 	job.Append(store.LogLine{Type: "error", Content: msg})
 	job.Finish(1, store.JobError)
 }
@@ -517,21 +463,119 @@ func (h *WizardHandler) StreamSplitJob(w http.ResponseWriter, r *http.Request) {
 	st := h.splitState()
 	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
 		var result any
-		if tasks := st.results.get(jobID); len(tasks) > 0 {
-			result = tasks
+		var errMsg string
+		if run := st.runs.get(jobID); run != nil {
+			errMsg = run.Error
+			// 终帧的 result 统一是对象 {"tasks":[...], "references":[...]}。
+			//
+			// 旧实现把候选裸数组塞进 result，而前端读的是 result.tasks ——
+			// 两者永远对不上，拆分在 UI 上一直是坏的（每次都报"结果已失效"）。
+			// 对象形态可扩展（将来加 model / exec_env 不破坏前端），前端
+			// 同时兼容裸数组 / {tasks} / {candidates} 三种形态。
+			//
+			// references 是模型以架构师视角判断的「互相参考」建议（批次内
+			// 序号对 + 判断理由）。这一层人眼很难自己判断，所以由模型给结论，
+			// 用户只需要确认或微调。
+			tasks := run.Candidates
+			if tasks == nil {
+				tasks = []prompt.SplitTask{} // tasks 永远是数组，不是 null
+			}
+			refs := run.References
+			if refs == nil {
+				refs = []prompt.SplitReference{}
+			}
+			result = map[string]any{"tasks": tasks, "references": refs}
 		}
 		doneData, _ := json.Marshal(map[string]interface{}{
 			"type":        "job_done",
 			"status":      string(status),
 			"exit_code":   exitCode,
 			"error_kind":  job.ErrorKind,
-			"started_at":  job.StartedAt.UnixMilli(),
-			"finished_at": job.FinishedAt.UnixMilli(),
-			"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
-			"result":      result,
+			// 新增：后端给的用户可见中文失败原因。前端拿它当错误条文案，
+			// 不用再拼一个空泛的"拆分失败："。
+			"error_message": errMsg,
+			"started_at":    job.StartedAt.UnixMilli(),
+			"finished_at":   job.FinishedAt.UnixMilli(),
+			"duration_ms":   job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
+			"result":        result,
 		})
 		return doneData
 	})
+}
+
+// ── GET /api/requirements/{id}/split/state ──────────────────────────────────
+
+// GetSplitState reports the most recent split run of a requirement.
+//
+// 这是拆分唯一的"状态可发现"入口：弹窗挂载时先查这里，据此决定进入
+// 配置 / 运行中 / 候选复核 三个阶段中的哪一个 —— 关掉弹窗再打开时，用户能看到
+// 上一轮拆分的状态与候选，而不是被迫重跑一次 AI。
+//
+// "没跑过"是正常状态不是错误：回 200 + {"status":"none"}，不是 404。
+func (h *WizardHandler) GetSplitState(w http.ResponseWriter, r *http.Request) {
+	reqID := r.PathValue("id")
+	st := h.splitState()
+	run := st.runs.latestFor(reqID)
+	if run == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "none",
+			"job_id":          "",
+			"running":         false,
+			"error_message":   "",
+			"candidates":      []prompt.SplitTask{},
+			"references":      []prompt.SplitReference{},
+			"model":           "",
+			"exec_env":        "",
+			"agent_server_id": "",
+			"created_at":      int64(0),
+			"finished_at":     int64(0),
+		})
+		return
+	}
+	execEnv := "local"
+	if strings.TrimSpace(run.AgentServerID) != "" {
+		execEnv = "agent-server"
+	}
+	// 零值 time 的 UnixMilli 是个很大的负数 —— 用 IsZero() 归一成 0，
+	// 前端只在 finished_at > 0 时显示时间。
+	var created, finished int64
+	if !run.CreatedAt.IsZero() {
+		created = run.CreatedAt.UnixMilli()
+	}
+	if !run.FinishedAt.IsZero() {
+		finished = run.FinishedAt.UnixMilli()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          string(run.Status), // running | done | error
+		"job_id":          run.JobID,
+		"running":         run.Status == store.JobRunning,
+		"error_message":   run.Error,
+		"candidates":      splitCandidatesOrEmpty(run.Candidates), // 归一为 []，不吐 null
+		"references":      splitReferencesOrEmpty(run.References), // 归一为 []，不吐 null
+		"model":           run.Model,
+		"exec_env":        execEnv, // local | agent-server
+		"agent_server_id": run.AgentServerID,
+		"created_at":      created,
+		"finished_at":     finished, // 0 = 还没结束
+	})
+}
+
+// splitCandidatesOrEmpty normalizes a nil candidate slice into an empty one —
+// the wire format must always carry an array, never null.
+func splitCandidatesOrEmpty(c []prompt.SplitTask) []prompt.SplitTask {
+	if c == nil {
+		return []prompt.SplitTask{}
+	}
+	return c
+}
+
+// splitReferencesOrEmpty normalizes a nil reference slice into an empty one —
+// same rule as the candidate list: the wire format always carries an array.
+func splitReferencesOrEmpty(r []prompt.SplitReference) []prompt.SplitReference {
+	if r == nil {
+		return []prompt.SplitReference{}
+	}
+	return r
 }
 
 // ── POST /api/requirements/{id}/split/confirm ─────────────────────────────
@@ -601,15 +645,18 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	// Order the candidates and pre-mint their ids so the dependency edges
 	// (which reference real ids) can be inserted in the same transaction as
 	// the rows themselves.
-	tasks := make([]model.SplitTaskInput, len(body.Tasks))
-	copy(tasks, body.Tasks)
-	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].Order < tasks[j].Order })
+	//
+	// OrderSplitTasks is the ONE place that decides the batch order: it
+	// sorts by `order`, renumbers to a contiguous 1..N, and hands back the
+	// old→new ordinal mapping. The mapping is what makes the ordinal-based
+	// references (depends_on / the "互相参考" pairs) survive the sort — the
+	// client speaks in `order` numbers, the rows are stored in position
+	// order, and without the remap a non-contiguous `order` would attach
+	// every dependency to the wrong row.
+	tasks, ordinalRemap := service.OrderSplitTasks(body.Tasks)
 
 	ids := make([]string, len(tasks))
 	for i := range tasks {
-		if tasks[i].Order <= 0 {
-			tasks[i].Order = i + 1
-		}
 		ids[i] = util.NewID("req")
 		tasks[i].ID = ids[i]
 	}
@@ -618,7 +665,7 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	// real ids here.
 	edges := []model.DependencyEdge{}
 	for i, task := range tasks {
-		for _, dep := range task.DependsOn {
+		for _, dep := range service.RemapSplitOrdinals(task.DependsOn, ordinalRemap) {
 			// dep is an ordinal into the ordered task list.
 			idx := dep - 1
 			if idx < 0 || idx >= len(tasks) || idx == i {
@@ -653,8 +700,12 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	warnings := append([]string{}, stackWarnings...)
-	if len(body.References) > 0 {
-		if err := h.applySplitReferences(children, body.References); err != nil {
+	// The reference pairs speak the same ordinal language as depends_on, so
+	// they go through the same remap — otherwise a non-contiguous `order`
+	// would link the wrong pair of children.
+	refs := remapSplitReferences(body.References, ordinalRemap)
+	if len(refs) > 0 {
+		if err := h.applySplitReferences(children, refs); err != nil {
 			log.Printf("[split] %s: reference linking failed: %v", reqID, err)
 			warnings = append(warnings, "子需求已创建，但互相引用关系设置失败："+err.Error())
 		}
@@ -710,6 +761,16 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		effectiveBase = children[0].BaseBranch
 	}
 
+	// 候选已经落库，这一轮 run 就"用掉了" —— 标记为已消费，state 端点随即回
+	// status:none。用户重开弹窗回到配置阶段，不会看到一份已经落过库的旧候选
+	//（会误以为还能再创建一批）。
+	//
+	// 用 consumeLatest 而不是按 job_id 消费：ConfirmSplitReq 里没有 job_id，
+	// 而同一需求同时只允许跑一次拆分（splitLocks 保证），且确认后 dev_delegated
+	// 会让 splitPreconditionError 挡掉二次拆分 —— 所以"最近一次 run"就是被确认
+	// 的那一轮。
+	h.splitState().runs.consumeLatest(reqID)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"children":    out,
 		"warnings":    warnings,
@@ -717,6 +778,25 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		"stack_base":  stackBase,
 		"pushed":      stackPushed,
 	})
+}
+
+// remapSplitReferences translates the "互相参考" pairs from the client's
+// ordinal space into the batch's position space.
+//
+// A pair whose ends don't survive the remap (pointing at a candidate that
+// isn't there) is dropped — a reference to a nonexistent sibling would make
+// SetReferences fail for the WHOLE batch.
+func remapSplitReferences(refs [][2]int, remap map[int]int) [][2]int {
+	out := make([][2]int, 0, len(refs))
+	for _, pair := range refs {
+		from, okFrom := remap[pair[0]]
+		to, okTo := remap[pair[1]]
+		if !okFrom || !okTo || from == to {
+			continue
+		}
+		out = append(out, [2]int{from, to})
+	}
+	return out
 }
 
 // applySplitReferences writes the user-picked "互相参考" links.

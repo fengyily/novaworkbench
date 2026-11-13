@@ -33,11 +33,28 @@ import (
 
 // 拆分时的 git 超时。比对推送链路（pushShellStepTimeout = 10m）短得多：
 // 这里跑在同步的 HTTP 请求里，不能让用户对着一个转圈按钮等十分钟。
+//
+// 这些数字是**用户体验**的一部分：确认子需求只有一个同步请求，用户全程盯着
+// 一个「创建中…」按钮。远端不可达是最常见的失败原因，所以每一次远端往返都要
+// 有自己的短上限，而不是让它们加起来变成好几分钟。
 const (
+	// splitLsRemoteTimeout — 查询远端某个分支的 sha（一次廉价往返）。
+	// 这同时充当「远端是否可达」的探针。
+	splitLsRemoteTimeout = 15 * time.Second
 	// splitFetchTimeout — best-effort 拉取来源分支。
 	splitFetchTimeout = 30 * time.Second
-	// splitBranchGitTimeout — 建分支 / 对齐分支 / 推送。
-	splitBranchGitTimeout = 60 * time.Second
+	// splitBranchGitTimeout — 建分支 / 对齐分支（纯本地操作）。
+	splitBranchGitTimeout = 45 * time.Second
+	// splitPushTimeout — 推送栈底分支到 origin。
+	splitPushTimeout = 30 * time.Second
+	// splitRecheckTimeout — 推送失败后回头确认远端是否已有该分支。
+	// 这是一次廉价的「远端还在吗」探测，给它一个短上限。
+	splitRecheckTimeout = 10 * time.Second
+	// splitStackBudget — 整个栈底准备阶段的**总**预算。
+	//
+	// 单步超时之和可达数分钟，而用户全程只能盯着一个「创建中…」按钮。
+	// 总预算把最坏情况钉死：超了就返回明确错误，而不是让请求无限期挂着。
+	splitStackBudget = 2 * time.Minute
 )
 
 // splitStackError — 拆分栈底准备阶段的失败，带一个稳定的错误码。
@@ -91,6 +108,18 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 		return "", false, warnings, nil
 	}
 
+	// No origin at all → there is nothing to push to, but the stack bottom
+	// branch is still created locally (the children develop on it). Only the
+	// PUSH is skipped, with a warning.
+	//
+	// This check must come BEFORE the reachability probe below: "origin does
+	// not exist" and "origin does not answer" are different situations, and
+	// only the latter is a hard failure.
+	hasOrigin := false
+	if remoteURL, rerr := gitRun(projectPath, "remote", "get-url", "origin"); rerr == nil && strings.TrimSpace(remoteURL) != "" {
+		hasOrigin = true
+	}
+
 	dev := requirementBranchName(reqRow.Kind, reqRow.ID)
 
 	// Resolve the source branch A: explicit pick → the master's current base
@@ -109,13 +138,34 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 	env, cleanup := h.splitGitEnv(reqRow)
 	defer cleanup()
 
-	// Best-effort fetch so a fresh origin/<A> wins over a stale local <A>.
-	// A failure here is not fatal — the local branch may be perfectly good.
-	if _, ferr := gitRunWithTimeout(projectPath, splitFetchTimeout, env, "fetch", "--quiet", "origin", sourceBranch); ferr != nil {
-		log.Printf("[split] %s: fetch origin %s failed (continuing): %v", reqRow.ID, sourceBranch, ferr)
-	}
+	// The whole preparation shares one budget: the user is staring at a
+	// 「创建中…」 button, so the request must always come back — with a
+	// result or with a clear reason — inside splitStackBudget.
+	deadline := time.Now().Add(splitStackBudget)
 
-	startRef := resolveStartRef(projectPath, sourceBranch)
+	// Resolve the ref the stack bottom is created from.
+	//
+	// The common case is "the local branch already IS the remote branch" —
+	// then `git fetch` is pure overhead (on a large repo it can take
+	// minutes) and a single `git ls-remote` proves it. Only when the two
+	// differ do we pay for a fetch.
+	//
+	// The same ls-remote doubles as the reachability probe. origin not
+	// answering means the stack bottom can never be pushed, and the whole
+	// split is doomed — so the user is told NOW (in seconds) instead of
+	// after the push has burned its own timeout. The old path made the user
+	// stare at 「创建中…」 for minutes before the same conclusion.
+	//
+	// When the fetch is skipped we must prefer the LOCAL ref: origin/<branch>
+	// may be a stale remote-tracking ref that the skipped fetch would not
+	// have refreshed.
+	startRef, remoteReachable := resolveSplitStartRef(projectPath, sourceBranch, env, hasOrigin)
+	if hasOrigin && !remoteReachable {
+		return "", false, warnings, &splitStackError{
+			code: "SPLIT_REMOTE_UNREACHABLE",
+			msg:  "无法连接远端仓库 origin（网络不可达或仓库凭据无效）。子需求尚未创建 —— 请检查网络与凭据后重试。",
+		}
+	}
 	if startRef == "" {
 		return "", false, warnings, &splitStackError{
 			code: "SPLIT_SOURCE_BRANCH_INVALID",
@@ -129,7 +179,7 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 	if _, verr := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+dev); verr != nil {
 		// The branch does not exist yet — create it at the source ref. This
 		// is the "checkout 出来" the user asked for.
-		if _, cerr := gitRunWithTimeout(projectPath, splitBranchGitTimeout, env, "branch", dev, startRef); cerr != nil {
+		if _, cerr := gitRunWithTimeout(projectPath, splitStepBudget(deadline, splitBranchGitTimeout), env, "branch", dev, startRef); cerr != nil {
 			return "", false, warnings, &splitStackError{
 				code: "SPLIT_STACK_BRANCH_FAILED",
 				msg:  fmt.Sprintf("创建主需求分支 %s 失败：%v。请检查仓库状态后重试。", dev, cerr),
@@ -138,7 +188,7 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 	} else if wtDir := splitWorktreeForBranch(projectPath, dev); wtDir != "" {
 		// The branch is checked out somewhere — move it with a fast-forward
 		// so the working tree stays consistent with the branch pointer.
-		if _, merr := gitRunWithTimeout(wtDir, splitBranchGitTimeout, env, "merge", "--ff-only", startRef); merr != nil {
+		if _, merr := gitRunWithTimeout(wtDir, splitStepBudget(deadline, splitBranchGitTimeout), env, "merge", "--ff-only", startRef); merr != nil {
 			warnings = append(warnings, fmt.Sprintf(
 				"主需求分支 %s 已有不在所选分支 %s 上的提交，未按所选分支重建；子需求仍基于 %s。",
 				dev, sourceBranch, dev))
@@ -147,11 +197,11 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 		// The branch exists but is not checked out anywhere, so its pointer
 		// can be moved — but only when that loses no commit.
 		unique := "0"
-		if out, rerr := gitRunWithTimeout(projectPath, splitBranchGitTimeout, env, "rev-list", "--count", startRef+".."+dev); rerr == nil {
+		if out, rerr := gitRunWithTimeout(projectPath, splitStepBudget(deadline, splitBranchGitTimeout), env, "rev-list", "--count", startRef+".."+dev); rerr == nil {
 			unique = strings.TrimSpace(out)
 		}
 		if unique == "0" {
-			if _, berr := gitRunWithTimeout(projectPath, splitBranchGitTimeout, env, "branch", "-f", dev, startRef); berr != nil {
+			if _, berr := gitRunWithTimeout(projectPath, splitStepBudget(deadline, splitBranchGitTimeout), env, "branch", "-f", dev, startRef); berr != nil {
 				warnings = append(warnings, fmt.Sprintf(
 					"主需求分支 %s 未能对齐到所选分支 %s（%v）；子需求仍基于 %s。",
 					dev, sourceBranch, berr, dev))
@@ -165,7 +215,7 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 
 	// Push the stack bottom to origin. Without it the children's PRs have
 	// no base to target.
-	pushed, pushWarn, perr := h.pushSplitStackBase(projectPath, dev, env)
+	pushed, pushWarn, perr := h.pushSplitStackBase(projectPath, dev, env, deadline)
 	if perr != nil {
 		return "", false, warnings, perr
 	}
@@ -176,13 +226,107 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 	return dev, pushed, warnings, nil
 }
 
+// splitStepBudget clamps a per-step timeout to whatever is left of the
+// overall deadline.
+//
+// Without the clamp the steps could add up to more than the total budget
+// (fetch + branch + push + ls-remote each have their own timeout), and the
+// request would exceed the promise made to the user.
+func splitStepBudget(deadline time.Time, step time.Duration) time.Duration {
+	left := time.Until(deadline)
+	if left <= 0 {
+		// Already out of budget — give the step a sliver so it fails fast
+		// with a real error instead of being skipped silently.
+		return time.Second
+	}
+	if left < step {
+		return left
+	}
+	return step
+}
+
+// resolveSplitStartRef resolves the ref the stack bottom is created from,
+// and reports whether origin answered at all.
+//
+// The fast path avoids the expensive `git fetch`: when the local branch
+// exists and origin reports the SAME sha, the two are identical, so the
+// fetch has nothing to bring in. `git ls-remote` is a single cheap
+// round-trip; `git fetch` on a large repository can take minutes — and the
+// user is watching a 「创建中…」 button the whole time.
+//
+// The fast path returns the LOCAL ref on purpose: origin/<branch> may be a
+// stale remote-tracking ref, and the skipped fetch is exactly what would
+// have refreshed it.
+//
+// When the two differ (or either side is missing) we fall back to a
+// best-effort fetch and then to resolveStartRef's origin-first preference.
+// A fetch failure is not fatal — the local branch may be perfectly good.
+//
+// remoteReachable is false when the ls-remote itself failed, i.e. origin did
+// not answer (unreachable, wrong credentials, …). The caller then skips the
+// fetch — it would fail the same way — and lets the push report the real
+// problem. The point is that a dead remote is discovered in SECONDS, not
+// after the push has burned its own timeout.
+//
+// hasOrigin=false means the repo has no remote at all: there is nothing to
+// probe, the fetch is pointless and the remote is trivially "not needed".
+func resolveSplitStartRef(projectPath, sourceBranch string, env []string, hasOrigin bool) (string, bool) {
+	if !hasOrigin {
+		return resolveStartRef(projectPath, sourceBranch), false
+	}
+	remoteSHA, remoteErr := splitRemoteHeadSHA(projectPath, sourceBranch, env)
+	if remoteErr != nil {
+		// origin did not answer. The fetch would fail the same way — skip it
+		// and resolve from the local refs only.
+		return resolveStartRef(projectPath, sourceBranch), false
+	}
+	if remoteSHA == "" {
+		// origin answered but has no such branch. The fetch would fail with
+		// "couldn't find remote ref" — skip it and resolve locally. This is
+		// NOT an unreachable remote: the user simply picked a branch that
+		// does not exist, and the caller must say so.
+		return resolveStartRef(projectPath, sourceBranch), true
+	}
+
+	if local, err := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+sourceBranch); err == nil {
+		if strings.TrimSpace(local) == remoteSHA {
+			return sourceBranch, true
+		}
+	}
+
+	if _, ferr := gitRunWithTimeout(projectPath, splitFetchTimeout, env, "fetch", "--quiet", "origin", sourceBranch); ferr != nil {
+		log.Printf("[split] fetch origin %s failed (continuing): %v", sourceBranch, ferr)
+	}
+	return resolveStartRef(projectPath, sourceBranch), true
+}
+
+// splitRemoteHeadSHA returns the sha origin has for a branch.
+//
+// An error means "origin did not answer" — unreachable, missing credentials,
+// … An EMPTY sha with no error means "origin answered, but it has no such
+// branch". The two are different situations and the caller must not confuse
+// them: the first is a network/credentials problem, the second is "you
+// picked a branch that does not exist".
+func splitRemoteHeadSHA(projectPath, branch string, env []string) (string, error) {
+	out, err := gitRunWithTimeout(projectPath, splitLsRemoteTimeout, env, "ls-remote", "--heads", "origin", branch)
+	if err != nil {
+		return "", err
+	}
+	// `<sha>\trefs/heads/<branch>` — one line per matching ref.
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], nil
+}
+
 // pushSplitStackBase pushes the stack bottom to origin.
 //
 // A push failure is NOT automatically fatal: the branch may already exist on
 // the remote (a previous run pushed it, the local copy is just behind). In
 // that case the base exists where the PR needs it, so the split proceeds.
 // Only when the remote genuinely lacks the branch does the split fail.
-func (h *WizardHandler) pushSplitStackBase(projectPath, dev string, env []string) (bool, []string, error) {
+func (h *WizardHandler) pushSplitStackBase(projectPath, dev string, env []string, deadline time.Time) (bool, []string, error) {
 	warnings := []string{}
 
 	remote, rerr := gitRun(projectPath, "remote", "get-url", "origin")
@@ -192,9 +336,11 @@ func (h *WizardHandler) pushSplitStackBase(projectPath, dev string, env []string
 		return false, warnings, nil
 	}
 
-	if _, perr := gitRunWithTimeout(projectPath, splitBranchGitTimeout, env, "push", "-u", "origin", dev); perr != nil {
-		// Re-check the remote: the branch may already be there.
-		if out, lerr := gitRunWithTimeout(projectPath, splitBranchGitTimeout, env, "ls-remote", "--heads", "origin", dev); lerr == nil && strings.TrimSpace(out) != "" {
+	if _, perr := gitRunWithTimeout(projectPath, splitStepBudget(deadline, splitPushTimeout), env, "push", "-u", "origin", dev); perr != nil {
+		// Re-check the remote: the branch may already be there. This check
+		// is cheap (one ls-remote) and the whole point of the fallback —
+		// the base may exist remotely even though the push failed.
+		if out, lerr := gitRunWithTimeout(projectPath, splitStepBudget(deadline, splitRecheckTimeout), env, "ls-remote", "--heads", "origin", dev); lerr == nil && strings.TrimSpace(out) != "" {
 			warnings = append(warnings, fmt.Sprintf(
 				"远端已存在主需求分支 %s（本地改动未推送），子需求仍基于它开发。", dev))
 			return true, warnings, nil
@@ -202,7 +348,7 @@ func (h *WizardHandler) pushSplitStackBase(projectPath, dev string, env []string
 		return false, warnings, &splitStackError{
 			code: "SPLIT_PUSH_FAILED",
 			msg: fmt.Sprintf("主需求分支 %s 推送失败：%v。子需求尚未创建 —— 请检查网络与仓库凭据后重试。",
-				dev, perr),
+				dev, redactOriginForLog(perr.Error())),
 		}
 	}
 	return true, warnings, nil

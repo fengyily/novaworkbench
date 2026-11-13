@@ -55,9 +55,9 @@ func TestSplit_PromptCarriesTheRequirementContext(t *testing.T) {
 	}
 	got := make(chan captured, 1)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		got <- captured{promptText: promptText, run: run}
-		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")
@@ -122,9 +122,9 @@ func TestSplit_WithoutMaterialProducesNoContextBlock(t *testing.T) {
 	type captured struct{ promptText string }
 	got := make(chan captured, 1)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		got <- captured{promptText: promptText}
-		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
 	if status, _ := splitStartJob(t, h, "req_m", "{}"); status != http.StatusOK {
