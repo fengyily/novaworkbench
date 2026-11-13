@@ -2074,6 +2074,70 @@
 }
 .sub-thinking-hint { font-size: 12px; color: var(--color-text-secondary, #64748B); }
 
+/* ── 运行诊断（失败子任务的持久化 job 快照） ──────────────────────────
+ * Only rendered for a FAILED sub-task. It carries the exit code, the
+ * machine-readable failure reason and the complete persisted log — the
+ * evidence that used to be missing entirely (the card showed one line:
+ * "❌ Claude 异常退出: exit status 143"). */
+.sub-diag {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #FECACA;
+  border-left: 3px solid #EF4444;
+  border-radius: 6px;
+  background: #FEF2F2;
+}
+.sub-diag-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.sub-diag-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #991B1B;
+}
+.sub-diag-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #7F1D1D;
+  font-family: var(--font-mono);
+}
+.sub-diag-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9F1239;
+}
+.sub-diag-toggle {
+  margin-top: 8px;
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #FCA5A5;
+  border-radius: 4px;
+  background: #FFFFFF;
+  color: #991B1B;
+  cursor: pointer;
+}
+.sub-diag-toggle:hover { background: #FEF2F2; }
+.sub-diag-log {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  color: #E2E8F0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── 需求级 Review 轮次卡片 (RequirementReviewCard) ─────────────────────────
    The requirement page's view of one Review round: verdict → severity
    ledger → findings → actions. It sits inside the ordinary sub-task card,

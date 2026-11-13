@@ -1002,6 +1002,15 @@ export const requirements = {
     execEnvEmptyHint: 'No ready Agent server — the split will run on this machine.',
     execEnvRemoteHint: 'Remote execution can only read code pushed to origin; unpushed local changes are invisible to it.',
     configScopeHint: 'The split is grounded in the current design workspace; the source branch decides the stack base for the sub-requirements (applied on confirm).',
+    // The material this split carries — a read-only card showing what the AI
+    // will actually see.
+    contextTitle: 'Context carried by this split',
+    contextAttachments: 'Attachments ({{count}})',
+    contextDirs: 'Authorized directories ({{count}})',
+    contextRefs: 'Referenced requirements ({{count}})',
+    contextNone: '(none)',
+    contextEmptyHint: 'This split is based on the technical plan alone.',
+    contextLoading: 'Loading the context…',
     start: 'Start split',
     regenerate: 'Regenerate',
     childrenTitle: 'Sub-requirements',

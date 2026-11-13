@@ -1235,7 +1235,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, cb *runCallbacks) {
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
-		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model, job.ErrorKind); perr != nil {
 			log.Printf("[architect-design] failed to persist job log %s: %v", job.ID, perr)
 		}
 		if cb != nil && cb.OnFinish != nil {
@@ -1383,7 +1383,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			nil,
 			nil,
 			0,
-			architectStallTimeout)
+			withStallTimeout(architectStallTimeout))
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)

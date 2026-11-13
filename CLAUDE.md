@@ -51,8 +51,8 @@ npm run preview                  # serve the production build
 # Docker Compose (repo root)
 docker-compose up                # backend (uid 1000) mounts ~/.novaworkbench(+ claude subdir) and $HOME/workspace
 
-# Local debug launcher with PostgreSQL
-./run.sh                         # starts nova-postgres container, exports NOVA_DB_DRIVER=postgres
+# Local dev against PostgreSQL
+make run                         # DSN comes from ~/.novaworkbench/dbconfig.json (设置→数据库 page saves it); NOVA_DB_DRIVER/NOVA_DB_DSN env wins
 ```
 
 Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor to `30m`), `NOVA_AGENT_TIMEOUT` (default `35m`; Agent Server 远端 design/coding/sub-task SSE ctx 总时长，与 `CLAUDE_TIMEOUT` 不联动), `NOVA_AGENT_IDLE_TIMEOUT` (default `30m`; v0.5.x rolling ctx idle window — Agent Server 远端流静默超过此值才 cancel，与 `NOVA_AGENT_TIMEOUT` 互为正交：idle 防静默、total 防 zombie worker), `NOVA_AGENT_WORKTREE_ROOT` (default `/tmp/nova-agent`; Agent Server 远端 scratch clone / worktree 根目录，后端 `agentWorktreeRootFor(srv)` 与 worker `assertWorkDirInScope` 共用，注入 nohup/systemd/launchd；优先级 env > `agent_servers.worktree_root`（设置→Agent 服务器 每台服务器可单独配置，因各主机磁盘布局不同）> KV `agent.worktree_root`（全局默认）> `/tmp/nova-agent`；`/tmp` 为小 tmpfs 时设为磁盘路径如 `/var/lib/nova-agent` 并重装 worker，不能用软链，worker `/v1/health` 上报 `worktreeRoot`，每次远端执行前 `ensureRemoteWorkerReady` 发现不一致会自动重启 worker 同步；`installNodeWorker` / Check / 每次远端执行 clone 前都会 `mkdir -p` 该目录并写探针校验 worker 用户权限，root 安装时先由 root 预创建并 chown 给 `nova`), `NOVA_AGENT_MIN_FREE_MB` (default `1024`; 建远端 worktree 前根目录所在文件系统的最小剩余空间，不足直接报明确错误), `NOVA_SESSION_SYNC_TIMEOUT` (default `5m`; Agent Server 会话下行同步预算 — 旧固定 60s 对 0.5–3.6MB 的会话转录太紧), `NOVA_SESSION_SYNC_FALLBACK` (default `1`; `0` 关闭「远端会话目录发现式定位」退回只信计算路径 — 应急止血开关, `handler/wizard_remote.go` `sessionFallbackEnabled()`), `NOVA_AGENT_MAX_TOTAL_TIMEOUT` (default `8h`; v0.5.x rolling ctx 绝对 cap，叠在 idle 之上兜底远端 worker 永不退出), `NOVA_SUBTASK_IDLE_TIMEOUT` (default `30m`; v0.5.x 本地子任务 rolling ctx idle window — 本地 claude 静默超过此值才 cancel；surface 时 error_kind=`idle-timeout` 区别于 `stalled`), `NOVA_DB_DRIVER` (`sqlite` default | `mysql` | `postgres`), `NOVA_DB_DSN`, `NOVA_DB_PATH` (sqlite file), `NOVA_AUTOINSTALL` (default `1`; `0` disables preflight auto-install), `NOVA_SKIP_FRONTEND` (pair with `make build-backend`), `NOVA_SECRET_KEY_PATH` (AES master key override), `NOVA_SCHED_INTERVAL` / `NOVA_SCHED_CONCURRENCY` / `NOVA_SCHED_MAX_LATENESS` (scheduler tick tuning), `NOVA_SUBTASK_CONCURRENCY` (sub-task process-level OOM cap;两条路径共享), `NOVA_AUTH_DISABLED` (auth bypass, `middleware/auth.go`), `NOVA_ORCH_STALE_AFTER` (orchestration self-heal stale threshold), `NOVA_AGENT_WORKER_SOURCE_DIR` / `NOVA_CLAUDE_HOME` / `CLAUDE_CONFIG_DIR` (agent server + claude home), `NOVA_LLM_HTTP_TIMEOUT` (default `30s`; 直接 HTTP LLM 通道「轻负载」调用超时——标题/描述提炼、commit message)、`NOVA_LLM_HTTP_HEAVY_TIMEOUT` (default `5m`; 直接 HTTP LLM 通道「重负载」调用超时——实施计划拆子任务(8192 max_tokens)/报告转知识/PDF 转 Markdown/想法转需求/Mermaid 图)。30s 的旧上限会让「拆分子任务」必然超时并降级为 1 个子任务，故重负载单独放宽), `GITHUB_TOKEN` (skill install fallback). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).
@@ -116,6 +116,8 @@ ACL 落地在 7 张表(`users`/`sessions`/`acl_roles`/`permissions`/`acl_role_pe
 需求在 coding 阶段可被**自动拆分为子任务**(`handler/wizard_subtask.go` + `wizard_orchestration.go`),由 `scheduler/orchestration_queue.go`(10s tick)派发,经 `handler/sub_task_runner.go` 执行;UI 在 `components/SubTaskPanel.tsx`。`scheduled_tasks` 表 + `handler/schedule.go` 支持 `design`/`coding`/`design_and_coding` 三种**一次性或 cron 周期(每天/每周)**定时任务(`scheduler/scheduler.go` 30s tick, 并发 2);UI 在 `SchedulesPage.tsx`(`/schedules`)。
 
 **执行准入(两条路径共享)**: `service/project_limiter.go` 的 `ProjectLimiter` 是**按 `project_id` 的内存闸门**——编排 tick 与 `SubTaskRunner.Run`(含手动 重做/继续)都先过项目闸门、再过**进程级 OOM 上限**(env `NOVA_SUBTASK_CONCURRENCY`,两条路径共享同一 chan),顺序固定以免互锁。闸门上限来自 KV 设置 `subtask.concurrency`(默认 1,**按项目独立生效**),tick/Run 每次入口 `SetMax` 刷新 → 改设置 ≤10s 生效无需重启。tick 满槽时**不认领 DB 行**(行保持 pending,卡片显示「排队中」);手动路径则轮询等待。**失败自动重做**: `subtask.auto_retry`(默认 **false**,即默认手动恢复)+ `subtask.retry_max`,开启后 tick 在「无 pending 可认领」时经 `SubTaskService.ReArmErroredForRetry` 把 `error` 子任务翻回 `pending`(`sub_tasks.retry_count` 计数封顶,镜像 `summary_attempts` 模式),仅作用于编排子任务。三项配置在 `GET/PUT /api/settings/subtask` + `SettingsSubTask.tsx`(`/settings/subtask`,复用 `setting.llm` 权限键)。**思考过程**:手动子任务(`source='manual'`)的模型 thinking 文本由 `thinkingCollector`(`handler/thinking_collector.go`,本地 `runClaudeStream` 与远端 `parseStreamJSONFromReader` 共用)采集,上限 256 KB,`finishSubTask` 落到独立表 `sub_task_thinking`(不进 List 载荷,`DeleteByIDs` 显式清理),报告卡片展开时经 `GET /api/requirements/{id}/sub-tasks/{sid}/thinking` 懒加载。**v0.5.0 新增**:`sub_task_runner` 支持删除失败的子任务并清理其 Claude session;手动启动子任务(`SubTaskRunner.Run`)可选择会话模式(新会话 / 续接);编排子任务按 project 闸门排队。
+
+**失败归因与持久化(2026-11)**: `runClaudeStream`(`handler/wizard_stream.go`)的收尾路径**不再先 kill 再 Wait**——失败时先给 CLI `streamExitGrace`(1.5s)自己退出的窗口,拿到的才是它自己的退出码;超时才由我们 SIGTERM 进程组(`killReason=teardown`)。**这不是洁癖**:Claude CLI 把 SIGTERM 当作**正常退出(143)**,所以旧实现里每次提前结束都伪装成「Claude 异常退出: exit status 143」,把 NovaWorkbench 自己的 SIGTERM 记在 CLI 头上。终止原因由 `claudeKillReason` 首写生效地记录(`watchdog` / `guard` / `teardown` / `hard-timeout`),`terminationMessage` 据此分四种文案(看门狗 / 我们杀的 / CLI 自己退的 / 硬超时),并附一行固定字段序的诊断(`耗时/事件数/最后事件类型/stdout结束/stderr/退出码/终止原因`)。**看门狗接线**:`runStallWatchdog` 现在接收调用方的 `*atomic.Bool`(旧实现自建后丢弃 ⇒ `error_kind=stalled` 与「流静默」文案曾是死代码)。`scanner.Err()` 也不再被吞(`stdoutEnded=scan-error`)。stderr 缓冲改 `syncBuffer`(裸 `bytes.Buffer` 与 os/exec 的 copy goroutine 竞态)。**落库诚实**:`job_logs` 新增 `error_kind` 列(`stalled` / `idle-timeout` / `terminated`),失败时 `status=error` / `exit_code=1`,不再出现「error 行 + ✅ 子任务完成！」同屏。**fork 秒崩兜底**: `looksLikeForkInstantCrash` 命中(无结果 / stdout=eof|scan-error / 无 assistant 事件 / <10s / 或是 teardown、或是 transcript 证明**零次 api-request**)时,自动改走已有的「新会话(含需求上下文)」路径重试一次,两次都失败则把两条错误都写进 artifact。判定用的 `claude_transcript_probe.go` **只读记录类型与时间戳**,不读正文(fork 会继承父会话历史,故按运行起始时间窗过滤)。
 
 ### Merge & Weekly Reports
 
@@ -317,6 +319,24 @@ API：`POST /api/wizard/qa-chat`（返回 `{job_id, turn_id}`，流复用 `GET /
 - **vite.config.ts** — dev server proxies `/api` → `:9527`。
 - **Dockerfile** — `dev` (npm install + `vite --host`), `build` (tsc + vite build), `prod` (nginx serving `dist`)。
 
+### UI 一致性审计 (`scripts/ui-audit/`)
+
+全局复查前端「哪里不统一」的工具,只读、不改 UI。流程:**取证 → 判定 → 复核 → 落盘 → 建单**。
+
+- **取证** — `playwright-core` 驱动 Chromium 逐路由截图(`screenshots/<route>.png`),同时在页面内注入探针采集每个语义控件(`btn-primary` / `input-text` / `card` / `badge` …)的**计算样式指纹**;`manifest.json` 记录 git commit 与每张图的 sha256,证据可校验。
+- **判定** — 两类证据:**静态规则**(R1–R10、R13:调色板外硬编码色、令牌被写字面量、类名两套写法、通用类名落在页面私有样式表里、状态色双套词汇表、`<MarkdownRender>` 未挂 `.md-prose`…)与**运行时漂移**(R11:同一控件在不同页面的 computed style 不一致——这是用户真正感知的「不统一」)。`run.mjs check` 只跑静态规则,无需浏览器、无需模型、**也无需 npm install**(`run.mjs` 对浏览器驱动是懒加载),可作 CI 门禁(与 `baseline.json` 比对,只对**新增**违规失败)。每条规则自带稳定 `signature`(标识发现本身——类名、语义角色——而不是它提到的文件),否则改任何一个无关文件都会误报「新增违规」。
+- **复核** — `claude -p ... --dangerously-skip-permissions` 让模型 **Read 工具真的打开 PNG** 复核,剔除误报并把标题/描述/建议改写成用户视角;失败即降级为规则文案,不阻断建单。
+- **落盘 + 建单** — 截图与报告推到专用分支 `audit/ui-<run-id>` 的 `docs/ui-audit/<run-id>/`,Issue 正文用 raw 绝对 URL 嵌图;每条不一致点**单独**建一个 GitHub Issue(label `ui-audit` + 严重度),run-id 写进正文(`<!-- ui-audit-run: … -->`)用于去重。推送走**临时 git worktree**:不动当前 checkout 的分支,也不要求工作树干净(否则工具自己没提交时就推不了自己的证据)。分支**不要删**——Issue 里的截图链接指向它。
+
+```bash
+make ui-audit-deps                                     # 装 playwright-core(复用系统 Chrome,不下载浏览器)
+make ui-audit BASE_URL=http://localhost:9527            # 跑全流程并建 Issue
+make ui-audit-review  RUN_ID=20261025-2015             # 复用已有采集,只重跑模型复核
+make ui-audit-publish RUN_ID=20261025-2015             # 复用已有采集,只推证据+建单
+make ui-audit-check                                    # CI 门禁(无浏览器、无模型、无 npm install)
+```
+
+**约定**:新增样式一律走 `index.css` 的 `var(--token)`,通用类名(`btn-*` / `form-*` / `input-*`)必须定义在 `frontend/src/index.css` 而不是页面私有样式表——历史上 `.btn-secondary` 落在 `pages/Settings.css`,导致没 import 那张表的其他页面拿不到样式,同一个按钮在不同页面高度从 27px 到 54px 不等。
 ## Key Conventions
 
 - **API envelope**: every JSON response is `{success: bool, data: T, error: {code, message, suggestion?}}` via `writeJSON`/`writeError`. Throw on the client if `success` is false.

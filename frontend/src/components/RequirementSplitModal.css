@@ -188,6 +188,60 @@
   padding-top: 0;
 }
 
+/* ── The context card ──
+   A read-only summary of the material the split hands to the AI: the
+   attachments, the granted directories and the referenced requirements. It
+   sits inside the config block and uses the same border / radius vocabulary
+   as the rest of the modal. */
+.req-split-context {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border, #e2e8f0);
+}
+.req-split-context-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.req-split-context-group {
+  margin-bottom: 8px;
+}
+.req-split-context-group:last-of-type {
+  margin-bottom: 0;
+}
+.req-split-context-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text, #334155);
+  margin-bottom: 2px;
+}
+.req-split-context-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.req-split-context-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--color-text, #334155);
+}
+.req-split-context-name {
+  word-break: break-all;
+}
+.req-split-context-meta,
+.req-split-context-desc {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+}
+.req-split-context-empty {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+}
+
 @media (max-width: 900px) {
   .req-split-modal {
     min-width: 0;

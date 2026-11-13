@@ -172,7 +172,7 @@ FAIL	github.com/novaworkbench/backend/internal/servicemgr	0.001s
 
 ### E.1 当前工作树未包含 `server` 二进制
 
-任务说明假设工作目录里有现成的 `novaworkbench-linux-amd64` 二进制用于 A/B 节 install。本 worktree 内**没有**该二进制（仅有 `verify-nvm` 脚本和 `run.sh`）；其他 worktree 的 `server` 二进制是 darwin host target（`go build` 默认产物），不能在 Linux 上直接执行。如需在 Ubuntu 测试机上跑 A/B 节，需先：
+任务说明假设工作目录里有现成的 `novaworkbench-linux-amd64` 二进制用于 A/B 节 install。本 worktree 内**没有**该二进制（仅有 `verify-nvm` 脚本）；其他 worktree 的 `server` 二进制是 darwin host target（`go build` 默认产物），不能在 Linux 上直接执行。如需在 Ubuntu 测试机上跑 A/B 节，需先：
 
 ```bash
 make build           # 输出 dist/novaworkbench-linux-amd64

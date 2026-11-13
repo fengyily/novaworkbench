@@ -533,7 +533,7 @@ func (h *WizardHandler) runQATurn(
 			opts.SessionID = p.NewSessionID
 		}
 		cmd := h.llm.StreamCmd(ctx, opts)
-		return runClaudeStream(sink, cmd, "qa-chat", usage, nil, nil, 0, qaStallTimeout)
+		return runClaudeStream(sink, cmd, "qa-chat", usage, nil, nil, 0, withStallTimeout(qaStallTimeout))
 	}
 
 	out := run(plan)

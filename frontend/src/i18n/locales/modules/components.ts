@@ -135,6 +135,18 @@ export const components = {
     errCreate: '启动子任务失败',
     errReSplit: '重新拆分失败',
     stalledHint: 'Claude 流静默超时，子任务已被看门狗终止。可点击「继续」或「重新执行」重试，或检查任务是否触发了超长 IO（npm install / 大文件编辑）。',
+    // 运行诊断区：失败子任务的持久化 job 快照（退出码 / 失败原因 / 完整日志）。
+    jobDiagnostics: '运行诊断',
+    jobDiagnosticsHint: '该子任务失败时的完整运行记录（来自持久化 job 日志，后端重启后依然可查）。',
+    exitCode: '退出码',
+    errorKind: '失败原因',
+    duration: '耗时',
+    fullLog: '完整日志',
+    fullLogCollapse: '收起完整日志',
+    errorKindStalled: '流静默（看门狗终止）',
+    errorKindIdleTimeout: '静默超时（空闲看门狗终止）',
+    errorKindTerminated: '被主动中止（未产生结果）',
+    errorKindUnknown: '未知原因',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 主 Agent 正在生成汇总报告…',
     bannerSummaryFailed: '❌ 汇总报告生成失败，请点击重试',

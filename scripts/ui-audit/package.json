@@ -1,0 +1,17 @@
+{
+  "name": "nova-ui-audit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Global UI consistency audit for the NovaWorkbench frontend: screenshots, deterministic style rules, and one GitHub issue per confirmed inconsistency.",
+  "scripts": {
+    "audit": "node run.mjs all",
+    "check": "node run.mjs check"
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
