@@ -37,6 +37,12 @@ type ScheduledTask struct {
 	// compatible with the pre-merge schema.
 	CodingModel         string     `json:"coding_model"`
 	CodingAgentServerID string     `json:"coding_agent_server_id"`
+	// Effort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) the scheduled run should use, picked when the schedule was
+	// created. Empty = follow the configured stage default at dispatch
+	// time. Same '' semantics as the model columns above.
+	Effort              string     `json:"effort"`
+	CodingEffort        string     `json:"coding_effort"`
 	Status              string     `json:"status"`
 	JobID               string     `json:"job_id"`
 	ErrorMessage        string     `json:"error_message"`

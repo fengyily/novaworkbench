@@ -54,6 +54,8 @@ import ReviewChat from './codeReview/ReviewChat';
 import ReviewHistory from './codeReview/ReviewHistory';
 import type { StreamLine } from './codeReview/shared';
 import { errorMessage } from '../utils/errMsg';
+import { effortPick, normalizeEffortTier } from '../utils/effort';
+import type { EffortTier } from '../utils/effort';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
 import {
   buildReviewMarkdown, downloadReviewMarkdown, reviewExportTitle, reviewTargetLabel,
@@ -103,6 +105,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [runModel, setRunModel] = useState('');
   const [runConfigId, setRunConfigId] = useState('');
   const [agentServerId, setAgentServerId] = useState('');
+  // Reasoning-effort tier (claude CLI --effort) picked in the composer's
+  // advanced section. Empty = the user did not pick one, and the request
+  // then leaves the field off so the backend resolves the configured stage
+  // default.
+  const [runEffort, setRunEffort] = useState<EffortTier | ''>('');
   const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
 
   // ── Branch mode ──────────────────────────────────────────────────────────
@@ -285,7 +292,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     model: runModel,
     claude_config_id: runConfigId,
     agent_server_id: agentServerId,
-  }), [runModel, runConfigId, agentServerId]);
+    // Sent ONLY when the user actually picked one: an unpicked review
+    // leaves the field off so the backend resolves the configured stage
+    // default (llm.Gateway.ResolveEffort owns that layer) instead of
+    // taking the frontend's copy as an explicit pick.
+    ...effortPick(runEffort || undefined),
+  }), [runModel, runConfigId, agentServerId, runEffort]);
 
   const resetPanel = () => {
     setReviewLines([]);
@@ -477,6 +489,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setRunModel('');
     setRunConfigId('');
     setAgentServerId('');
+    // The reasoning-effort tier is a per-run pick like the model / config
+    // / environment above, so a new session must not inherit the previous
+    // review's tier — and the composer reads the tier from here, so
+    // leaving it behind would show a tier that does not belong to the
+    // new review.
+    setRunEffort('');
     setBranchesError('');
     resetPanel();
   };
@@ -520,6 +538,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       setRunModel(full.model);
       setRunConfigId(full.claude_config_id);
       setAgentServerId(full.agent_server_id);
+      // The reasoning-effort tier the last run used, so 重跑 reproduces the
+      // same depth. The backend stamps the EFFECTIVE tier onto the row.
+      setRunEffort(normalizeEffortTier(full.effort));
       if (full.review_type === 'branch') {
         setMode('branch');
         setSession(full);
@@ -786,9 +807,16 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             configId: runConfigId,
             agentServerId,
             servers: agentServers,
+            // The tier the parent holds — the same value that goes into
+            // the create / update body. The composer renders it instead of
+            // keeping a local copy, so the bar can never show a different
+            // tier than the one the run uses (a re-run from history
+            // restores a non-default tier here).
+            effort: runEffort,
             onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
             onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
             onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
+            onEffortChange: (tier) => { setRunEffort(tier); if (session) void saveDraftField({ effort: tier }); },
           }}
           prData={prData}
           prsLoading={prsLoading}

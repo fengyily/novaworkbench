@@ -49,6 +49,11 @@ type Gateway struct {
 	timeout   time.Duration
 	claudeEnv ClaudeEnvProvider
 	llmCfg    LLMConfigProvider
+	// effortCfg supplies the configurable per-stage reasoning-effort
+	// defaults. Injected via SetEffortProvider (not a New() argument) so
+	// llm.New's signature — which a dozen tests call as llm.New(nil, nil)
+	// — stays byte-identical. nil → the built-in defaults apply.
+	effortCfg EffortProvider
 }
 
 // ErrEmptyInput is returned by HTTP-channel methods when the caller hands them
@@ -717,6 +722,21 @@ func (g *Gateway) streamArgs(opts StreamOpts) []string {
 	if len(opts.DisallowedTools) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(opts.DisallowedTools, " "))
 	}
+	// --effort is the reasoning-depth tier (low|medium|high|xhigh|max). It is
+	// a plain CLI flag with no env equivalent (unlike the model, which rides
+	// inside the --settings env block), so it has to be emitted here as a real
+	// argv element.
+	//
+	// Position matters: it must land BEFORE --add-dir, which is variadic and
+	// has to stay last in argv or it would swallow this flag as another
+	// directory value.
+	//
+	// The tier is dropped entirely when the local CLI doesn't understand the
+	// flag (older claude binaries abort the whole run on an unknown option) —
+	// see cliSupportsEffort.
+	if e := NormalizeEffort(opts.Effort); e != "" && g.cliSupportsEffort() {
+		args = append(args, "--effort", e)
+	}
 	// --add-dir grants the session read access to directories outside its
 	// working directory. It is a VARIADIC option (the CLI takes
 	// `--add-dir <dir>...`), so it has to be the LAST flag in argv — anything
@@ -746,6 +766,16 @@ type StreamOpts struct {
 	WorkDir      string
 	SystemPrompt string
 	Model        string
+	// Effort is the reasoning-depth tier passed to the CLI as `--effort
+	// <level>` (low|medium|high|xhigh|max). Empty = don't emit the flag at
+	// all (the CLI keeps its own default). Invalid values are dropped by
+	// NormalizeEffort before they reach the argv — see effort.go for the
+	// tier semantics and the per-stage defaults.
+	//
+	// Resolve it with Gateway.ResolveEffort(pick, stage) rather than
+	// hard-coding a tier at the call site: that keeps the "user pick >
+	// configured stage default > built-in default" chain in one place.
+	Effort string
 	// ClaudeConfigID pins this claude run to a specific claude_configs row —
 	// the gateway looks up that row's auth + base URL and injects them into
 	// the subprocess env instead of the global active config. Empty =

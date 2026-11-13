@@ -1752,6 +1752,28 @@ var alterColumns = []string{
 	// 读路径按它排序（ListChildren / 列表接口 / UnmetDependencies），
 	// 顺序才不会随进程重启或随机 id 漂移。
 	`ALTER TABLE requirements ADD COLUMN split_order INTEGER NOT NULL DEFAULT 0`,
+	// 推理档位（claude CLI --effort）：该阶段**实际使用**的档位。
+	// 与 *_model 完全同语义 —— 只在成功路径落库，失败运行不覆盖上一次的好
+	// 记录；空串 = 本次运行未指定档位（不下发 --effort）。
+	// 用途有两个：一是审计「这一轮到底用了多深的推理」；二是让 UI 的档位
+	// 条在重新进入该阶段时回显上次实际用的档位（和模型下拉同一套回显逻辑）。
+	// 定时任务的推理档位（claude CLI --effort）。建计划时选定，空串 =
+	// 派发时按阶段默认值走（与 model 列的 '' 语义一致）。
+	// Issue monitor 的推理档位（claude CLI --effort）。空串 = 派发时按阶段
+	// 默认值走（与 model 列的 '' 语义一致）。
+	`ALTER TABLE issue_monitors ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN coding_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN coding_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN analyst_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN developer_effort TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN architect_effort TEXT NOT NULL DEFAULT ''`,
+	// 子任务的实际档位。push_pr 子任务固定走 commit 阶段（low），普通子
+	// 任务走 coding 阶段（medium），Review 型子任务走 other 阶段。
+	`ALTER TABLE sub_tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+	// Review 会话的实际档位。与 code_reviews.model 对称：追问（followup）
+	// 与「基于对话重新生成」都续接这一行，继承它记录的档位，不重新解析。
+	`ALTER TABLE code_reviews ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

@@ -11,6 +11,7 @@ export const settings = {
     claude: 'Claude configs',
     llm: 'Direct LLM',
     subtask: 'Sub-tasks',
+    effort: 'Reasoning effort',
     database: 'Database',
     preflight: 'Dependencies',
     gitSync: 'Git Sync',
@@ -249,6 +250,29 @@ export const settings = {
     savedAt: 'Saved · {{time}}',
     clearKey: 'Clear key',
     clearConfirm: 'Clear the stored API key? The direct LLM channel stops working and requirement titles fall back to the first line of the text.',
+  },
+  // effort: the reasoning-depth policy (claude CLI --effort) applied to
+  // every claude run. The per-stage defaults are the product's numbers:
+  // design high / coding medium / commit low.
+  effort: {
+    title: 'Reasoning effort',
+    desc: 'Controls how deep Claude CLI reasons on every run (the --effort flag). A deeper tier means more reasoning and more tokens. Each pipeline stage has its own default; a tier picked in the actual UI takes precedence over the default set here. Saving takes effect on the next run — no restart. If your Claude CLI build is too old, or your gateway rejects the parameter, turn the master switch off below.',
+    loading: 'Loading…',
+    enabledLabel: 'Enable the --effort flag',
+    enabledHint: 'When off, no run sends --effort and Claude CLI keeps its own default behaviour. This is the escape hatch for an older CLI or a gateway that does not accept the parameter.',
+    save: 'Save',
+    saving: 'Saving…',
+    savedAt: 'Saved ({{time}}) — takes effect on the next run',
+    stages: {
+      designLabel: 'Default tier for design',
+      designHint: 'Design, document refinement, document application and requirement splitting. Default: high.',
+      codingLabel: 'Default tier for coding',
+      codingHint: 'Start / adjust / continue coding, orchestrated children and ordinary sub-tasks. Default: medium — a balance between cost and capability.',
+      commitLabel: 'Default tier for commit & push',
+      commitHint: 'push_pr sub-tasks, merge-conflict resolution and PR summaries. Default: low — these steps are mechanical and need little reasoning.',
+      otherLabel: 'Default tier for everything else',
+      otherHint: 'Analysis chats, Reviews, stage Q&A, context compression, Wiki generation and weekly reports. Default: high, matching Claude CLI\'s own default level, so an unconfigured install behaves exactly as it did before the flag existed.',
+    },
   },
   subtask: {
     title: 'Sub-task execution policy',

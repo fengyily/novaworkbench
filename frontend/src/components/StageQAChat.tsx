@@ -13,6 +13,9 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import MarkdownRender from './MarkdownRender';
 import ModelSelect from './ModelSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import QAIndex, { type QAIndexEntry } from './QAIndex';
 import {
   IconArrowLeft,
@@ -151,6 +154,17 @@ export default function StageQAChat({
   const [selectedId, setSelectedId] = useState('');
   const [indexOpen, setIndexOpen] = useState(false);
   const [indexFilter, setIndexFilter] = useState('');
+  // Reasoning-effort tier (claude CLI --effort) for the Q&A turns. The hook
+  // loads the configured per-stage defaults asynchronously, so the picker
+  // state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('other')` instead would
+  // freeze the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [qaEffort, setQaEffort] = useState<EffortTier | null>(null);
+  const qaEffortValue = qaEffort ?? effortDefaults.forStage('other');
   // The turn currently flashing after an index jump.
   const [highlightId, setHighlightId] = useState('');
   // CSS-only fullscreen (same mechanism as the other SSE panels): the
@@ -317,6 +331,12 @@ export default function StageQAChat({
         const res = await qaChatApi.ask(requirementId, stage, q, {
           ...(model ? { model } : {}),
           ...(claudeConfigId ? { claude_config_id: claudeConfigId } : {}),
+          // Reasoning-effort tier. Sent ONLY when the user actually picked
+          // one: an unpicked run leaves the field off so the backend
+          // resolves the configured stage default (llm.Gateway.ResolveEffort
+          // owns that layer) instead of taking the frontend's copy as an
+          // explicit pick.
+          ...effortPick(qaEffort),
         });
         // Show the question immediately — the persisted thread only gets the
         // row once the backend has created it.
@@ -350,7 +370,7 @@ export default function StageQAChat({
         setError(errorMessage(err));
       }
     },
-    [asking, requirementId, stage, model, claudeConfigId, subscribe, viewMode],
+    [asking, requirementId, stage, model, claudeConfigId, qaEffortValue, subscribe, viewMode],
   );
 
   // Keep the newest turn in view — but only when the reader is actually
@@ -700,6 +720,27 @@ export default function StageQAChat({
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* Reasoning-effort tier for the Q&A turns. Its own row under the
+              toolbar: the bar carries a caption + an explanatory line, which
+              would squeeze the toolbar's inline-flex controls if it were
+              dropped in beside them. The id is scoped by stage: the
+              requirement page mounts this panel twice (design + coding
+              threads) and both bars are live at the same time, so a shared
+              id would merge them into one radio group. */}
+          <div style={{ padding: '0 10px 8px' }}>
+            <EffortBar
+              id={`qa-chat-effort-${stage}`}
+              size="sm"
+              label={t('components.effortBar.ariaLabel')}
+              value={qaEffortValue}
+              onChange={setQaEffort}
+              // The master switch (Settings → Reasoning effort) off → the backend sends
+              // no --effort at all, so an interactive-looking bar would be a
+              // lie.
+              disabled={!effortDefaults.enabled || asking}
+            />
           </div>
 
           {viewMode === 'global' && indexOpen && (

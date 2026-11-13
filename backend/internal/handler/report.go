@@ -601,6 +601,7 @@ func (h *ReportHandler) runGenerate(job *store.Job, projectID, projectName, proj
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        projectPath,
+		Effort:         resolveEffort(h.llm, "", llm.StageOther),
 		ClaudeConfigID: h.activeConfigID(),
 	})
 

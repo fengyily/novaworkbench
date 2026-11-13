@@ -68,10 +68,17 @@ func (h *ReviewHandler) runLocalReviewTurn(ctx context.Context, job *store.Job, 
 	systemPrompt := appendManifest(rolePrompt, manifest)
 	sessionID := strings.TrimSpace(rv.ClaudeSessionID)
 
+	// The tier is INHERITED from the review row, never re-resolved: a
+	// 追问 must answer at the same reasoning depth the report was written
+	// at, and a 「重新生成」 must rewrite the report at that same depth. The
+	// row already holds the resolved tier (MarkEffort wrote it when the
+	// review started), so this is a straight read.
+	effort := rv.Effort
+
 	if sessionID != "" {
 		job.Append(store.LogLine{Type: "phase", Content: spec.resumePhase})
 		out, stale, msg := h.streamReviewTurn(ctx, job, project.LocalPath, systemPrompt,
-			spec.prompt(true), modelName, claudeConfigID, sessionID, true, spec.usage())
+			spec.prompt(true), modelName, claudeConfigID, effort, sessionID, true, spec.usage())
 		if !stale {
 			return out, true, msg
 		}
@@ -81,7 +88,7 @@ func (h *ReviewHandler) runLocalReviewTurn(ctx context.Context, job *store.Job, 
 	}
 
 	out, _, msg := h.streamReviewTurn(ctx, job, project.LocalPath, systemPrompt,
-		spec.prompt(false), modelName, claudeConfigID, "", false, spec.usage())
+		spec.prompt(false), modelName, claudeConfigID, effort, "", false, spec.usage())
 	return out, false, msg
 }
 
@@ -135,6 +142,7 @@ func (h *ReviewHandler) runRemoteReviewTurn(ctx context.Context, job *store.Job,
 			WorkDir:                baseRepo,
 			SystemPrompt:           systemPrompt,
 			Model:                  cliModelArg(modelName),
+			Effort:                 rv.Effort,
 			ClaudeConfigID:         claudeConfigID,
 			OverrideSettingSources: &ignoreLocal,
 		}

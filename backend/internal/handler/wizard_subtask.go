@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
@@ -485,6 +486,9 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		// through to "auto" so a future client version can't accidentally
 		// break a row.
 		ReportMode string `json:"report_mode"`
+		// Effort is the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this child. Empty = the 「开发实现」 stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -560,6 +564,9 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
+	// Record the reasoning depth this child will run at (the user's pick, or
+	// the 「开发实现」 stage default) before it is dispatched.
+	stampSubTaskEffort(h.llm, h.subTaskSvc, st, body.Effort, llm.StageCoding)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
 		"sub_task_id": st.ID,
@@ -588,6 +595,9 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Prompt string `json:"prompt"`
 		Model  string `json:"model"`
+		// Effort is the reasoning-effort tier (claude CLI --effort) for the
+		// adjusted child. Empty = the 「开发实现」 stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -662,6 +672,8 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[sub-task adjust] failed to persist model for %s: %v", st.ID, perr)
 		}
 	}
+	// The adjustment is still implementation work → 「开发实现」 stage.
+	stampSubTaskEffort(h.llm, h.subTaskSvc, st, body.Effort, llm.StageCoding)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
 		"sub_task_id": st.ID,
@@ -724,6 +736,9 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Model string `json:"model"`
+		// Effort is the reasoning-effort tier (claude CLI --effort) for the
+		// re-run. Empty = the 「开发实现」 stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -797,6 +812,10 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	if perr := h.subTaskSvc.UpdateJobID(sid, job.ID); perr != nil {
 		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", sid, perr)
 	}
+	// A re-run may pick a different reasoning depth than the failed attempt
+	// used; with no pick it follows the currently configured stage default,
+	// so a settings change takes effect on the next attempt.
+	stampSubTaskEffort(h.llm, h.subTaskSvc, st, body.Effort, llm.StageCoding)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":         job.ID,
 		"sub_task_id":    sid,
@@ -853,6 +872,9 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	}
 	var body struct {
 		Model string `json:"model"`
+		// Effort is the reasoning-effort tier (claude CLI --effort) for the
+		// resumed attempt. Empty = the 「开发实现」 stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -923,6 +945,9 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	if perr := h.subTaskSvc.UpdateSession(sid, parentSessionID, sourceSID); perr != nil {
 		log.Printf("[sub-task continue] failed to persist session for %s: %v", sid, perr)
 	}
+	// Resuming is still implementation work → 「开发实现」 stage. With no
+	// pick it follows the currently configured stage default.
+	stampSubTaskEffort(h.llm, h.subTaskSvc, st, body.Effort, llm.StageCoding)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":         job.ID,
 		"sub_task_id":    sid,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -38,7 +39,7 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
 	title, description, status, job_id, result_md, findings_json,
 	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
-	model, claude_config_id,
+	model, effort, claude_config_id,
 	agent_server_id, claude_session_id, requirement_id, role_key,
 	created_by, created_at, updated_at, finished_at`
 
@@ -71,13 +72,13 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
 		p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
-		model, claude_config_id,
+		model, effort, claude_config_id,
 		agent_server_id, claude_session_id, requirement_id, role_key,
 		created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
-		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.RequirementID, rv.RoleKey,
+		rv.Model, llm.NormalizeEffort(rv.Effort), rv.ClaudeConfigID, rv.AgentServerID, rv.RequirementID, rv.RoleKey,
 		rv.CreatedBy, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert code_review: %w", err)
@@ -183,12 +184,12 @@ func (s *CodeReviewService) Update(id string, rv *model.CodeReview) (*model.Code
 	}
 	_, err = s.db.Exec(`UPDATE code_reviews
 		SET branch = ?, base_branch = ?, title = ?, description = ?,
-		    model = ?, claude_config_id = ?, agent_server_id = ?,
+		    model = ?, effort = ?, claude_config_id = ?, agent_server_id = ?,
 		    role_key = CASE WHEN ? <> '' THEN ? ELSE role_key END,
 		    updated_at = ?
 		WHERE id = ?`,
 		rv.Branch, rv.BaseBranch, rv.Title, rv.Description,
-		rv.Model, rv.ClaudeConfigID, rv.AgentServerID,
+		rv.Model, llm.NormalizeEffort(rv.Effort), rv.ClaudeConfigID, rv.AgentServerID,
 		rv.RoleKey, rv.RoleKey, time.Now().UTC(), id)
 	if err != nil {
 		return nil, err
@@ -212,6 +213,21 @@ func (s *CodeReviewService) MarkRunning(id, jobID, modelName string) error {
 		    claude_session_id = '', finished_at = NULL, updated_at = ?
 		WHERE id = ?`,
 		model.ReviewStatusRunning, jobID, modelName, time.Now().UTC(), id)
+	return err
+}
+
+// MarkEffort records the reasoning-effort tier (claude CLI --effort) the
+// review actually ran with. Called when the run starts, so the picker always
+// shows what the last run used — the same contract as MarkRunning's model
+// stamp.
+//
+// Deliberately a separate method rather than a new MarkRunning parameter:
+// MarkRunning has a dozen call sites in tests, and the tier is orthogonal to
+// "the job started" (a regeneration inherits the tier and must NOT clear it).
+func (s *CodeReviewService) MarkEffort(id, effort string) error {
+	tier := llm.NormalizeEffort(effort)
+	_, err := s.db.Exec(`UPDATE code_reviews SET effort = ?, updated_at = ? WHERE id = ?`,
+		tier, time.Now().UTC(), id)
 	return err
 }
 
@@ -366,7 +382,7 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
 		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
-		&rv.Model, &rv.ClaudeConfigID,
+		&rv.Model, &rv.Effort, &rv.ClaudeConfigID,
 		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.RequirementID, &rv.RoleKey,
 		&rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {

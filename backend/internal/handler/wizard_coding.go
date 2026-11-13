@@ -109,6 +109,11 @@ type codingRunParams struct {
 	BranchName       string `json:"branch_name"`
 	BaseBranch       string `json:"base_branch"`
 	Model            string `json:"model"`
+	// Effort — the reasoning-effort tier (claude CLI --effort) for this
+	// coding run. Resolved by the caller (StartCoding / AdjustCoding /
+	// ContinueCoding) and carried so the local and remote branches emit the
+	// SAME tier.
+	Effort string `json:"effort"`
 	// ClaudeConfigID is the user-picked claude_configs row id from the UI
 	// ModelSelect picker (frontend lifts selectedConfigId alongside the model).
 	// Empty = backend resolves it from the priority chain (explicit > model
@@ -1265,6 +1270,16 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, fallbackCfgID)
 	job.SetModel(model)
+	// Reasoning-effort tier for this coding run. The coding stage's shipped
+	// default is medium — the cost/smartness balance the product picked for
+	// implementation work.
+	//
+	// Deliberately NOT inherited from reqRow.DeveloperEffort (the persisted
+	// value from the last successful run): that column exists for audit and
+	// for the UI to re-hydrate, while the tier a run actually uses must follow
+	// the configured stage default so a settings change takes effect on the
+	// very next run.
+	p.Effort = resolveEffort(h.llm, p.Effort, llm.StageCoding)
 
 	// === PLAN-MODE SPLIT PATH ==========================================
 	// Local execution + split_tasks=true: instead of running a write-enabled
@@ -1546,6 +1561,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(model),
+		Effort:         p.Effort,
 		ClaudeConfigID: claudeConfigID,
 		SessionID:      sessionArg,
 		Resume:         sourceSID != "",
@@ -1582,6 +1598,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				BranchName:       p.BranchName,
 				BaseBranch:       p.BaseBranch,
 				Model:            p.Model,
+				Effort:           p.Effort,
 				ReadKnowledge:    p.ReadKnowledge,
 				AgentServerID:    p.AgentServerID,
 			},
@@ -1593,6 +1610,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			sessionArg:     sessionArg,
 			forkSessionID:  forkSessionID,
 			model:          model,
+			Effort:         p.Effort,
 			claudeConfigID: claudeConfigID,
 			usage:          codingUsage,
 			SyncMode:       p.SyncMode,
@@ -1930,6 +1948,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		RequirementID  string `json:"requirement_id"`
 		Message        string `json:"message"`
 		Model          string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this adjust turn. Empty = use the stage default.
+		Effort         string `json:"effort"`
 		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1988,6 +2009,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		fallbackCfgID = req.DeveloperConfigID
 	}
 	claudeConfigID := h.resolveConfigIDForRun(body.ClaudeConfigID, model, fallbackCfgID)
+	// Reasoning-effort tier for this adjust turn — same coding-stage default
+	// as the original development pass.
+	effort := resolveEffort(h.llm, body.Effort, llm.StageCoding)
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("adjust_coding")
@@ -2116,6 +2140,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				sourceSID:  req.CodingSessionID,
 				sessionArg: req.CodingSessionID,
 				model:      model,
+				Effort:     effort,
 				usage:      h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID),
 			})
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, req.AgentServerID, "adjust-coding", "✅ 追加调整完成！")
@@ -2143,6 +2168,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
 			Model:          cliModelArg(model),
+			Effort:         effort,
 			ClaudeConfigID: claudeConfigID,
 			SessionID:      req.CodingSessionID,
 			Resume:         true,
@@ -2305,6 +2331,9 @@ func (h *WizardHandler) persistRemoteCodingSession(reqID, reportedSID, serverID 
 func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this continue turn. Empty = use the stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[continue-coding] JSON decode error: %v", err)
@@ -2353,6 +2382,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		fallbackCfgID = req.DeveloperConfigID
 	}
 	claudeConfigID := h.resolveConfigIDForRun("", model, fallbackCfgID)
+	// Reasoning-effort tier for this continue turn — the continue turn is
+	// part of the coding stage, so it shares the coding default.
+	effort := resolveEffort(h.llm, body.Effort, llm.StageCoding)
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("continue_coding")
@@ -2450,6 +2482,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 				sourceSID:  req.CodingSessionID,
 				sessionArg: req.CodingSessionID,
 				model:      model,
+				Effort:     effort,
 				usage:      h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			})
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, req.AgentServerID, "continue-coding", "✅ 续接开发完成！")
@@ -2471,6 +2504,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
 			Model:          cliModelArg(model),
+			Effort:         effort,
 			ClaudeConfigID: claudeConfigID,
 			SessionID:      req.CodingSessionID,
 			Resume:         true,

@@ -20,6 +20,21 @@ export const components = {
     outOfList: 'Current: {{model}} (not in this config)',
     noModels: 'This config has no models configured',
   },
+  // effortBar: the reasoning-effort picker. The tier NAMES (low / medium /
+  // high / xhigh / max) are the CLI's own vocabulary and are deliberately NOT
+  // translated — they are the literal values sent to `--effort`, and a
+  // translated label would hide what the backend receives. Only the
+  // explanations below are localized.
+  effortBar: {
+    ariaLabel: 'Reasoning effort',
+    tiers: {
+      lowHint: 'Minimal reasoning — for simple, well-scoped or latency-sensitive work. Lowest token cost.',
+      mediumHint: 'A balance between cost and capability — fewer tokens than high.',
+      highHint: 'Balances token usage against reasoning depth. The default level for many models.',
+      xhighHint: 'Deeper reasoning than high, consuming more tokens. Sits between high and max.',
+      maxHint: 'The deepest reasoning level, for very hard problems — at the cost of diminishing returns.',
+    },
+  },
   devSource: {
     localTitle: 'Developed on this NovaWorkbench host',
     local: 'Local dev',

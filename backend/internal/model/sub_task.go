@@ -48,6 +48,12 @@ type SubTask struct {
 	// stored per-row so the SubTaskPanel can show "默认模型" badges without
 	// joining back to the role table.
 	Model           string     `json:"model"`
+	// Effort is the effective reasoning-effort tier (claude CLI --effort)
+	// the child ran with. Stored per-row for the same reason as Model: the
+	// SubTaskPanel can show what was actually used without joining back to
+	// the role table, and a 重做 / 继续 re-run reproduces the same tier.
+	// Empty = the child ran before this column existed.
+	Effort          string     `json:"effort"`
 	// ClaudeConfigID is the claude_configs row the child was dispatched
 	// against, resolved when the run starts (inherited from the parent
 	// requirement's developer stage / composer pick / model→config lookup).

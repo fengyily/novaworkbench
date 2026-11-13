@@ -14,6 +14,7 @@ export const settings = {
     claude: 'Claude 配置',
     llm: '直连 LLM',
     subtask: '子任务',
+    effort: '推理档位',
     database: '数据库',
     preflight: '环境依赖',
     gitSync: 'Git 同步',
@@ -252,6 +253,29 @@ export const settings = {
     savedAt: '已保存 · {{time}}',
     clearKey: '清除 Key',
     clearConfirm: '确定清除已保存的 API Key 吗？清除后 LLM 通道将不可用，需求标题将回退为内容首行截断。',
+  },
+  // effort: the reasoning-depth policy (claude CLI --effort) applied to
+  // every claude run. The per-stage defaults are the product's numbers:
+  // 方案设计 high / 开发实现 medium / 提交推送 low.
+  effort: {
+    title: '推理档位',
+    desc: '控制每次调用 Claude CLI 时的推理深度（--effort 参数）。档位越高，推理越深入，token 消耗也越大。四个阶段各自有默认档位，用户在具体界面里选择的档位优先于这里的默认值。保存后下一次执行即生效，无需重启。若 Claude CLI 版本较旧或所用网关不接受该参数，可关闭下面的总开关。',
+    loading: '加载中...',
+    enabledLabel: '启用 --effort 参数',
+    enabledHint: '关闭后所有执行都不再下发 --effort 参数，Claude CLI 保持自身的默认行为。这是老版本 CLI 或第三方网关不识别该参数时的应急开关。',
+    save: '保存',
+    saving: '保存中...',
+    savedAt: '已保存（{{time}}），下次执行即生效',
+    stages: {
+      designLabel: '方案设计默认档位',
+      designHint: '方案设计、精修文档、应用文档、方案拆分等「写方案」的场景。默认 high。',
+      codingLabel: '开发实现默认档位',
+      codingHint: '开始 / 调整 / 继续开发、编排子任务、普通子任务等「写代码」的场景。默认 medium —— 在成本与智能之间折中。',
+      commitLabel: '提交推送默认档位',
+      commitHint: 'push_pr 子任务、合并冲突解决、PR 摘要等「提交」场景。默认 low —— 这类任务步骤固定，不需要深度推理。',
+      otherLabel: '其他任务默认档位',
+      otherHint: '分析会话、Review、阶段答疑、上下文压缩、Wiki 生成、周报。默认 high，与 Claude CLI 自身的默认级别一致，未配置时行为与引入该参数前完全相同。',
+    },
   },
   subtask: {
     title: '子任务执行策略',

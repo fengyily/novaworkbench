@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 )
 
 // Setting keys for the direct HTTP LLM channel (OpenAI-compatible, e.g.
@@ -234,6 +235,144 @@ func (s *SettingService) SetSubTaskConfig(concurrency int, autoRetry bool, retry
 		return err
 	}
 	return s.Set(settingSubTaskRetryMax, strconv.Itoa(retryMax))
+}
+
+// Setting keys for the reasoning-effort policy (claude CLI --effort). Read
+// on every claude run, so a change takes effect without restarting the
+// backend — same hot-reload pattern as the subtask settings above.
+//
+//   - effort.enabled: master switch. When false, NO run emits --effort at
+//     all (the CLI keeps its own default). This is the escape hatch for a
+//     CLI that doesn't know the flag, or a third-party gateway that
+//     rejects the extra parameter.
+//   - effort.design: default tier for the design stage (方案设计).
+//   - effort.coding: default tier for the coding stage (开发实现).
+//   - effort.commit: default tier for the commit stage (提交推送).
+//   - effort.other:  default tier for every other run (分析 / Review /
+//     答疑 / 压缩 / Wiki / 周报).
+//
+// The shipped values are high / medium / low / high. The "other" default is
+// high on purpose: that is the CLI's own default level, so an unconfigured
+// install behaves exactly like it did before --effort existed.
+const (
+	settingEffortEnabled = "effort.enabled"
+	settingEffortDesign  = "effort.design"
+	settingEffortCoding  = "effort.coding"
+	settingEffortCommit  = "effort.commit"
+	settingEffortOther   = "effort.other"
+)
+
+// EffortConfig is the persisted reasoning-effort policy: the master switch
+// plus one default tier per pipeline stage.
+type EffortConfig struct {
+	// Enabled turns --effort emission on for every run. false = no run
+	// emits the flag (the CLI keeps its own default).
+	Enabled bool `json:"enabled"`
+	// Design is the default tier for the design stage.
+	Design string `json:"design"`
+	// Coding is the default tier for the coding stage.
+	Coding string `json:"coding"`
+	// Commit is the default tier for the commit stage (提交推送).
+	Commit string `json:"commit"`
+	// Other is the default tier for every remaining run.
+	Other string `json:"other"`
+}
+
+// EffortConfig returns the reasoning-effort policy. Missing keys, malformed
+// values and DB errors all fail-safe to the shipped defaults rather than
+// erroring: a broken settings row must never be able to stop a run from
+// starting. The DB error IS returned so callers can log it and keep their
+// last known good state.
+func (s *SettingService) EffortConfig() (EffortConfig, error) {
+	cfg := EffortConfig{
+		Enabled: true,
+		Design:  llm.DefaultEffortDesign,
+		Coding:  llm.DefaultEffortCoding,
+		Commit:  llm.DefaultEffortCommit,
+		Other:   llm.DefaultEffortOther,
+	}
+	raw, err := s.Get(settingEffortEnabled)
+	if err != nil {
+		return cfg, err
+	}
+	if b, berr := strconv.ParseBool(strings.TrimSpace(raw)); berr == nil {
+		cfg.Enabled = b
+	}
+	for _, item := range []struct {
+		key string
+		dst *string
+	}{
+		{settingEffortDesign, &cfg.Design},
+		{settingEffortCoding, &cfg.Coding},
+		{settingEffortCommit, &cfg.Commit},
+		{settingEffortOther, &cfg.Other},
+	} {
+		raw, err = s.Get(item.key)
+		if err != nil {
+			return cfg, err
+		}
+		if v := llm.NormalizeEffort(raw); v != "" {
+			*item.dst = v
+		}
+	}
+	return cfg, nil
+}
+
+// SetEffortConfig persists the reasoning-effort policy. Tiers are validated
+// here (unknown values fall back to the shipped default) so a bad payload
+// can never be written in a shape the run sites would have to defend
+// against on every read.
+func (s *SettingService) SetEffortConfig(cfg EffortConfig) error {
+	if err := s.Set(settingEffortEnabled, strconv.FormatBool(cfg.Enabled)); err != nil {
+		return err
+	}
+	for _, item := range []struct {
+		key string
+		val string
+	}{
+		{settingEffortDesign, cfg.Design},
+		{settingEffortCoding, cfg.Coding},
+		{settingEffortCommit, cfg.Commit},
+		{settingEffortOther, cfg.Other},
+	} {
+		v := llm.NormalizeEffort(item.val)
+		if v == "" {
+			v = llm.DefaultEffortForStage(stageForEffortKey(item.key))
+		}
+		if err := s.Set(item.key, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stageForEffortKey maps a settings key back to its pipeline stage, so the
+// write path can fall back to the right built-in default when the payload
+// carries an unknown tier.
+func stageForEffortKey(key string) string {
+	switch key {
+	case settingEffortDesign:
+		return llm.StageDesign
+	case settingEffortCoding:
+		return llm.StageCoding
+	case settingEffortCommit:
+		return llm.StageCommit
+	case settingEffortOther:
+		return llm.StageOther
+	}
+	return ""
+}
+
+// EffortDefaults implements llm.EffortProvider so the gateway can read the
+// policy without importing this package. A DB error degrades to "no
+// configuration" (ok=false) → the gateway falls back to the built-in
+// defaults rather than failing a run over a settings read.
+func (s *SettingService) EffortDefaults() (enabled bool, design, coding, commit, other string, ok bool) {
+	cfg, err := s.EffortConfig()
+	if err != nil {
+		return true, "", "", "", "", false
+	}
+	return cfg.Enabled, cfg.Design, cfg.Coding, cfg.Commit, cfg.Other, true
 }
 
 // AutoSummaryEnabled reports whether the orchestration queue should

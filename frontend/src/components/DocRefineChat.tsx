@@ -5,6 +5,9 @@ import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
@@ -136,6 +139,18 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     }
   }, [model]);
 
+  // Reasoning-effort tier (claude CLI --effort) for the refine / apply
+  // turns. The hook loads the configured per-stage defaults asynchronously,
+  // so the picker state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('design')` instead would
+  // freeze the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [docEffort, setDocEffort] = useState<EffortTier | null>(null);
+  const docEffortValue = docEffort ?? effortDefaults.forStage('design');
+
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, applyLines]);
@@ -183,6 +198,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         user_message: userMessage,
         // Per-request model override — empty means the role's configured model.
         ...(selectedModel ? { model: selectedModel } : {}),
+        // Reasoning-effort tier. Sent ONLY when the user actually picked
+        // one: an unpicked run leaves the field off so the backend resolves
+        // the configured stage default (llm.Gateway.ResolveEffort owns that
+        // layer) instead of taking the frontend's copy as an explicit pick.
+        ...effortPick(docEffort),
       }),
     });
 
@@ -280,7 +300,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       }
       return next;
     });
-  }, [reqId, projectPath, docType, selectedModel, compressStep, onUsage, t]);
+  }, [reqId, projectPath, docType, selectedModel, docEffortValue, compressStep, onUsage, t]);
 
   const handleSend = async () => {
     const msg = input.trim();
@@ -474,6 +494,10 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           doc_type: docType,
           // Per-request model override — empty means the role's configured model.
           ...(selectedModel ? { model: selectedModel } : {}),
+          // Reasoning-effort tier — same pick as the refine turn above, so
+          // the "重新生成" lands on the depth the user picked. Unpicked →
+          // field omitted, backend resolves the configured stage default.
+          ...effortPick(docEffort),
         }),
       });
       const json = await res.json();
@@ -605,6 +629,27 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.docRefine.collapse')}</button>
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
+      </div>
+
+      {/* Reasoning-effort tier for the refine / apply turns. Sits in its own
+          row right under the header's model picker — the two per-turn knobs
+          that decide how this stage runs. Its own row (not inside the
+          header's inline-flex group) because the bar carries a caption + an
+          explanatory line, which would blow the header's height up.
+          The id is scoped by docType: the requirement page mounts this
+          panel twice (design + wiki) and both bars are live at the same
+          time, so a shared id would merge them into one radio group. */}
+      <div style={{ marginBottom: 8 }}>
+        <EffortBar
+          id={`doc-refine-effort-${docType}`}
+          size="sm"
+          label={t('components.effortBar.ariaLabel')}
+          value={docEffortValue}
+          onChange={setDocEffort}
+          // The master switch (设置 → 推理档位) off → the backend sends no
+          // --effort at all, so an interactive-looking bar would be a lie.
+          disabled={!effortDefaults.enabled || working || applying}
+        />
       </div>
 
       {/* Stack container for the three panels that should appear together

@@ -70,6 +70,11 @@ type PutRequest struct {
 	CodingModel          string `json:"coding_model"`
 	CodingClaudeConfigID string `json:"coding_claude_config_id"`
 	CodingAgentServerID  string `json:"coding_agent_server_id"`
+	// Effort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) each dispatched stage runs at. Empty = follow the
+	// configured stage default at dispatch time.
+	Effort              string `json:"effort"`
+	CodingEffort        string `json:"coding_effort"`
 
 	// 时间窗 (launch_mode=scheduled only)
 	Recurrence string `json:"recurrence"`
@@ -132,6 +137,8 @@ func (h *IssueMonitorHandler) Put(w http.ResponseWriter, r *http.Request) {
 		CodingModel:           body.CodingModel,
 		CodingClaudeConfigID:  body.CodingClaudeConfigID,
 		CodingAgentServerID:   body.CodingAgentServerID,
+		Effort:                body.Effort,
+		CodingEffort:          body.CodingEffort,
 		Recurrence:            body.Recurrence,
 		RecurTime:             body.RecurTime,
 		RecurDays:             body.RecurDays,

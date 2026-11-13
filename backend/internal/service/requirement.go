@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -478,7 +479,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,r.analyst_effort,r.architect_effort,r.developer_effort"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -493,7 +494,14 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.WikiDocs, &r.WikiSessionID, &r.WikiJobID,
 			&r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData, &r.SourceReviewID,
-			&r.SessionServerID)
+			&r.SessionServerID,
+			// The three effort columns are appended at the very END of both
+			// the SELECT list and the Scan list on purpose: inserting them
+			// in the middle would shift every following column by one and
+			// silently mis-assign fields (e.g. architect_model would be read
+			// as analyst_model) — a bug that compiles, passes a smoke test
+			// and is nearly impossible to spot by eye.
+			&r.AnalystEffort, &r.ArchitectEffort, &r.DeveloperEffort)
 	if err == sql.ErrNoRows {
 		return nil, ErrRequirementNotFound
 	}
@@ -1291,6 +1299,44 @@ func (s *RequirementService) UpdateDeveloperModel(id, model string) error {
 
 func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 	return s.UpdateStageModel(id, "reviewer_model", model)
+}
+
+// UpdateStageEffort persists the effective reasoning-effort tier used for a
+// stage. Same contract as UpdateStageModel: written only on the success
+// path, so a failed run never clobbers the last good record; the updated_at
+// bump makes the next GET reflect the new value immediately.
+//
+// The tier is validated here rather than at the call site so a bad value
+// can never be persisted in a shape the read paths would have to defend
+// against. An invalid tier is stored as "" (= "not specified"), which the
+// read paths already treat as "no tier recorded".
+func (s *RequirementService) UpdateStageEffort(id, column, effort string) error {
+	// The column name is interpolated into the SQL, so it must come from a
+	// fixed whitelist — never from caller input.
+	switch column {
+	case "analyst_effort", "architect_effort", "developer_effort":
+	default:
+		return errors.New("unknown effort column: " + column)
+	}
+	tier := llm.NormalizeEffort(effort)
+	_, err := s.db.Exec("UPDATE requirements SET "+s.db.Ident(column)+"=?, updated_at=? WHERE id=?",
+		tier, time.Now(), id)
+	return err
+}
+
+// UpdateAnalystEffort / UpdateArchitectEffort / UpdateDeveloperEffort are
+// thin wrappers over UpdateStageEffort so callers don't hand-build column
+// names.
+func (s *RequirementService) UpdateAnalystEffort(id, effort string) error {
+	return s.UpdateStageEffort(id, "analyst_effort", effort)
+}
+
+func (s *RequirementService) UpdateArchitectEffort(id, effort string) error {
+	return s.UpdateStageEffort(id, "architect_effort", effort)
+}
+
+func (s *RequirementService) UpdateDeveloperEffort(id, effort string) error {
+	return s.UpdateStageEffort(id, "developer_effort", effort)
 }
 
 // UpdateStageConfig persists the effective Claude-config (claude_configs.id)

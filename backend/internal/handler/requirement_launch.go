@@ -243,6 +243,8 @@ func dispatchImmediateDesignAndCoding(req *model.Requirement, spec *model.Launch
 		CodingModel:         spec.CodingModel,
 		CodingConfigID:      spec.CodingClaudeConfigID,
 		CodingAgentServerID: spec.CodingAgentServerID,
+		DesignEffort:        spec.DesignEffort,
+		CodingEffort:        spec.CodingEffort,
 		BranchName:          spec.BranchName,
 		BaseBranch:          spec.BaseBranch,
 		SplitTasks:          spec.SplitTasks,
@@ -286,6 +288,7 @@ func dispatchImmediateCoding(req *model.Requirement, spec *model.LaunchSpec, h *
 	cp := &codingRunParams{
 		RequirementID:  req.ID,
 		Model:          spec.CodingModel,
+		Effort:         spec.CodingEffort,
 		ClaudeConfigID: spec.CodingClaudeConfigID,
 		ReadKnowledge:  spec.ReadKnowledge,
 		AgentServerID:  spec.CodingAgentServerID,
@@ -313,7 +316,7 @@ func dispatchImmediateCoding(req *model.Requirement, spec *model.LaunchSpec, h *
 // (design_model / design_agent_server_id / sync_mode), matching how
 // scheduled_tasks stores a wiki row — see scheduler.WikiParams.
 func dispatchImmediateWiki(req *model.Requirement, spec *model.LaunchSpec, h *WizardHandler) (string, string, *apiFailure) {
-	if _, err := h.RunScheduledWiki(req.ID, spec.DesignModel, spec.ReadKnowledge, spec.DesignAgentServerID, spec.SyncMode, nil); err != nil {
+	if _, err := h.RunScheduledWiki(req.ID, spec.DesignModel, spec.ReadKnowledge, spec.DesignAgentServerID, spec.SyncMode, spec.DesignEffort, nil); err != nil {
 		if af, ok := err.(*apiFailure); ok {
 			return "", "", af
 		}
@@ -389,6 +392,10 @@ func dispatchScheduled(req *model.Requirement, spec *model.LaunchSpec, schedSvc 
 		SplitTasks:          spec.SplitTasks,
 		CodingModel:         spec.CodingModel,
 		CodingAgentServerID: spec.CodingAgentServerID,
+		// The reasoning-effort tiers picked at launch time. Empty = the
+		// configured stage default at dispatch time.
+		Effort:              spec.DesignEffort,
+		CodingEffort:        spec.CodingEffort,
 		// SyncMode was previously dropped on this path (the direct
 		// POST /api/schedules route at schedule.go has always carried it),
 		// so a launch-spec schedule silently fell back to origin

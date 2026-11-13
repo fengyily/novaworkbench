@@ -964,6 +964,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			WorkDir:        dir,
 			SystemPrompt:   systemPrompt,
 			Model:          model,
+			Effort:         resolveEffort(h.llm, "", llm.StageCommit),
 			ClaudeConfigID: claudeConfigID,
 			ExtraEnv:       extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
@@ -1595,6 +1596,7 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		WorkDir:        devDir,
 		SystemPrompt:   systemPrompt,
 		Model:          model,
+		Effort:         resolveEffort(h.llm, "", llm.StageCommit),
 		ClaudeConfigID: claudeConfigID,
 		ExtraEnv:       extraEnv,
 	})
@@ -1634,6 +1636,7 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		WorkDir:        devDir,
 		SystemPrompt:   systemPrompt,
 		Model:          model,
+		Effort:         resolveEffort(h.llm, "", llm.StageCommit),
 		ClaudeConfigID: claudeConfigID,
 	})
 	configID, currency := h.activeConfigMeta()

@@ -202,6 +202,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 		WorkDir:        in.workDir,
 		SystemPrompt:   in.systemPrompt,
 		Model:          cliModelArg(in.model),
+		Effort:         in.p.Effort,
 		ClaudeConfigID: in.claudeConfigID,
 		SessionID:      sessionArg,
 		Resume:         in.sourceSID != "",

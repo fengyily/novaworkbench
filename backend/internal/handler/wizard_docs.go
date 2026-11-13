@@ -239,6 +239,9 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		ConversationHistory string `json:"conversation_history"`
 		UserMessage         string `json:"user_message"`
 		Model               string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this refine turn. Empty = use the stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
@@ -422,6 +425,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		// is empty (gateway.go:662), so the CLI's built-in default system
 		// prompt survives untouched.
 		Model:          cliModelArg(model),
+		Effort:         resolveEffort(h.llm, req.Effort, llm.StageDesign),
 		ClaudeConfigID: claudeConfigID,
 		SessionID:      sourceSID,
 		Resume:         !freshSession,
@@ -514,6 +518,7 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 	ConversationHistory string `json:"conversation_history"`
 	UserMessage         string `json:"user_message"`
 	Model               string `json:"model"`
+	Effort              string `json:"effort"`
 }, requirement *model.Requirement, agentID string) {
 	docLabel := "技术方案"
 	if req.DocType == "coding" {
@@ -538,6 +543,11 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 	}
 	// Align the gateway config with the picked model. See resolveConfigIDForRun.
 	claudeConfigID = h.resolveConfigIDForRun("", model, claudeConfigID)
+	// The reasoning-effort tier (claude CLI --effort) for this refine turn.
+	// Resolved once, here, so the Agent-server branch below and any local
+	// branch share ONE value — the tier a refine run uses must not depend
+	// on which execution environment it happens to land on.
+	effort := resolveEffort(h.llm, req.Effort, llm.StageDesign)
 	_ = systemPrompt // Agent worker prepends the role persona into the prompt itself; not passed via --system-prompt.
 
 	projectPath := req.ProjectPath
@@ -602,6 +612,9 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 				model:          model,
 				claudeConfigID: claudeConfigID,
 				usage:          refineUsage,
+				// The reasoning-effort tier (claude CLI --effort) for this
+				// refine turn — the same value the local branch passes.
+				Effort:         effort,
 				// Refine / apply aren't plan-mode runs — leave PermissionMode
 				// empty so the worker uses the dev default
 				// --dangerously-skip-permissions.
@@ -685,6 +698,9 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		ProjectPath   string `json:"project_path"`
 		DocType       string `json:"doc_type"`
 		Model         string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this apply turn. Empty = use the stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
@@ -782,6 +798,11 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	// Align the gateway config with the picked model. See resolveConfigIDForRun.
 	claudeConfigID = h.resolveConfigIDForRun("", model, claudeConfigID)
+	// The reasoning-effort tier (claude CLI --effort) for this apply turn.
+	// Resolved once, here, so the Agent-server branch below and the local
+	// branch share ONE value — the tier an apply run uses must not depend on
+	// which execution environment it happens to land on.
+	effort := resolveEffort(h.llm, req.Effort, llm.StageDesign)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. Claude runs in a goroutine writing progress into the
@@ -829,6 +850,10 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 					model:          model,
 					claudeConfigID: claudeConfigID,
 					usage:          applyUsage,
+					// The reasoning-effort tier (claude CLI --effort) for
+					// this apply turn — the same value the local branch
+					// passes.
+					Effort:         effort,
 					// Apply isn't plan-mode; empty keeps the dev
 					// default --dangerously-skip-permissions on the
 					// worker side.
@@ -842,6 +867,9 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				WorkDir:        workDir,
 				SystemPrompt:   systemPrompt,
 				Model:          cliModelArg(model),
+				// The same `effort` the Agent-server branch above uses, so
+				// the two execution environments cannot drift apart.
+				Effort:         effort,
 				ClaudeConfigID: claudeConfigID,
 				SessionID:      sourceSID,
 				Resume:         true,
@@ -1052,6 +1080,9 @@ func parseAtMentions(text string) []string {
 type compressContextReq struct {
 	RequirementID string `json:"requirement_id"`
 	Step          string `json:"step"`
+	// Effort — the reasoning-effort tier (claude CLI --effort) the user
+	// picked for this compression turn. Empty = use the stage default.
+	Effort string `json:"effort"`
 }
 
 // compressContextDone is the JSON payload of the terminal "done" event for
@@ -1185,6 +1216,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		Resume:          true,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		Effort:          resolveEffort(h.llm, req.Effort, llm.StageOther),
 		ClaudeConfigID:  claudeConfigID,
 		DisallowedTools: noTools,
 	})

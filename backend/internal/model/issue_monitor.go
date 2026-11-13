@@ -49,6 +49,16 @@ type IssueMonitor struct {
 	CodingClaudeConfigID string `json:"coding_claude_config_id"`
 	CodingAgentServerID  string `json:"coding_agent_server_id"` // "" = 本地执行
 
+	// --- 阶段配置（推理档位）---
+	//
+	// The reasoning-effort tier (claude CLI --effort) each dispatched stage
+	// runs at. "" = follow the configured stage default at dispatch time.
+	// The names match the other two-stage surfaces (schedules, the
+	// design-and-coding modal): `effort` is the design stage,
+	// `coding_effort` the developer stage.
+	Effort       string `json:"effort"`
+	CodingEffort string `json:"coding_effort"`
+
 	// --- 时间窗（仅 LaunchModeScheduled 有意义）---
 	//
 	// 存的是「时间窗定义」而不是直接透传给 scheduled_tasks 的 recurrence：

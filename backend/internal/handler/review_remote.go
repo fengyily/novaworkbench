@@ -145,6 +145,7 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 		WorkDir:                baseRepo,
 		SystemPrompt:           systemPrompt,
 		Model:                  cliModelArg(modelName),
+		Effort:                 rv.Effort,
 		ClaudeConfigID:         claudeConfigID,
 		OverrideSettingSources: &ignoreLocal,
 	}

@@ -51,6 +51,10 @@ type DesignParams struct {
 	// without touching project.default_branch. Empty falls back to
 	// project.DefaultBranch inside prepareArchitectDesign.
 	BaseBranch string
+	// Effort — the reasoning-effort tier (claude CLI --effort) picked when
+	// the schedule was created. Empty = the configured design-stage
+	// default at dispatch time.
+	Effort string
 }
 
 // CodingParams is the wizard-facing shape for a scheduled start-coding.
@@ -77,6 +81,10 @@ type CodingParams struct {
 	ReadKnowledge bool
 	SyncMode      string
 	NoBranch      bool
+	// Effort — the reasoning-effort tier (claude CLI --effort) picked when
+	// the schedule was created. Empty = the configured coding-stage
+	// default at dispatch time.
+	Effort string
 }
 
 // DesignCodingParams is the wizard-facing shape for a merged
@@ -108,6 +116,11 @@ type DesignCodingParams struct {
 	// stage inside chainedDesignCallback. Carried verbatim from the launch
 	// spec at schedule creation time.
 	NoBranch bool
+	// Effort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) picked when the schedule was created, one per stage.
+	// Empty = follow the configured stage default at dispatch time.
+	Effort       string
+	CodingEffort string
 }
 
 // WikiParams is the wizard-facing shape for a scheduled knowledge-base
@@ -124,6 +137,10 @@ type WikiParams struct {
 	ReadKnowledge bool
 	AgentServerID string
 	SyncMode      string
+	// Effort — the reasoning-effort tier (claude CLI --effort) picked when
+	// the schedule was created. Empty = the configured stage default at
+	// dispatch time.
+	Effort string
 }
 
 // Executor is the wizard's adapter surface. The handler package provides
@@ -332,6 +349,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			AgentServerID: t.AgentServerID,
 			SyncMode:      t.SyncMode,
 			BaseBranch:    t.BaseBranch,
+			Effort:        t.Effort,
 		})
 	case model.SchedTypeCoding:
 		jobID, err = s.exec.RunScheduledCoding(ctx, CodingParams{
@@ -344,6 +362,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			ReadKnowledge: t.ReadKnowledge,
 			SyncMode:      t.SyncMode,
 			NoBranch:      t.NoBranch,
+			Effort:        t.Effort,
 		})
 	case model.SchedTypeDesignCoding:
 		// Merged two-stage task: design runs first; on success the executor
@@ -362,6 +381,8 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			SplitTasks:          t.SplitTasks,
 			SyncMode:            t.SyncMode,
 			NoBranch:            t.NoBranch,
+			Effort:              t.Effort,
+			CodingEffort:        t.CodingEffort,
 		})
 	case model.SchedTypeWiki:
 		// Knowledge-base document run. Reuses the design-stage columns
@@ -373,6 +394,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			ReadKnowledge: t.ReadKnowledge,
 			AgentServerID: t.AgentServerID,
 			SyncMode:      t.SyncMode,
+			Effort:        t.Effort,
 		})
 	default:
 		// Defensive — DB guard at Create time already rejects bad types.

@@ -18,6 +18,9 @@ import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
 import { BranchPicker } from '../components/BranchPicker';
 import { SyncModeSelect } from '../components/SyncModeSelect';
+import EffortBar, { type EffortTier } from '../components/EffortBar';
+import { effortPick } from '../utils/effort';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
@@ -679,6 +682,24 @@ export default function RequirementDetail() {
   // from requirements.architect_config_id so a refresh re-hydrates BOTH the
   // config dropdown and the model (fixes the "模型不在当前配置列表中" symptom).
   const [architectConfigId, setArchitectConfigId] = useState('');
+  // ── Reasoning-effort pickers ──
+  // One tier per stage — the design stage and the coding stage are picked
+  // independently, exactly like the model / Agent-server pickers.
+  //
+  // WHY THE `null` SENTINEL: `null` means "the user hasn't picked a tier
+  // yet → follow the configured stage default". The default itself comes
+  // from the settings hook, which loads ASYNCHRONOUSLY — so seeding the
+  // state with `effortDefaults.forStage('design')` would freeze the
+  // shipped fallback into the state on the very first render, and a
+  // configured-but-different default would then be overwritten by that
+  // first render. Resolving the value at render time (`null ?? default`)
+  // keeps the configured default authoritative until the user actually
+  // touches the picker.
+  const effortDefaults = useEffortDefaults();
+  const [architectEffort, setArchitectEffort] = useState<EffortTier | null>(null);
+  const architectEffortValue = architectEffort ?? effortDefaults.forStage('design');
+  const [codingEffort, setCodingEffort] = useState<EffortTier | null>(null);
+  const codingEffortValue = codingEffort ?? effortDefaults.forStage('coding');
   // ── Execution-environment picker state ──
   // Two independent selectors — one for the architect (design) stage and one
   // for the developer (coding) stage. Previously this was a single
@@ -2317,6 +2338,13 @@ export default function RequirementDetail() {
           // generation did. Omitted when false so the wire shape stays
           // backward-compatible (older backends ignore the field).
           ...(regenerate ? { regenerate: true } : {}),
+          // Reasoning-effort tier (claude CLI --effort) for this design run.
+          // Sent ONLY when the user actually picked one: an unpicked run
+          // leaves the field off so the backend resolves the configured
+          // design-stage default (llm.Gateway.ResolveEffort owns that
+          // layer) instead of taking the frontend's copy as an explicit
+          // pick.
+          ...effortPick(architectEffort),
           // Designer-context toggle. Inverted on the wire: a checked box
           // means "keep the architect persona". Sent unconditionally so the
           // backend's zero-value default never fights the frontend default.
@@ -2788,6 +2816,13 @@ export default function RequirementDetail() {
           // never empty. Legacy clients may still send '' which the backend
           // falls back to requirements.dev_mode or 'session'.
           dev_mode: devMode,
+          // Reasoning-effort tier (claude CLI --effort) for this coding run.
+          // Sent ONLY when the user actually picked one: an unpicked run
+          // leaves the field off so the backend resolves the configured
+          // coding-stage default (llm.Gateway.ResolveEffort owns that
+          // layer) instead of taking the frontend's copy as an explicit
+          // pick.
+          ...effortPick(codingEffort),
         }),
       });
       const json = await res.json();
@@ -2876,6 +2911,10 @@ export default function RequirementDetail() {
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id — see doStartCoding for the rationale.
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
+          // Reasoning-effort tier (claude CLI --effort) for this follow-up
+          // round. Same picker as the initial coding run — unpicked →
+          // field omitted, backend resolves the stage default.
+          ...effortPick(codingEffort),
           // agent_server_id is intentionally NOT sent here: adjust-coding
           // resumes the same coding session on the same worktree, so the
           // dev_source / agent_server_id stamped by the original StartCoding
@@ -2911,7 +2950,13 @@ export default function RequirementDetail() {
         // agent_server_id intentionally NOT sent: continue-coding resumes the same
         // coding session / worktree as the original StartCoding, so the
         // existing dev_source / agent_server_id binding stays authoritative.
-        body: JSON.stringify({ requirement_id: id }),
+        body: JSON.stringify({
+          requirement_id: id,
+          // Reasoning-effort tier (claude CLI --effort) for this continuation
+          // round. Same picker as the initial coding run — unpicked →
+          // field omitted, backend resolves the stage default.
+          ...effortPick(codingEffort),
+        }),
       });
       const json = await res.json();
       const jobId = json.data?.job_id;
@@ -3770,6 +3815,27 @@ export default function RequirementDetail() {
                       configId={developerConfigId || undefined}
                       onConfigChange={onDeveloperConfigChange}
                     />
+                  </div>
+                  {/* Reasoning-effort tier for the coding run. Modelled on the
+                      ENV card above — same violet rail, same chip vocabulary
+                      (BASE / NEW / ENV / SYNC / MODEL / EFFORT) — so every
+                      editable field in the Execution section reads as one
+                      group. Disabled while a coding job runs, and while the
+                      backend's global effort switch is off (in that case no
+                      run emits --effort at all, so an active-looking control
+                      would be a lie). */}
+                  <div className="modal-field">
+                    <label>{t('components.effortBar.ariaLabel')}</label>
+                    <div className="preflight-field-card preflight-field-card--exec">
+                      <span className="preflight-field-chip" aria-hidden="true">EFFORT</span>
+                      <EffortBar
+                        id="coding-effort"
+                        size="md"
+                        value={codingEffortValue}
+                        onChange={setCodingEffort}
+                        disabled={coding || !effortDefaults.enabled}
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -5395,6 +5461,23 @@ export default function RequirementDetail() {
               configId={architectConfigId || undefined}
               onConfigChange={setArchitectConfigId}
             />
+            {/* ── Reasoning-effort cluster ──
+                The `--effort` tier this design run gets. Its OWN cluster
+                (not another field inside the model card) because the model
+                card is an inline-flex + white-space:nowrap row — a ~200px
+                effort bar dropped in there would push both selects out of
+                view. Mirrors .design-env-cluster's shape so the toolbar
+                reads as three peers: model / effort / execution environment. */}
+            <div className="design-effort-cluster">
+              <span className="design-effort-cluster-caption">{t('components.effortBar.ariaLabel')}</span>
+              <EffortBar
+                id="design-effort"
+                size="sm"
+                value={architectEffortValue}
+                onChange={setArchitectEffort}
+                disabled={architectWorking || !effortDefaults.enabled}
+              />
+            </div>
             {/* ── Execution-environment cluster ──
                 Wraps Agent server + SyncMode under a single caption so the
                 pair reads as one logical unit. When no Agent server is picked,

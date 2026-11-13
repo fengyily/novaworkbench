@@ -594,6 +594,13 @@ export interface SubTask {
   job_id: string;
   artifact: string;
   model: string;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) this child actually ran at.
+   * Empty on legacy rows written before the column existed. Audit trail
+   * only — the tier a NEW run uses comes from the composer's picker (or
+   * the configured stage default), never from this column.
+   */
+  effort?: string;
   // claude_configs row this child was actually dispatched against (inherited
   // from the parent requirement's developer stage, picked in the composer, or
   // resolved from the model). Empty on legacy rows written before the column
@@ -752,7 +759,7 @@ export const subTasksApi = {
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full' },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full'; effort?: string },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
@@ -763,7 +770,7 @@ export const subTasksApi = {
   // /api/wizard/jobs/{job_id}/stream for the main agent's progress; the
   // dispatched children appear in the sub-tasks list afterwards.
   // 409 when a child is still running.
-  reOrchestrate: (requirementId: string, data?: { model?: string; claude_config_id?: string }) =>
+  reOrchestrate: (requirementId: string, data?: { model?: string; claude_config_id?: string; effort?: string }) =>
     api.post<{ job_id: string }>(`/api/requirements/${requirementId}/re-orchestrate`, data ?? {}),
   // Fetch one sub-task (incl. artifact Markdown). 404 when the id doesn't
   // belong to the requirement.
@@ -777,7 +784,7 @@ export const subTasksApi = {
   // parent's claude session via --fork-session so the child inherits the
   // parent's prior edits + transcript. Returns a new job_id/sub_task_id
   // (the adjustment itself is a new sub-task row).
-  adjust: (requirementId: string, subTaskId: string, data: { prompt: string; model?: string }) =>
+  adjust: (requirementId: string, subTaskId: string, data: { prompt: string; model?: string; effort?: string }) =>
     api.post<{ job_id: string; sub_task_id: string }>(
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
       data,
@@ -787,7 +794,7 @@ export const subTasksApi = {
   // coding_session_id with a brand-new claude session id, optionally with
   // a different model. reused_session is always true on the redo path
   // (the row survives; the session does not).
-  redo: (requirementId: string, subTaskId: string, data: { model?: string }) =>
+  redo: (requirementId: string, subTaskId: string, data: { model?: string; effort?: string }) =>
     api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/redo`,
       data,
@@ -796,7 +803,7 @@ export const subTasksApi = {
   // --resume (no fork). Reused for both 'error' and 'stopped' rows; the
   // original artifact is preserved until the new result lands. Returns
   // reused_session=false (the existing session is reused end-to-end).
-  continue: (requirementId: string, subTaskId: string, data: { model?: string } = {}) =>
+  continue: (requirementId: string, subTaskId: string, data: { model?: string; effort?: string } = {}) =>
     api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/continue`,
       data,
@@ -826,7 +833,7 @@ export const subTasksApi = {
   // existing /api/wizard/jobs/{jobId}/stream endpoint (use those job_ids
   // on the response to subscribe). The summary Markdown appears on the
   // next GET of the requirement (see requirements.coding_plan).
-  orchestrate: (requirementId: string, data: { user_message: string; model?: string }) =>
+  orchestrate: (requirementId: string, data: { user_message: string; model?: string; effort?: string }) =>
     api.post<SubTaskOrchestrateResponse>(
       `/api/requirements/${requirementId}/orchestrate`, data,
     ),
@@ -916,6 +923,7 @@ export const requirementReviewsApi = {
       agent_server_id?: string;
       base_branch?: string;
       session_mode?: 'fork' | 'with_context';
+      effort?: string;
     },
   ) =>
     api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
@@ -931,7 +939,7 @@ export const requirementReviewsApi = {
   createFixes: (
     requirementId: string,
     reviewId: string,
-    data: { finding_ref?: string; severities?: string[] },
+    data: { finding_ref?: string; severities?: string[]; effort?: string },
   ) =>
     api.post<{ sub_task_ids: string[] }>(
       `/api/requirements/${requirementId}/reviews/${reviewId}/fixes`,
@@ -1119,6 +1127,15 @@ export interface Requirement {
   analyst_model?: string;
   architect_model?: string;
   developer_model?: string;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) each stage actually ran at.
+   * Audit trail + UI echo only — a NEW run follows the configured stage
+   * default, never the value stored here, so a settings change takes
+   * effect on the next run without touching the row.
+   */
+  analyst_effort?: string;
+  architect_effort?: string;
+  developer_effort?: string;
   reviewer_model?: string;
   // Effective Claude-config (claude_configs.id) selected for the architect /
   // developer stage, persisted on the success path so the config dropdown
@@ -1357,6 +1374,10 @@ export interface LaunchSpec {
   coding_model?: string;
   coding_claude_config_id?: string;
   coding_agent_server_id?: string;
+  /** Reasoning-effort tier for the design stage (claude CLI --effort). */
+  design_effort?: string;
+  /** Reasoning-effort tier for the coding stage (claude CLI --effort). */
+  coding_effort?: string;
   branch_name?: string;
   base_branch?: string;
   split_tasks?: boolean;
@@ -1721,7 +1742,7 @@ export const requirementsApi = {
   //
   // agent_server_id — 用户在弹窗里选的执行环境（空 = 本机执行）。后端按它
   // 分流本地 claude CLI / 远端 nova-agent-worker（见 requirement_split.go）。
-  split: (id: string, body: { model?: string; claude_config_id?: string; agent_server_id?: string } = {}) =>
+  split: (id: string, body: { model?: string; claude_config_id?: string; agent_server_id?: string; effort?: string } = {}) =>
     api.post<{ job_id: string }>(`/api/requirements/${id}/split`, body),
   // confirmSplit: persist the user-confirmed candidates as sub-requirements.
   // The whole batch lands in one transaction (children + dependency edges +
@@ -1797,7 +1818,7 @@ export const requirementsApi = {
   // architect-design / start-coding entries.
   // sync_mode is only honored when agent_server_id is set: '' = origin
   // clone/push, 'local' = git bundle over SFTP.
-  generateWikiDoc: (id: string, opts: { model?: string; claude_config_id?: string; agent_server_id?: string; read_knowledge?: boolean; sync_mode?: '' | 'local' } = {}) =>
+  generateWikiDoc: (id: string, opts: { model?: string; claude_config_id?: string; agent_server_id?: string; read_knowledge?: boolean; sync_mode?: '' | 'local'; effort?: string } = {}) =>
     api.post<{ job_id: string }>(`/api/wizard/wiki/generate`, { requirement_id: id, ...opts }),
   // PromoteFromIdea: summarize an idea's accumulated discussion (description +
   // chat history + acceptance_criteria) into a brand-new requirement row. The
@@ -1894,6 +1915,11 @@ export interface StartCodingReq {
   agent_server_id?: string;
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) for this run. Empty = the
+   * configured 「开发实现」 stage default.
+   */
+  effort?: string;
   // 三个独立 stage 开关 — commit / push / PR 各自分离。前端分支弹窗
   // (RequirementDetail) 与 LaunchPlanSection 已切到这三个字段;后端在
   // 三个字段全部未传时回退到遗留的 auto_push_pr 兼容老客户端。
@@ -1956,6 +1982,10 @@ export interface DesignCodingImmediateReq {
   coding_claude_config_id?: string;
   /** coding stage Agent server; '' = local execution. */
   coding_agent_server_id?: string;
+  /** Reasoning-effort tier for the design stage (claude CLI --effort). */
+  design_effort?: string;
+  /** Reasoning-effort tier for the coding stage (claude CLI --effort). */
+  coding_effort?: string;
   branch_name?: string;
   base_branch?: string;
   split_tasks?: boolean;
@@ -2001,6 +2031,8 @@ export interface PromoteDesignConfig {
   design_claude_config_id?: string;
   /** design stage Agent server; '' = local execution. */
   design_agent_server_id?: string;
+  /** Reasoning-effort tier for the design stage (claude CLI --effort). */
+  design_effort?: string;
 }
 
 /**
@@ -2330,6 +2362,12 @@ export interface GoalCheck {
 export interface CodeReview {
   id: string;
   project_id: string;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) this review ran at. Empty
+   * on legacy rows. A follow-up / regeneration INHERITS this tier so the
+   * answer comes back at the same depth the report was written at.
+   */
+  effort?: string;
   review_type: CodeReviewType;
   branch: string;
   base_branch: string;
@@ -2551,6 +2589,11 @@ export interface CodeReviewRunBinding {
   model?: string;
   claude_config_id?: string;
   agent_server_id?: string;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) for the review run. Empty =
+   * the configured 「其他任务」 stage default.
+   */
+  effort?: string;
 }
 
 export const codeReviewsApi = {
@@ -2624,13 +2667,16 @@ export const qaChatApi = {
   list: (requirementId: string, stage: QAStage) =>
     api.get<RequirementQATurn[]>(`/api/requirements/${requirementId}/qa-chat/${stage}`),
   /** Asks one question. Returns the job id to stream and the turn id. */
-  ask: (requirementId: string, stage: QAStage, question: string, body?: { model?: string; claude_config_id?: string }) =>
+  ask: (requirementId: string, stage: QAStage, question: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
     api.post<{ job_id: string; turn_id: string }>('/api/wizard/qa-chat', {
       requirement_id: requirementId,
       stage,
       question,
       ...(body?.model ? { model: body.model } : {}),
       ...(body?.claude_config_id ? { claude_config_id: body.claude_config_id } : {}),
+      // The reasoning-effort tier (claude CLI --effort). Empty = the
+      // configured 「其他任务」 stage default.
+      ...(body?.effort ? { effort: body.effort } : {}),
     }),
   /** Clears the whole thread of one stage. */
   reset: (requirementId: string, stage: QAStage) =>
@@ -2838,6 +2884,33 @@ export interface SubTaskConfig {
 export const subTaskConfigApi = {
   get: () => api.get<SubTaskConfig>('/api/settings/subtask'),
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
+};
+
+// Reasoning-effort policy (claude CLI --effort). The backend reads it on
+// every claude run, so saving takes effect without a restart.
+//
+// `enabled` is the master switch: false means NO run emits --effort at all
+// (the CLI keeps its own default). It is the single escape hatch for a CLI
+// build that doesn't know the flag, or a third-party gateway that rejects
+// the extra parameter — which is why the tier pickers elsewhere in the UI
+// never offer a "don't send it" option.
+//
+// The four tier fields are the per-stage defaults: design (方案设计),
+// coding (开发实现), commit (提交推送) and other (everything else). The
+// shipped values are high / medium / low / high; "other" is high because
+// that is the CLI's own default level, so an unconfigured install behaves
+// exactly like it did before --effort existed.
+export interface EffortConfig {
+  enabled: boolean;
+  design: string;
+  coding: string;
+  commit: string;
+  other: string;
+}
+export const settingsApi = {
+  getEffort: () => api.get<EffortConfig>('/api/settings/effort'),
+  updateEffort: (data: Partial<EffortConfig>) =>
+    api.put<EffortConfig>('/api/settings/effort', data),
 };
 
 // Agent Server remote work root. `effective` is what the backend uses
@@ -3500,6 +3573,10 @@ export interface CreateScheduleReq {
   // design_and_coding 专属：开发者阶段配置
   coding_model?: string;
   coding_agent_server_id?: string;
+  /** Reasoning-effort tier for the design stage (claude CLI --effort). */
+  effort?: string;
+  /** Reasoning-effort tier for the coding stage (claude CLI --effort). */
+  coding_effort?: string;
   // Code-transport mode for the Agent-server run. '' (default) = origin
   // clone/push; 'local' = git bundle over SFTP. Only honored when
   // agent_server_id or coding_agent_server_id is non-empty. Persisted on
@@ -3613,6 +3690,13 @@ export interface IssueMonitor {
   coding_model: string;
   coding_claude_config_id: string;
   coding_agent_server_id: string;
+  /**
+   * Reasoning-effort tier (claude CLI --effort) for each dispatched stage:
+   * `effort` is the design stage, `coding_effort` the developer stage.
+   * Empty = follow the configured stage default at dispatch time.
+   */
+  effort: string;
+  coding_effort: string;
   recurrence: IssueMonitorRecurrence;
   recur_time: string;
   recur_days: string;
@@ -3648,6 +3732,9 @@ export interface UpdateIssueMonitorReq {
   coding_model: string;
   coding_claude_config_id: string;
   coding_agent_server_id: string;
+  /** Reasoning-effort tier (claude CLI --effort) per stage — see IssueMonitor. */
+  effort: string;
+  coding_effort: string;
   recurrence: IssueMonitorRecurrence;
   recur_time: string;
   recur_days: string;

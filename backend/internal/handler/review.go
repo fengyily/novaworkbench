@@ -301,6 +301,10 @@ type StartReviewReq struct {
 	Model          string `json:"model"`
 	ClaudeConfigID string `json:"claude_config_id"`
 	AgentServerID  string `json:"agent_server_id"`
+	// Effort is the reasoning-effort tier (claude CLI --effort). Empty =
+	// use the configured stage default for reviews ("其他任务"). Stored on
+	// the session row so a re-run from history reproduces the same tier.
+	Effort string `json:"effort"`
 }
 
 // StartReview is the legacy PR-review entry point, kept verbatim in shape
@@ -339,6 +343,7 @@ func (h *ReviewHandler) StartReview(w http.ResponseWriter, r *http.Request) {
 		// mapping. Storing it means a re-run from history keeps it.
 		Description:    req.ExtraRequirements,
 		Model:          strings.TrimSpace(req.Model),
+		Effort:         strings.TrimSpace(req.Effort),
 		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
 		AgentServerID:  strings.TrimSpace(req.AgentServerID),
 		CreatedBy:      currentUserID(r),
@@ -372,6 +377,9 @@ type CreateReviewReq struct {
 	Model          string `json:"model"`
 	ClaudeConfigID string `json:"claude_config_id"`
 	AgentServerID  string `json:"agent_server_id"`
+	// Effort is the reasoning-effort tier (claude CLI --effort). Empty =
+	// use the configured stage default for reviews ("其他任务").
+	Effort string `json:"effort"`
 }
 
 // CreateReview opens a draft session. The draft exists so attachments have a
@@ -408,6 +416,7 @@ func (h *ReviewHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 		Title:          strings.TrimSpace(req.Title),
 		Description:    req.Description,
 		Model:          strings.TrimSpace(req.Model),
+		Effort:         strings.TrimSpace(req.Effort),
 		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
 		AgentServerID:  strings.TrimSpace(req.AgentServerID),
 		CreatedBy:      currentUserID(r),
@@ -465,6 +474,7 @@ func (h *ReviewHandler) UpdateReview(w http.ResponseWriter, r *http.Request) {
 		Title:          strings.TrimSpace(req.Title),
 		Description:    req.Description,
 		Model:          strings.TrimSpace(req.Model),
+		Effort:         strings.TrimSpace(req.Effort),
 		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
 		AgentServerID:  strings.TrimSpace(req.AgentServerID),
 	}
@@ -654,9 +664,21 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 	claudeConfigID = h.resolveReviewConfigID(strings.TrimSpace(rv.ClaudeConfigID), modelName, claudeConfigID)
 	job.SetModel(modelName)
 
+	// Reasoning effort (claude CLI --effort). The tier stored on the row is
+	// the user's pick; an empty pick falls back to the configured stage
+	// default for reviews ("其他任务"), so a settings change hot-applies to
+	// the next run without touching the row. The RESOLVED tier is written
+	// back below so a later 追问 / 重新生成 inherits exactly what this run
+	// used.
+	effort := resolveEffort(h.llm, rv.Effort, llm.StageOther)
+	rv.Effort = effort
+
 	if h.reviewSvc != nil {
 		if err := h.reviewSvc.MarkRunning(rv.ID, job.ID, modelName); err != nil {
 			log.Printf("[Review] mark running %s: %v", rv.ID, err)
+		}
+		if err := h.reviewSvc.MarkEffort(rv.ID, effort); err != nil {
+			log.Printf("[Review] persist effort %s: %v", rv.ID, err)
 		}
 	}
 
@@ -710,6 +732,7 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 		WorkDir:        project.LocalPath,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
+		Effort:         effort,
 		ClaudeConfigID: claudeConfigID,
 	})
 
