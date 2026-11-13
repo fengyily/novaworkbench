@@ -32,7 +32,7 @@ func TestSplitJSONContract_ContainsTheHardRules(t *testing.T) {
 
 func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 	req := &model.Requirement{ID: "req_p", Title: "大需求", Kind: "requirement", Description: "描述"}
-	p := BuildSplitPrompt(req, "# 技术方案\n\n正文", nil)
+	p := BuildSplitPrompt(req, "# 技术方案\n\n正文", nil, "")
 	if !strings.Contains(p, "大需求") {
 		t.Error("prompt is missing the master title")
 	}
@@ -42,7 +42,7 @@ func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 	if !strings.Contains(p, "json") {
 		t.Error("prompt is missing the json contract")
 	}
-	if BuildSplitPrompt(nil, "x", nil) != "" {
+	if BuildSplitPrompt(nil, "x", nil, "") != "" {
 		t.Error("a nil requirement must degrade to an empty prompt")
 	}
 }
@@ -52,9 +52,52 @@ func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 func TestBuildSplitPrompt_ListsExistingChildren(t *testing.T) {
 	req := &model.Requirement{ID: "req_p", Title: "大需求"}
 	existing := []*model.Requirement{{ID: "req_c1", Title: "已有子需求", Status: "draft"}}
-	p := BuildSplitPrompt(req, "docs", existing)
+	p := BuildSplitPrompt(req, "docs", existing, "")
 	if !strings.Contains(p, "已有子需求") {
 		t.Error("prompt does not mention the existing children")
+	}
+}
+
+// The context block is optional: a requirement without attachments, granted
+// directories or references must produce EXACTLY the prompt it produced
+// before the feature existed. Pin the bytes — this is the regression that
+// keeps every other split stage unchanged.
+func TestBuildSplitPrompt_EmptyContextIsByteIdentical(t *testing.T) {
+	req := &model.Requirement{ID: "req_p", Title: "大需求", Kind: "requirement", Description: "描述"}
+	want := "请把下面这份技术方案拆分成若干个**可独立交付、可独立提 PR**的子需求。\n\n" +
+		"## 主需求\n" +
+		"- 标题：大需求\n" +
+		"- 类型：requirement\n" +
+		"- 描述：描述\n" +
+		"\n" +
+		"## 技术方案\n\n" +
+		"# 方案\n\n" +
+		SplitJSONContract +
+		splitContractTail
+	got := BuildSplitPrompt(req, "# 方案", nil, "")
+	if got != want {
+		t.Errorf("the prompt changed:\ngot:\n%q\nwant:\n%q", got, want)
+	}
+	// A blank context block is the same as no context block.
+	if BuildSplitPrompt(req, "# 方案", nil, "   \n ") != want {
+		t.Error("a blank context block must not change the prompt")
+	}
+}
+
+// With a context block the material lands between 「主需求」 and 「技术方案」,
+// so the model reads the requirement's material BEFORE the plan it has to
+// cut up.
+func TestBuildSplitPrompt_InsertsTheContextBlock(t *testing.T) {
+	req := &model.Requirement{ID: "req_p", Title: "大需求"}
+	p := BuildSplitPrompt(req, "# 方案", nil, "## 需求上下文\n\n### 📎 已附加文件\n")
+	if !strings.Contains(p, "## 需求上下文") {
+		t.Fatal("the context block is missing from the prompt")
+	}
+	idxCtx := strings.Index(p, "## 需求上下文")
+	idxMaster := strings.Index(p, "## 主需求")
+	idxPlan := strings.Index(p, "## 技术方案")
+	if !(idxMaster < idxCtx && idxCtx < idxPlan) {
+		t.Errorf("the context block must sit between 主需求 and 技术方案 (master=%d ctx=%d plan=%d)", idxMaster, idxCtx, idxPlan)
 	}
 }
 

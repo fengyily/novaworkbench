@@ -6618,7 +6618,16 @@ export default function RequirementDetail() {
                   current sub-task count back into liveSubTaskCount so
                   hasSubTasks takes effect the moment a sub-task is created
                   and hides the requirement-level "Follow-up" entry. Setter
-                  ref is stable so it does not loop the panel render. */}
+                  ref is stable so it does not loop the panel render.
+
+                  allowReview: the requirement-level Review is offered HERE,
+                  in the developing stage too. Whether the work is "finished"
+                  is a human judgement, not a status field — as soon as there
+                  is code to grade (the branch exists, its commits are
+                  pushed or not), the user may Review it. This block and the
+                  done-stage block are mutually exclusive (status is either
+                  'developing' or 'done'), so the page still shows exactly
+                  ONE Review entry point. */}
               {(req.status === 'developing' || req.status === 'done') && reqKind !== 'idea' && (
                 <SubTaskPanel
                   requirementId={req.id}
@@ -6629,6 +6638,7 @@ export default function RequirementDetail() {
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
+                  allowReview
                 />
               )}
 
@@ -6738,10 +6748,10 @@ export default function RequirementDetail() {
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
-                  // The done-stage mount is the ONE that offers the
-                  // requirement-level Review. The developing-stage mount
-                  // above leaves it off, so the page never shows two Review
-                  // entry points at once.
+                  // The done-stage mount offers the requirement-level Review
+                  // as well. The two mounts live in mutually exclusive
+                  // status blocks ('developing' vs 'done'), so the page
+                  // never shows two Review entry points at once.
                   allowReview
                 />
               )}

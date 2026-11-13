@@ -46,7 +46,7 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Backend may have restarted since the job ran — try the durable log
 		// store so the user can still review the development record.
-		status, exitCode, startedAt, finishedAt, jobModel, lines, perr := h.jobLogSvc.Get(id)
+		status, exitCode, startedAt, finishedAt, jobModel, errorKind, lines, perr := h.jobLogSvc.Get(id)
 		if perr != nil {
 			writeError(w, 404, "NOT_FOUND", "job not found")
 			return
@@ -55,6 +55,7 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 			"job_id":      id,
 			"status":      status,
 			"exit_code":   exitCode,
+			"error_kind":  errorKind,
 			"log":         lines,
 			"model":       jobModel,
 			"started_at":  startedAt,

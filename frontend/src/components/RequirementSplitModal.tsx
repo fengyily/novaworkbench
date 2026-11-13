@@ -27,7 +27,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ApiError,
+  attachmentsApi,
   requirementsApi,
+  requirementDirsApi,
+  type Attachment,
+  type RequirementDir,
+  type RequirementReference,
   type SplitReference,
   type SplitRunState,
   type SplitTaskCandidate,
@@ -258,6 +263,13 @@ function remapRefPairs(refs: RefPair[], oldToNew: Map<number, number>): RefPair[
   return out;
 }
 
+/** Human-readable file size — mirrors the backend's formatSize. */
+function formatSize(n: number): string {
+  if (!n || n < 1024) return `${n || 0} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function RequirementSplitModal({
   open,
   onClose,
@@ -318,6 +330,22 @@ export function RequirementSplitModal({
       : '';
   });
 
+  /**
+   * The material this split will hand to the AI: the uploaded attachments,
+   * the directories the user authorized Claude to read, and the requirements
+   * this one references.
+   *
+   * Purely informational — the backend injects all of it into the split
+   * prompt on its own. The card exists so the user can SEE what the model
+   * will see before spending a run on it: a split that silently ignores the
+   * attachments is the difference between grounded children and invented
+   * interfaces.
+   */
+  const [ctxAttachments, setCtxAttachments] = useState<Attachment[]>([]);
+  const [ctxDirs, setCtxDirs] = useState<RequirementDir[]>([]);
+  const [ctxRefs, setCtxRefs] = useState<RequirementReference[]>([]);
+  const [ctxLoading, setCtxLoading] = useState(false);
+
   const streamRef = useRef<EventStream | null>(null);
   /** True once the modal unmounted — guards the async start() against
    *  touching state that no longer exists. */
@@ -376,6 +404,31 @@ export function RequirementSplitModal({
     if (!open) return;
     setSourceBranch(baseBranch || '');
   }, [open, baseBranch]);
+
+  // Load the requirement's material for the context card. Three independent
+  // reads — one of them failing (e.g. an old database without the dirs
+  // table) must not hide the other two, so each result settles on its own.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setCtxLoading(true);
+    void Promise.allSettled([
+      attachmentsApi.list('requirements', requirementId),
+      requirementDirsApi.list(requirementId),
+      requirementsApi.getReferences(requirementId),
+    ]).then(([atts, dirs, refs]) => {
+      if (cancelled) return;
+      setCtxAttachments(atts.status === 'fulfilled' ? atts.value ?? [] : []);
+      // The synthetic "auto" row is the requirement's attachment directory —
+      // not a grant the user made, so it does not belong in the grant list.
+      setCtxDirs(dirs.status === 'fulfilled' ? (dirs.value ?? []).filter((d) => !d.auto) : []);
+      setCtxRefs(refs.status === 'fulfilled' ? refs.value ?? [] : []);
+      setCtxLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, requirementId]);
 
   // The split no longer starts on its own: the user configures the run
   // (model / execution environment / source branch) first and then presses
@@ -946,6 +999,81 @@ export function RequirementSplitModal({
 
               <div className="req-split-hint req-split-hint-muted">
                 {t('requirements.split.configScopeHint')}
+              </div>
+
+              {/* ── The material this split carries ──
+                  Read-only. The backend injects all of it into the split
+                  prompt; this card only shows the user what the model will
+                  see. */}
+              <div className="req-split-context">
+                <div className="req-split-context-title">{t('requirements.split.contextTitle')}</div>
+
+                {ctxLoading ? (
+                  <div className="req-split-context-empty">{t('requirements.split.contextLoading')}</div>
+                ) : (
+                  <>
+                    <div className="req-split-context-group">
+                      <div className="req-split-context-label">
+                        📎 {t('requirements.split.contextAttachments', { count: ctxAttachments.length })}
+                      </div>
+                      {ctxAttachments.length === 0 ? (
+                        <div className="req-split-context-empty">{t('requirements.split.contextNone')}</div>
+                      ) : (
+                        <ul className="req-split-context-list">
+                          {ctxAttachments.map((a) => (
+                            <li key={a.id}>
+                              <span className="req-split-context-name">{a.filename}</span>
+                              <span className="req-split-context-meta">{formatSize(a.size_bytes)}</span>
+                              {a.description && (
+                                <span className="req-split-context-desc">{a.description}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    <div className="req-split-context-group">
+                      <div className="req-split-context-label">
+                        📂 {t('requirements.split.contextDirs', { count: ctxDirs.length })}
+                      </div>
+                      {ctxDirs.length === 0 ? (
+                        <div className="req-split-context-empty">{t('requirements.split.contextNone')}</div>
+                      ) : (
+                        <ul className="req-split-context-list">
+                          {ctxDirs.map((d) => (
+                            <li key={d.id}>
+                              <span className="req-split-context-name">{d.path}</span>
+                              {d.label && <span className="req-split-context-desc">{d.label}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    <div className="req-split-context-group">
+                      <div className="req-split-context-label">
+                        🔗 {t('requirements.split.contextRefs', { count: ctxRefs.length })}
+                      </div>
+                      {ctxRefs.length === 0 ? (
+                        <div className="req-split-context-empty">{t('requirements.split.contextNone')}</div>
+                      ) : (
+                        <ul className="req-split-context-list">
+                          {ctxRefs.map((r) => (
+                            <li key={r.requirement_id}>
+                              <span className="req-split-context-name">{r.title || r.requirement_id}</span>
+                              {r.note && <span className="req-split-context-desc">{r.note}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    {ctxAttachments.length === 0 && ctxDirs.length === 0 && ctxRefs.length === 0 && (
+                      <div className="req-split-context-empty">{t('requirements.split.contextEmptyHint')}</div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           )}

@@ -85,7 +85,8 @@ func TestStallErrorMessage_StderrTakesPrecedence(t *testing.T) {
 func TestRunStallWatchdog_FiresOnArmedSilence(t *testing.T) {
 	heartbeats := make(chan struct{}, 1)
 	killed := atomic.Bool{}
-	stalled := runStallWatchdog("test", 50*time.Millisecond, heartbeats, func() { killed.Store(true) })
+	stalled := &atomic.Bool{}
+	runStallWatchdog("test", 50*time.Millisecond, heartbeats, func() { killed.Store(true) }, stalled)
 
 	// Prime the watchdog so it arms and starts counting from now.
 	heartbeats <- struct{}{}
@@ -101,6 +102,8 @@ func TestRunStallWatchdog_FiresOnArmedSilence(t *testing.T) {
 	if !killed.Load() {
 		t.Fatalf("killFn was not invoked within 500ms (stallTimeout=50ms)")
 	}
+	// The caller-owned flag is what runClaudeStream reads to set
+	// error_kind=stalled — it MUST be the same atomic the watchdog flips.
 	if stalled == nil || !stalled.Load() {
 		t.Fatalf("stalled flag should be true after kill")
 	}
@@ -113,7 +116,8 @@ func TestRunStallWatchdog_FiresOnArmedSilence(t *testing.T) {
 func TestRunStallWatchdog_DoesNotFireWithBeats(t *testing.T) {
 	heartbeats := make(chan struct{}, 1)
 	killed := atomic.Bool{}
-	stalled := runStallWatchdog("test", 50*time.Millisecond, heartbeats, func() { killed.Store(true) })
+	stalled := &atomic.Bool{}
+	runStallWatchdog("test", 50*time.Millisecond, heartbeats, func() { killed.Store(true) }, stalled)
 
 	// Beat every 20ms for 250ms — well past the 50ms window several times over.
 	ticker := time.NewTicker(20 * time.Millisecond)

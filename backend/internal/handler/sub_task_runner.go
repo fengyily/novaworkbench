@@ -945,8 +945,8 @@ func (r *SubTaskRunner) run(
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
-		log.Printf("[sub-task] defer-Save job_id=%s req_id=%s sub_task_id=%s status=%s exit=%d lines=%d", job.ID, st.RequirementID, st.ID, status, exitCode, len(lines))
-		if perr := r.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+		log.Printf("[sub-task] defer-Save job_id=%s req_id=%s sub_task_id=%s status=%s exit=%d kind=%s lines=%d", job.ID, st.RequirementID, st.ID, status, exitCode, job.ErrorKind, len(lines))
+		if perr := r.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model, job.ErrorKind); perr != nil {
 			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
 		} else {
 			log.Printf("[sub-task] defer-Save OK job_id=%s", job.ID)
@@ -1575,11 +1575,21 @@ func (r *SubTaskRunner) run(
 	}
 
 	var out claudeStreamOutcome
+	// The attempt's session id + start time. They are needed to probe the
+	// session transcript ("did the request ever leave the machine?") and to
+	// decide whether a forked run died instantly.
+	var lastAttemptSID string
+	var lastAttemptStart time.Time
 	if !fork {
 		// ContinueSubTask path: single attempt, no fallback. Per user
 		// decision (2026-09-17) the stale-session hard-fail semantics for
 		// --resume-in-place are preserved — a stale parent JSONL here
 		// means the user must "重做" rather than auto-recover.
+		lastAttemptStart = time.Now()
+		lastAttemptSID = sourceSID
+		if freshSession || bare {
+			lastAttemptSID = newSID
+		}
 		out = r.runLocalSubTaskAttempt(
 			st, job, prompt, systemPromptForRun, modelName,
 			sourceSID, newSID,
@@ -1588,6 +1598,7 @@ func (r *SubTaskRunner) run(
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
 			addDirs, spec.disallowedTools,
 		)
+		out.errMsg = annotateFailureWithTranscript(out, workDir, lastAttemptSID, lastAttemptStart)
 	} else {
 		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
 		// caller-supplied source SID first, then walk up the parent chain
@@ -1626,6 +1637,8 @@ func (r *SubTaskRunner) run(
 				job.Append(store.LogLine{Type: "phase",
 					Content: fmt.Sprintf("🔄 子任务源会话=%s (回退第 %d 层)", src, idx)})
 			}
+			lastAttemptStart = time.Now()
+			lastAttemptSID = sidForThisAttempt
 			out = r.runLocalSubTaskAttempt(
 				st, job, prompt, systemPromptForRun, modelName,
 				src, sidForThisAttempt,
@@ -1654,8 +1667,156 @@ func (r *SubTaskRunner) run(
 			job.Append(store.LogLine{Type: "phase",
 				Content: "🔄 源会话已过期，自动尝试上一级会话..."})
 		}
+		out.errMsg = annotateFailureWithTranscript(out, workDir, lastAttemptSID, lastAttemptStart)
+		// Fork auto-fallback (v0.5.x). A forked session that dies within
+		// seconds — before the model was ever called — is a failure of the
+		// fork machinery itself, not of the model or the proxy. Retrying the
+		// same fork would fail the same way, so we fall back ONCE to the
+		// existing "new session (with requirement context)" path.
+		if !freshSession && !bare {
+			probe := probeClaudeTranscript(workDir, lastAttemptSID, lastAttemptStart)
+			if looksLikeForkInstantCrash(out, probe) {
+				out = r.retryForkAsFreshSession(st, job, req, out, prompt, systemPromptForRun,
+					modelName, sourceSID, workDir, subUsage, finalConfigID, credEnv,
+					phaseTrack, hardTimeout, addDirs, spec.disallowedTools, probe)
+			}
+		}
 	}
 	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack, finishHooks)
+}
+
+// annotateFailureWithTranscript appends the content-free session-transcript
+// evidence to a failed run's error message.
+//
+// It answers the question the process-level diagnostics cannot: did the
+// request ever leave the machine? "本次运行未发出任何模型请求" means the CLI
+// died before the first API call; "已发出 N 次模型请求" means the request was
+// made and the answer was lost somewhere downstream.
+//
+// Stale-session failures are left alone — their diagnosis comes from the
+// JSONL lookup itself, and the transcript would only add noise.
+func annotateFailureWithTranscript(out claudeStreamOutcome, workDir, sid string, since time.Time) string {
+	if out.errMsg == "" || out.staleSession || sid == "" {
+		return out.errMsg
+	}
+	return appendTranscriptEvidence(out.errMsg, probeClaudeTranscript(workDir, sid, since))
+}
+
+// forkInstantCrashWindow bounds how fast a forked session must die for the
+// "the fork machinery itself is broken" theory to hold. A run that produced
+// real output before failing is a different failure mode (proxy, rate limit,
+// model error) and must NOT be silently retried through another path.
+const forkInstantCrashWindow = 10 * time.Second
+
+// looksLikeForkInstantCrash reports whether a failed run matches the
+// "forked session died before the model was ever called" signature.
+//
+// The conditions:
+//
+//  1. the run produced no final result but did fail;
+//  2. stdout ended by EOF / read error rather than by a result event;
+//  3. not a single assistant/result event was seen — the model was never
+//     reached;
+//  4. the whole run took less than forkInstantCrashWindow;
+//  5. either the CLI was still alive when the stream ended (we killed it
+//     during teardown), or it died on its own BUT the session transcript
+//     proves the request never left the machine.
+//
+// The last condition is what keeps a genuine "the model rejected the
+// request" error from being masked by a silent retry through another path.
+func looksLikeForkInstantCrash(out claudeStreamOutcome, probe claudeTranscriptProbe) bool {
+	if out.finalResult != "" || out.errMsg == "" {
+		return false
+	}
+	if out.stdoutEnded != "eof" && out.stdoutEnded != "scan-error" {
+		return false
+	}
+	if out.sawAssistant {
+		return false
+	}
+	if out.elapsed <= 0 || out.elapsed > forkInstantCrashWindow {
+		return false
+	}
+	if out.killReason == killReasonTeardown {
+		return true
+	}
+	if out.killReason != "" {
+		return false
+	}
+	// The CLI exited on its own. Only treat it as a fork crash when the
+	// transcript proves no request was ever issued.
+	return probe.Found && !probe.RequestLeftMachine()
+}
+
+// retryForkAsFreshSession re-runs a crashed forked sub-task through the
+// existing "new session (with requirement context)" path — the very same
+// mechanism the user gets when they tick that box manually.
+//
+// The failed fork's transcript is probed first (metadata only) so the user
+// learns whether the request ever left the machine — the single most useful
+// fact when a fork dies instantly.
+//
+// If the fallback also fails, the returned outcome keeps the FIRST (fork)
+// error body and appends the fallback's error, so the artifact shows both
+// attempts instead of silently replacing the original failure.
+func (r *SubTaskRunner) retryForkAsFreshSession(
+	st *model.SubTask,
+	job *store.Job,
+	req *model.Requirement,
+	failed claudeStreamOutcome,
+	prompt, systemPromptForRun, modelName string,
+	sourceSID, workDir string,
+	subUsage *usageCtx,
+	finalConfigID string,
+	credEnv []string,
+	tracker *phaseTracker,
+	hardTimeout time.Duration,
+	addDirs []string,
+	disallowedTools []string,
+	probe claudeTranscriptProbe,
+) claudeStreamOutcome {
+	log.Printf("[sub-task] %s: fork crashed instantly (elapsed=%s events=%d) — %s",
+		st.ID, failed.elapsed.Round(time.Millisecond), failed.streamEventCount, probe.Describe())
+	job.Append(store.LogLine{Type: "phase", Content: "🔄 fork 会话启动失败（" + probe.Describe() +
+		"），自动改用「新会话（含需求上下文）」重试"})
+
+	// The fresh session gets the requirement context instead of the parent
+	// conversation — same block the manual "新会话" path injects.
+	fallbackPrompt := prompt
+	if req != nil {
+		if ctx := buildParentContext(req, r.subTaskSvc, sourceSID); ctx != "" {
+			fallbackPrompt = ctx + "\n" + prompt
+			job.Append(store.LogLine{Type: "message",
+				Content: "🧩 兜底重试已注入父任务上下文（前 200 字预览：" + truncateForLog(ctx, 200) + "）"})
+		}
+	}
+	fallbackSID := util.NewUUID()
+	// Clear the row's source_session_id: the fallback is NOT a child of the
+	// parent session, and audit readers must not see it as one.
+	if perr := r.subTaskSvc.UpdateSession(st.ID, fallbackSID, ""); perr != nil {
+		log.Printf("[sub-task] failed to clear source_session_id for fork fallback %s: %v", st.ID, perr)
+	}
+
+	fallbackStart := time.Now()
+	out := r.runLocalSubTaskAttempt(
+		st, job, fallbackPrompt, systemPromptForRun, modelName,
+		/*sourceSID*/ "", fallbackSID,
+		/*adjustFlag*/ false,
+		/*forkFlag*/ false,
+		/*freshSession*/ true,
+		/*bare*/ false,
+		workDir, subUsage, finalConfigID, credEnv, tracker, hardTimeout,
+		addDirs, disallowedTools,
+	)
+	if out.errMsg == "" && out.finalResult != "" {
+		return out
+	}
+	out.errMsg = annotateFailureWithTranscript(out, workDir, fallbackSID, fallbackStart)
+	// Both attempts failed. Keep the ORIGINAL (fork) error body — it describes
+	// the failure the user actually hit — and append the fallback's so both
+	// attempts are visible.
+	out.errMsg = failed.errMsg + "\n\n---\n\n🔁 兜底重试（新会话，含需求上下文）同样失败：\n\n" + out.errMsg
+	return out
 }
 
 // runLocalSubTaskAttempt launches a single claude subprocess for the local
@@ -1744,10 +1905,16 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	// Absolute wall-clock ceiling (push/PR children only). Idle timeouts reset
 	// on every emitted line, so a child that busy-polls CI never trips them;
 	// this one is unconditional. 0 disables it.
+	//
+	// The killReason recorder is shared with runClaudeStream so the final
+	// message can say "we stopped it at the wall-clock cap" instead of
+	// blaming the CLI for a SIGKILL that we caused.
+	var killReason claudeKillReason
 	if hardTimeout > 0 {
 		timer := time.AfterFunc(hardTimeout, func() {
 			log.Printf("[sub-task] %s: hard timeout %v reached, cancelling claude", st.ID, hardTimeout)
 			job.Append(store.LogLine{Type: "error", Content: "⏱️ 子任务达到总时长上限（" + hardTimeout.String() + "），已中止。"})
+			killReason.set(killReasonHardTimeout)
 			cancel()
 			killProcessGroup(cmd)
 		})
@@ -1775,7 +1942,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 			)
 		}
 	}
-	return runClaudeStream(subTaskSink{jobSink: jobSink{job: job}, workDir: workDir}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, codingStallTimeout)
+	return runClaudeStream(subTaskSink{jobSink: jobSink{job: job}, workDir: workDir}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, withStallTimeout(codingStallTimeout), withKillReason(&killReason))
 }
 
 // subTaskSink is jobSink plus the sub-task safety guard (streamGuard).
@@ -1961,6 +2128,11 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			job.SetErrorKind("idle-timeout")
 		} else if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 			job.SetErrorKind("stalled")
+		} else if out.killReason == killReasonTeardown || out.killReason == killReasonHardTimeout {
+			// We stopped the CLI ourselves before it produced a result.
+			// Distinct from the two above: nothing is wrong with the proxy
+			// or the stream — the run simply never got anywhere.
+			job.SetErrorKind("terminated")
 		}
 	case out.finalResult == "":
 		finalStatus = model.SubTaskStatusError
@@ -1991,8 +2163,11 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 				artifactBody = appendPRLineToBody(artifactBody, u)
 			}
 		}
+		// "✅ 子任务完成！" only on the success path. It used to be appended
+		// unconditionally, so a failed run persisted a log that said "error"
+		// AND "完成" at the same time.
+		job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 	}
-	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
 	// v0.5.x: 三阶段落库分支。仅手动触发且 tracker 走过 phase 路径时，
@@ -2044,7 +2219,15 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			log.Printf("[sub-task] touch parent %s: %v", st.RequirementID, perr)
 		}
 	}
-	job.Finish(0, store.JobDone)
+	// The job status must agree with the sub-task status. It used to be
+	// hardcoded to (0, JobDone) — a failed run was persisted as a *successful*
+	// job with exit_code=0, which is what made the durable record contradict
+	// the failure the user saw in the UI.
+	if finalStatus == model.SubTaskStatusDone {
+		job.Finish(0, store.JobDone)
+	} else {
+		job.Finish(1, store.JobError)
+	}
 	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
 }
 

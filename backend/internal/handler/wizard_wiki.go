@@ -405,7 +405,7 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCallbacks) {
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
-		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model, job.ErrorKind); perr != nil {
 			log.Printf("[wiki-generate] failed to persist job log %s: %v", job.ID, perr)
 		}
 		if cb != nil && cb.OnFinish != nil {
@@ -507,7 +507,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 			nil,
 			nil,
 			0,
-			wikiStallTimeout,
+			withStallTimeout(wikiStallTimeout),
 		)
 	}
 

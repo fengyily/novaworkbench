@@ -586,6 +586,34 @@ func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, p
 	return persona, modelName, configID, nil
 }
 
+// preferLocalHeadFor decides whether a requirement-level Review resolves
+// its head ref to the LOCAL branch instead of `origin/<branch>`.
+//
+// It answers one question: "is the local worktree the copy of the code the
+// user wants graded?"
+//
+//   - Locally developed, own worktree → YES. The branch tip IS the worktree's
+//     HEAD and may carry commits the user never pushed; diffing against
+//     `origin/<branch>` would silently review the pre-push code, so the
+//     「修复 → 回归 Review」 loop would never converge.
+//   - Developed on an Agent Server → NO. The code was written on the server
+//     and pushed there; the local worktree is only the branch isolation
+//     shell, so the remote ref is the copy that holds the work.
+//   - No local worktree (degraded mode) → NO. The pushed code is all there
+//     is.
+func preferLocalHeadFor(req *model.Requirement, workDir, projPath string) bool {
+	if req == nil {
+		return false
+	}
+	if strings.TrimSpace(req.AgentServerID) != "" {
+		return false
+	}
+	if workDir == "" || workDir == projPath {
+		return false
+	}
+	return workDir == req.WorktreePath
+}
+
 // resolveScope resolves the review's diff scope.
 //
 // It returns the working directory, the head / base branch names (for the
@@ -637,6 +665,19 @@ func (h *RequirementReviewHandler) resolveScope(req *model.Requirement, baseOver
 			return "", "", "", scope, fmt.Errorf("需求没有开发分支，无法解析 Review 范围")
 		}
 		scReq.Branch = branch
+		// When the Review runs in the requirement's OWN worktree AND the
+		// requirement was developed LOCALLY, the local branch is the truth —
+		// it may carry commits that were never pushed, and reviewing
+		// `origin/<branch>` instead would grade code the user already
+		// replaced (the 「修复 → 回归 Review」 loop would then never
+		// converge).
+		//
+		// A requirement developed on an Agent Server keeps origin-first: its
+		// code lives on the server and was pushed there, so the remote ref is
+		// the only copy that holds the work (the local worktree is just the
+		// branch isolation shell). Same for the degraded mode (no local
+		// worktree at all) — there, the pushed code is all there is.
+		scReq.PreferLocalHead = preferLocalHeadFor(req, workDir, projPath)
 	}
 	scope, err = resolveReviewScope(context.Background(), scReq)
 	if err != nil {

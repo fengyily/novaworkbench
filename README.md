@@ -316,9 +316,10 @@ npm run dev
 ### 方式四：本地 + PostgreSQL 调试
 
 ```bash
-./run.sh
-# 自动启动 nova-postgres 容器，注入 NOVA_DB_DRIVER=postgres / DSN
-# 然后 go run ./cmd/server
+make run
+# 数据库连接来自 ~/.novaworkbench/dbconfig.json
+# 在「设置 → 数据库」页面把 driver 选为 postgres 并保存 DSN 即可（如 postgres://user@127.0.0.1:5432/novaworkbench?sslmode=disable）
+# 环境变量 NOVA_DB_DRIVER / NOVA_DB_DSN 优先于该文件
 ```
 
 ### 首次登录

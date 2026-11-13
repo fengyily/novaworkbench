@@ -5,22 +5,23 @@
 // code": the default `reviewer` persona, the `architect`, or any persona the
 // user wrote themselves.
 //
-// It is a plain `<select>` rather than a custom dropdown because the list is
-// short, rarely changes, and the platform's own select styling is already
-// consistent with the rest of the settings pages.
+// Like `ExecEnvSelect`, it renders ONLY the <select> element and lets the
+// caller own the label / card markup — the composer, the review toolbar and
+// any future surface each wrap it differently. Keeping the two dropdowns
+// structurally identical is what stops the composer row from looking like a
+// pile of unrelated controls.
+//
+// The control class is `form-input` (the project's one form-control class,
+// which styles `select.form-input` explicitly) — not a bespoke class name:
+// an unstyled native <select> in the middle of that row is what made the
+// first version of this picker look like it didn't belong.
 
 import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { rolesApi, type Role } from '../api/client';
 
-interface Props {
-  /** The selected roles.key. '' means "not chosen yet" → falls back to 'reviewer'. */
-  value: string;
-  onChange: (key: string) => void;
-  disabled?: boolean;
-  /** Accessible label; defaults to the i18n string. */
-  label?: string;
-  style?: React.CSSProperties;
+export interface ReviewIdentityOption {
+  key: string;
+  name: string;
 }
 
 /**
@@ -31,9 +32,20 @@ interface Props {
 export const DEFAULT_REVIEW_ROLE_KEY = 'reviewer';
 
 export default function ReviewIdentitySelect({
-  value, onChange, disabled, label, style,
-}: Props) {
-  const { t } = useTranslation();
+  value,
+  onChange,
+  disabled = false,
+  className = 'form-input',
+  style,
+  title,
+}: {
+  value: string;
+  onChange: (key: string) => void;
+  disabled?: boolean;
+  className?: string;
+  style?: React.CSSProperties;
+  title?: string;
+}) {
   const [roles, setRoles] = useState<Role[] | null>(null);
 
   useEffect(() => {
@@ -44,35 +56,32 @@ export default function ReviewIdentitySelect({
     return () => { alive = false; };
   }, []);
 
-  const options = useMemo(() => {
+  const options = useMemo<ReviewIdentityOption[]>(() => {
     const list = (roles ?? []).filter((r) => r.enabled !== false);
     // The default persona always has to be selectable, even on an install
     // whose roles table was trimmed — otherwise the picker would silently
     // start the review under some other persona.
-    if (list.length === 0) return [] as Role[];
-    const hasDefault = list.some((r) => r.key === DEFAULT_REVIEW_ROLE_KEY);
-    if (hasDefault) return list;
-    return [{ ...list[0], key: DEFAULT_REVIEW_ROLE_KEY, name: list[0].name }, ...list];
+    if (list.length === 0) return [];
+    if (list.some((r) => r.key === DEFAULT_REVIEW_ROLE_KEY)) {
+      return list.map((r) => ({ key: r.key, name: r.name }));
+    }
+    return [{ key: DEFAULT_REVIEW_ROLE_KEY, name: list[0].name }, ...list.map((r) => ({ key: r.key, name: r.name }))];
   }, [roles]);
 
   return (
-    <label
-      className="sub-composer-env"
-      style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)', ...style }}
+    <select
+      className={className}
+      value={value || DEFAULT_REVIEW_ROLE_KEY}
+      disabled={disabled || options.length === 0}
+      onChange={(e) => onChange(e.target.value)}
+      title={title}
+      style={style}
     >
-      <span>{label ?? t('components.subTaskPanel.reviewIdentityLabel')}</span>
-      <select
-        className="form-select"
-        value={value || DEFAULT_REVIEW_ROLE_KEY}
-        disabled={disabled || options.length === 0}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map((r) => (
-          <option key={r.key} value={r.key}>
-            {r.name} ({r.key})
-          </option>
-        ))}
-      </select>
-    </label>
+      {options.map((r) => (
+        <option key={r.key} value={r.key}>
+          {r.name} ({r.key})
+        </option>
+      ))}
+    </select>
   );
 }

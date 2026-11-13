@@ -152,7 +152,7 @@ func TestGetSplitState_RunningThenDone(t *testing.T) {
 
 	release := make(chan struct{})
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		<-release
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
@@ -227,7 +227,7 @@ func TestStreamSplitJob_TerminalFrameCarriesTasks(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{
 			{Title: "子需求 A", Order: 1},
 			{Title: "子需求 B", Order: 2, DependsOn: []int{1}},
@@ -272,7 +272,7 @@ func TestStreamSplitJob_TerminalFrameCarriesErrorMessage(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return nil, nil, "远端失败"
 	}
 
@@ -304,7 +304,7 @@ func TestConfirmSplit_ConsumesTheRun(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
@@ -348,7 +348,7 @@ func TestSplit_ConcurrentRefusalKeepsTheRunningRun(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		<-release
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}

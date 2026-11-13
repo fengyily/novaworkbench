@@ -12,16 +12,21 @@ import {
   knowledgeApi,
   reportArchiveApi,
   claudeSettingsPrefix,
+  wizardApi,
   DefaultModelLabel,
   type SubTask,
   type SubTaskStatus,
   type Requirement,
   type OrchestrationBatch,
   type AgentServer,
+  type RunJob,
+  type ReviewCandidate,
+  type ReviewCandidates,
 } from '../api/client';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { ExecEnvBadge } from './ExecEnvBadge';
 import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentitySelect';
+import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
@@ -86,11 +91,13 @@ interface Props {
   // Whether this panel may launch a requirement-level Review.
   //
   // The requirement page mounts the panel TWICE: once for the developing
-  // stage and once for the done stage. A Review is a "the work is finished,
-  // now grade it" action, so it belongs to the done-stage mount only —
-  // otherwise the user would find two Review entry points on the same page
-  // and have to guess which one to use. The developing-stage mount leaves
-  // this false and therefore shows no mode switch at all.
+  // stage and once for the done stage. Whether the work counts as "finished"
+  // is a HUMAN judgement, so the Review is NOT gated on the requirement
+  // having been marked done — as soon as there is code to grade, the user
+  // may Review it (the review covers the requirement's own branch, pushed or
+  // not). Both mounts therefore pass allowReview; they live in mutually
+  // exclusive status blocks, so the page still shows exactly ONE Review
+  // entry point.
   allowReview?: boolean;
 }
 
@@ -357,6 +364,71 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   });
   flush(lines.length);
   return <div className="sub-log" ref={logRef}>{rendered}</div>;
+}
+
+// SubTaskJobDiagnostics renders the persisted job snapshot of a FAILED
+// sub-task: the exit code, the machine-readable failure reason and the
+// complete log.
+//
+// Why this exists: the in-memory job log is lost on a backend restart and
+// the live SSE stream only carries what happened *after* the page was
+// opened. Before this panel, a failed sub-task showed one line — a bare
+// "Claude exited abnormally: exit status 143" — with no way to tell
+// whether the CLI had crashed, been killed by the stall watchdog, or
+// terminated by NovaWorkbench itself.
+function SubTaskJobDiagnostics({ job }: { job: RunJob }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState<boolean>(false);
+
+  const kindLabel = (() => {
+    switch (job.error_kind) {
+      case 'stalled': return t('components.subTaskPanel.errorKindStalled');
+      case 'idle-timeout': return t('components.subTaskPanel.errorKindIdleTimeout');
+      case 'terminated': return t('components.subTaskPanel.errorKindTerminated');
+      default: return job.error_kind
+        ? `${t('components.subTaskPanel.errorKindUnknown')} (${job.error_kind})`
+        : '-';
+    }
+  })();
+
+  const duration = (() => {
+    const started = Date.parse(job.started_at || '');
+    const finished = Date.parse(job.finished_at || '');
+    if (Number.isNaN(started) || Number.isNaN(finished) || finished < started) return '-';
+    const ms = finished - started;
+    return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+  })();
+
+  const logText = (job.log || [])
+    .map((l) => (l.type === 'error' ? `❌ ${l.content}` : l.content))
+    .join('\n');
+
+  return (
+    <section className="sub-diag">
+      <div className="sub-diag-header">
+        <span className="sub-diag-title">{t('components.subTaskPanel.jobDiagnostics')}</span>
+        <span className="sub-diag-meta">
+          <span>{t('components.subTaskPanel.exitCode')}: {job.exit_code}</span>
+          <span>{t('components.subTaskPanel.errorKind')}: {kindLabel}</span>
+          <span>{t('components.subTaskPanel.duration')}: {duration}</span>
+        </span>
+      </div>
+      <div className="sub-diag-hint">{t('components.subTaskPanel.jobDiagnosticsHint')}</div>
+      <button
+        type="button"
+        className="sub-diag-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {open
+          ? t('components.subTaskPanel.fullLogCollapse')
+          : `${t('components.subTaskPanel.fullLog')} (${(job.log || []).length})`}
+      </button>
+      {open && (
+        <pre className="sub-diag-log">{logText || '-'}</pre>
+      )}
+    </section>
+  );
 }
 
 // v0.5.x: 三段折叠区组件——理解 / 实施 / 小结每段都是一个本地小组件。
@@ -928,6 +1000,12 @@ function SubTaskCard({
   // when the card has finished and SSE has gone quiet. We display
   // `live ?? fallback` so refresh-after-finish still shows the same bar.
   const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
+  // Durable job snapshot for a FAILED run. The in-memory JobStore is lost on
+  // a backend restart, but `job_logs` survives — so on failure we fetch
+  // /api/wizard/jobs/{id} once and render the exit code, the machine-readable
+  // error kind and the complete log. Before this existed a failed sub-task
+  // showed exactly one line (a bare "exit status 143") and nothing else.
+  const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
   // 'pending' now always means "queued behind the project's concurrency gate":
   // the orchestration tick deliberately leaves a row pending rather than
@@ -993,6 +1071,14 @@ function SubTaskCard({
               at: Date.now(),
             }));
           }
+          // A failed run pulls the durable job snapshot: exit code,
+          // error_kind and the complete persisted log. The in-memory job is
+          // gone after a backend restart — job_logs is what survives.
+          if (evt && (evt as any).status === 'error' && st.job_id) {
+            wizardApi.getJob(st.job_id)
+              .then((job) => { setJobDiag(job); })
+              .catch(() => { /* diagnostics are best-effort */ });
+          }
           subTasksApi.get(st.requirement_id, st.id)
             .then((next) => { setArtifact(next.artifact); onChanged(next); })
             .catch(() => { /* keep last-known state */ });
@@ -1043,6 +1129,23 @@ function SubTaskCard({
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.job_id, st.id, st.requirement_id]);
+
+  // A row that was ALREADY failed when the card mounted (page refresh, or
+  // the failure happened while the browser tab was closed) has no live SSE
+  // history at all — pull the durable job snapshot so the diagnostics block
+  // shows up in that case too. job_logs survives a backend restart, so this
+  // is the only source of truth once the in-memory job is gone.
+  useEffect(() => {
+    if (streaming) return;
+    if (st.status !== 'error' || !st.job_id) return;
+    if (jobDiag) return;
+    let cancelled = false;
+    wizardApi.getJob(st.job_id)
+      .then((job) => { if (!cancelled) setJobDiag(job); })
+      .catch(() => { /* diagnostics are best-effort */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, st.status, st.job_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
@@ -1735,6 +1838,11 @@ function SubTaskCard({
             </div>
           )}
 
+          {/* Run diagnostics — failed runs only, read from the durable job log. */}
+          {!streaming && jobDiag && (
+            <SubTaskJobDiagnostics job={jobDiag} />
+          )}
+
           {/* v0.5.x: brief-result block — 手动子任务在「简洁」模式下（report_mode='brief'）
               渲染这块。源/状态/模型/耗时/花费 已经在卡头 .sub-card-meta +
               .sub-card-quickstats 里展示完了，这里只放最终结果本身，不再重复
@@ -2016,6 +2124,25 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // The AI persona the review runs under (roles.key). Default 'reviewer' —
   // the same default the project-level Review uses.
   const [reviewRoleKey, setReviewRoleKey] = useState(DEFAULT_REVIEW_ROLE_KEY);
+  // The Review's own description box — SEPARATE from `prompt` (the ordinary
+  // sub-task body). Sharing one field meant switching modes destroyed the
+  // other draft, which is exactly the kind of friction a two-mode composer
+  // must not have.
+  const [reviewGoal, setReviewGoal] = useState('');
+  // The focus points the system could offer: the requirement's acceptance
+  // points + whatever the static checks flagged.
+  const [reviewCandidates, setReviewCandidates] = useState<ReviewCandidates | null>(null);
+  // candidate id → the exact line it stamped into the box. Tracking the
+  // INSERTED TEXT (not just the id) is what lets a toggle remove the line
+  // again after the user has edited around it.
+  const [appliedCandidates, setAppliedCandidates] = useState<Record<string, string>>({});
+  const [reviewScanning, setReviewScanning] = useState(false);
+  const [reviewScanDone, setReviewScanDone] = useState(false);
+  // Mirror of reviewGoal so the candidate loader can tell "the user has
+  // written something" from "the box is still untouched" without making
+  // that decision inside a state updater (which React may run twice).
+  const reviewGoalRef = useRef(reviewGoal);
+  useEffect(() => { reviewGoalRef.current = reviewGoal; }, [reviewGoal]);
 
   // --- Screenshot ingestion (paste / drop / file picker) -----------------
   // Parity with the create-requirement form's RichDescriptionEditor: any
@@ -2614,8 +2741,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   }, [latestArtifactStale, sessionMode]);
 
   const onCreate = useCallback(async () => {
-    const p = prompt.trim();
-    if (!p || submitting) return;
+    const p = composerMode === 'review' ? reviewGoal.trim() : prompt.trim();
+    // A Review may be launched without a written goal — the requirement
+    // already carries it and the reviewer infers the intent from the diff.
+    if (composerMode !== 'review' && !p) return;
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -2624,13 +2754,19 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         // backend creates the code_reviews row + the task_kind='review'
         // sub-task and starts it. The live log reuses the existing job
         // stream channel.
+        //
+        // The description may be EMPTY: the requirement already carries the
+        // goal, and the reviewer is told to infer the intent from the diff
+        // when the user has not written one. Forcing a non-empty box was
+        // the whole point of the change.
         await requirementReviewsApi.start(requirementId, {
-          description: p,
+          description: reviewGoal.trim(),
           role_key: reviewRoleKey || DEFAULT_REVIEW_ROLE_KEY,
           ...(createModel ? { model: createModel } : {}),
           ...(createConfigId ? { claude_config_id: createConfigId } : {}),
         });
-        setPrompt('');
+        setReviewGoal('');
+        setAppliedCandidates({});
         reset();
         await loadList();
         return;
@@ -2678,7 +2814,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
+  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -2690,6 +2826,85 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const reSplitEsRef = useRef<EventStream | null>(null);
 
   const anyAlive = !!items?.some((s) => s.status === 'running' || s.status === 'pending');
+
+  // The Review composer's starting point. Entering Review mode asks the
+  // backend for the requirement's own goal + acceptance points and pre-fills
+  // the box with the goal — the requirement IS the review target, so making
+  // the user retype it is busy work.
+  //
+  // It is fetched lazily (on the mode switch) rather than on mount: an
+  // ordinary sub-task composer must not pay for it.
+  const loadReviewCandidates = useCallback(async () => {
+    try {
+      const data = await requirementReviewsApi.candidates(requirementId);
+      setReviewCandidates(data);
+      // Only pre-fill when the box is still untouched — a goal the user
+      // already edited must never be overwritten by a late response.
+      if (reviewGoalRef.current.trim()) return;
+      // The acceptance points go IN by default: they are the definition of
+      // "goal met", so the reviewer has to see them. The defects do NOT
+      // — a static check can report a dozen low-value items, and dumping
+      // them into the goal would bury the actual goal. The user ticks those.
+      const lines = data.criteria.map((c) => `- ${c.title}`);
+      const applied: Record<string, string> = {};
+      data.criteria.forEach((c, i) => { applied[c.id] = lines[i]; });
+      setAppliedCandidates(applied);
+      setReviewGoal([data.goal ?? '', ...lines].filter(Boolean).join('\n'));
+    } catch {
+      // A failed fetch must not break the composer: the user can still type
+      // a goal by hand, and the reviewer's prompt already carries the full
+      // requirement context.
+      setReviewCandidates(null);
+    }
+  }, [requirementId]);
+
+  // Runs the project's static checks (go vet / tsc) in the requirement's
+  // working tree. Slow, hence the separate button and the spinner.
+  const runReviewScan = useCallback(async () => {
+    if (reviewScanning) return;
+    setReviewScanning(true);
+    try {
+      const data = await requirementReviewsApi.scan(requirementId);
+      setReviewCandidates(data);
+      setReviewScanDone(true);
+    } catch {
+      // A failed scan leaves whatever the instant endpoint already gave us;
+      // the user simply gets no defect chips.
+    } finally {
+      setReviewScanning(false);
+    }
+  }, [requirementId, reviewScanning]);
+
+  // Toggling a candidate stamps its line into (or lifts it out of) the box.
+  // The box stays freely editable: a toggle removes exactly the line it
+  // inserted, everything else the user typed is left alone.
+  const toggleReviewCandidate = useCallback((c: ReviewCandidate) => {
+    const inserted = appliedCandidates[c.id];
+    if (inserted !== undefined) {
+      setReviewGoal((prev) => {
+        const kept = prev.split('\n').filter((l) => {
+          const t = l.trim();
+          // Exact match first (the line we inserted). The suffix match is
+          // the fallback for a line the user edited afterwards — removing
+          // their edited line would lose their work, so we only remove it
+          // when it still clearly IS the candidate.
+          return t !== inserted && !t.endsWith(c.title);
+        });
+        return kept.join('\n');
+      });
+      setAppliedCandidates((prev) => {
+        const next = { ...prev };
+        delete next[c.id];
+        return next;
+      });
+      return;
+    }
+    const line = c.kind === 'defect'
+      ? `- ${c.detail ? c.detail + ' ' : ''}${c.title}`
+      : `- ${c.title}`;
+    setReviewGoal((prev) => (prev.trim() ? prev.replace(/\s*$/, '') + '\n' : '') + line);
+    setAppliedCandidates((prev) => ({ ...prev, [c.id]: line }));
+  }, [appliedCandidates]);
 
   // isLatestReviewRound reports whether a review sub-task sits at the TIP of
   // the requirement's round chain.
@@ -3034,7 +3249,13 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
                     name="composerMode"
                     value={m}
                     checked={active}
-                    onChange={() => setComposerMode(m)}
+                    onChange={() => {
+                      setComposerMode(m);
+                      // Entering Review mode loads the requirement's own goal
+                      // + acceptance points, so the box starts filled
+                      // instead of empty.
+                      if (m === 'review') void loadReviewCandidates();
+                    }}
                     disabled={submitting || reSplitBusy}
                   />
                   <span className="sub-session-mode-option-text">
@@ -3056,24 +3277,45 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             the sole yardstick the reviewer grades "goal met" against. */}
         <AtMentionTextarea
           ref={promptAreaRef}
-          value={prompt}
-          onChange={setPrompt}
+          value={composerMode === 'review' ? reviewGoal : prompt}
+          onChange={composerMode === 'review' ? setReviewGoal : setPrompt}
           placeholder={t(composerMode === 'review'
             ? 'components.subTaskPanel.reviewComposerPlaceholder'
             : 'components.subTaskPanel.composerPlaceholder')}
-          rows={4}
+          rows={composerMode === 'review' ? 6 : 4}
           disabled={submitting}
           onPaste={handlePaste}
           className="sub-composer-textarea"
         />
-        {/* The review identity (an AI persona). Review mode only — an
-            ordinary sub-task always runs as the executor role. */}
+        {/* The focus points the system could offer. Review mode only — the
+            candidates are the requirement's acceptance points and whatever the
+            static checks flagged; clicking one stamps it into the box, and
+            the user stays free to edit what ends up there. */}
         {composerMode === 'review' && (
-          <ReviewIdentitySelect
-            value={reviewRoleKey}
-            onChange={setReviewRoleKey}
-            disabled={submitting || reSplitBusy}
+          <ReviewFocusChips
+            criteria={reviewCandidates?.criteria ?? []}
+            defects={reviewCandidates?.defects ?? []}
+            applied={Object.fromEntries(Object.keys(appliedCandidates).map((k) => [k, true]))}
+            onToggle={toggleReviewCandidate}
+            onScan={runReviewScan}
+            scanning={reviewScanning}
+            scanEmpty={reviewScanDone && (reviewCandidates?.defects ?? []).length === 0}
           />
+        )}
+        {/* The review identity (an AI persona) and the execution environment
+            sit side by side, in the same wrapper the ordinary exec-env row
+            uses — the composer row has to read as one set of controls, not
+            as a pile of unrelated widgets. */}
+        {composerMode === 'review' && (
+          <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
+            <span>{t('components.subTaskPanel.reviewIdentityLabel')}</span>
+            <ReviewIdentitySelect
+              value={reviewRoleKey}
+              onChange={setReviewRoleKey}
+              disabled={submitting || reSplitBusy}
+              style={{ minWidth: 160 }}
+            />
+          </label>
         )}
         {/* Sub-task model picker — the SINGLE picker for the panel's
             composer row. It applies to BOTH the "Start sub-task" and
@@ -3109,9 +3351,20 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           /* A requirement-level Review runs locally only: a remote host
              sees just origin, so it cannot see the uncommitted fixes and a
              re-check would re-grade stale code. */
-          <span className="sub-composer-env-hint" role="note">
-            {t('components.subTaskPanel.reviewLocalOnlyHint')}
-          </span>
+          <>
+            <span className="sub-composer-env-hint" role="note">
+              {t('components.subTaskPanel.reviewLocalOnlyHint')}
+            </span>
+            {/* A Review does NOT wait for the requirement to be marked
+                "开发完成" — whether the work is finished enough to grade is
+                the user's call. The hint says so explicitly, so the missing
+                "done" badge never reads as a missing precondition. */}
+            {requirement.status !== 'done' && (
+              <span className="sub-composer-env-hint" role="note">
+                {t('components.subTaskPanel.reviewNotDoneHint')}
+              </span>
+            )}
+          </>
         ) : agentServers.length > 0 && (
           <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
             <span>{t('components.subTaskPanel.execEnvLabel')}</span>
@@ -3272,7 +3525,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             type="button"
             className="btn btn-primary sub-composer-submit"
             onClick={onCreate}
-            disabled={submitting || reSplitBusy || !prompt.trim()}
+            disabled={
+              submitting || reSplitBusy ||
+              // A Review does not need a written goal (the requirement
+              // carries it); an ordinary sub-task does need a body.
+              (composerMode === 'review' ? false : !prompt.trim())
+            }
           >
             {submitting
               ? t('components.subTaskPanel.submitBusy')

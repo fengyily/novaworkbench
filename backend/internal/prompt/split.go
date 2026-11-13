@@ -148,11 +148,19 @@ var splitFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
 // BuildSplitPrompt renders the split prompt.
 //
 // Inputs: the master requirement (title / kind), its design docs (the
-// material being split) and the children it already has (so the model does
-// not re-split work that was already broken out).
+// material being split), the children it already has (so the model does not
+// re-split work that was already broken out) and the requirement-context
+// block (attachments / granted directories / referenced requirements — see
+// split_context.go).
+//
+// The context block is inserted between 「主需求」 and 「技术方案」 so the
+// model reads the material BEFORE it reads the plan it has to cut up. An
+// empty block changes nothing: the output is byte-identical to the prompt
+// without the feature, which is what keeps a requirement without any
+// material on exactly the old behaviour.
 //
 // Pure function — the handler owns the DB reads and the CLI invocation.
-func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildren []*model.Requirement) string {
+func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildren []*model.Requirement, contextBlock string) string {
 	if req == nil {
 		return ""
 	}
@@ -184,6 +192,14 @@ func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildre
 			}
 			b.WriteString("- " + title + "（状态：" + strings.TrimSpace(c.Status) + "）\n")
 		}
+		b.WriteString("\n")
+	}
+
+	// The requirement's own material: attachments, granted directories and
+	// referenced requirements. Present only when the requirement carries
+	// any — see BuildSplitContextBlock.
+	if ctxBlock := strings.TrimSpace(contextBlock); ctxBlock != "" {
+		b.WriteString(ctxBlock)
 		b.WriteString("\n")
 	}
 

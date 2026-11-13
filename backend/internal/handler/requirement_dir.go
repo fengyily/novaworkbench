@@ -247,6 +247,22 @@ func resolveAddDirs(svc *service.RequirementDirService, reqID string) []string {
 //
 // Empty string when nothing is granted — callers append unconditionally.
 func dirsManifestFor(svc *service.RequirementDirService, reqID string) string {
+	return dirsManifestWith(svc, reqID, true)
+}
+
+// dirsManifestWith renders the granted directories, with the Bash hint
+// switchable.
+//
+// The hint matters for the 方案拆分 stage: the split runs with Bash
+// DISALLOWED (requirement_split.go), so telling the model it may run `ls`
+// only buys it a wasted turn on a tool that will be refused. The other
+// stages (design / coding / Q&A / docs / sub-tasks) keep the Bash hint —
+// there Bash is available and listing a directory is genuinely useful.
+//
+// The output is otherwise byte-identical between the two modes, so a
+// requirement whose material is injected into several prompts sees the same
+// wording everywhere.
+func dirsManifestWith(svc *service.RequirementDirService, reqID string, allowBashHint bool) string {
 	if svc == nil || strings.TrimSpace(reqID) == "" {
 		return ""
 	}
@@ -265,6 +281,11 @@ func dirsManifestFor(svc *service.RequirementDirService, reqID string) string {
 			fmt.Fprintf(&b, "- `%s`\n", d.Path)
 		}
 	}
-	b.WriteString("\n需要了解目录结构时可用 Bash `ls`；优先在这些目录中查找证据。\n")
+	b.WriteString("\n")
+	if allowBashHint {
+		b.WriteString("需要了解目录结构时可用 Bash `ls`；优先在这些目录中查找证据。\n")
+	} else {
+		b.WriteString("优先在这些目录中查找证据（本次运行已禁用 Bash，请直接用 Read / Glob / Grep）。\n")
+	}
 	return b.String()
 }

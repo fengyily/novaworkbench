@@ -138,7 +138,7 @@ func TestRunClaudeStream_StallTimeoutOverride(t *testing.T) {
 	cmd := exec.Command("sh", "-c", `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sid-1"}'; sleep 30`)
 
 	start := time.Now()
-	out := runClaudeStream(&captureSink{}, cmd, "test-stall", nil, nil, nil, 0, 300*time.Millisecond)
+	out := runClaudeStream(&captureSink{}, cmd, "test-stall", nil, nil, nil, 0, withStallTimeout(300*time.Millisecond))
 	elapsed := time.Since(start)
 
 	if elapsed > 10*time.Second {
@@ -161,7 +161,7 @@ func TestRunClaudeStream_StallTimeoutOverride(t *testing.T) {
 func TestRunClaudeStream_NonPositiveOverrideFallsBackToDefault(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		cmd := ndjsonCmd(t, successResultEvent)
-		out := runClaudeStream(&captureSink{}, cmd, "test-fallback", nil, nil, nil, 0, d)
+		out := runClaudeStream(&captureSink{}, cmd, "test-fallback", nil, nil, nil, 0, withStallTimeout(d))
 		// If the override had been honoured the watchdog would fire at once;
 		// the run completing normally with the result event is the signal.
 		if out.finalResult != "done" {

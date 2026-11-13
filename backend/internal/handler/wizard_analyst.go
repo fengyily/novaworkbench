@@ -598,7 +598,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 	if kind == "idea" {
 		stallOverride = append(stallOverride, ideaAnalystStallTimeout)
 	}
-	out := runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, stallOverride...)
+	out := runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, withStallTimeout(stallOverride...))
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -619,7 +619,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
 			AddDirs:         addDirs,
 		})
-		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, stallOverride...)
+		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, withStallTimeout(stallOverride...))
 		sessionID = freshID
 	}
 

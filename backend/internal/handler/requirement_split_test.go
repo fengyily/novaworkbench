@@ -444,7 +444,7 @@ func TestSplit_UsesSelectedAgentServer(t *testing.T) {
 	}
 	got := make(chan captured, 1)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		got <- captured{target: target, model: modelName, configID: configID}
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
@@ -494,7 +494,7 @@ func TestSplit_WithoutAgentServerRunsLocally(t *testing.T) {
 	}
 	got := make(chan captured, 1)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		got <- captured{target: target, model: modelName}
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
@@ -535,7 +535,7 @@ func TestSplit_RemoteFailureEndsJobWithError(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return nil, nil, "远端失败"
 	}
 
@@ -569,7 +569,7 @@ func TestRunRemoteSplitTasks_WithoutAgentServerService(t *testing.T) {
 	job := store.NewJobStore(1).Create("req_m")
 	reqRow := &model.Requirement{ID: "req_m", ProjectID: "proj_split"}
 
-	tasks, refs, errMsg := h.runRemoteSplitTasks(job, reqRow, "agent_x", "prompt", "", "m", "c", nil)
+	tasks, refs, errMsg := h.runRemoteSplitTasks(job, reqRow, "agent_x", "prompt", "", "m", "c", splitRuntime{}, nil)
 	if errMsg == "" {
 		t.Fatal("expected an error message, got none")
 	}

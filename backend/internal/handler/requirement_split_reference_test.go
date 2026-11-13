@@ -22,7 +22,7 @@ func TestStreamSplitJob_TerminalFrameCarriesReferences(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{
 			{Title: "子需求 A", Order: 1},
 			{Title: "子需求 B", Order: 2},
@@ -68,7 +68,7 @@ func TestGetSplitState_CarriesReferences(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{
 			{Title: "子需求 A", Order: 1},
 			{Title: "子需求 B", Order: 2},
@@ -124,7 +124,7 @@ func TestStreamSplitJob_ReferencesIsEmptyArrayWhenTheModelFoundNone(t *testing.T
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 

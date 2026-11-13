@@ -106,9 +106,21 @@ export const components = {
       codeHint: 'Dispatch an implementation sub-task: it inherits the main task context and writes code changes to disk.',
       reviewHint: 'Launch a code Review as a sub-task: pick the reviewer identity and model, then turn the findings into fix sub-tasks and re-review until they are clear.',
     },
-    reviewComposerPlaceholder: 'Describe what this change is supposed to achieve (the sole yardstick the Review grades "goal met" against)…',
+    reviewComposerPlaceholder: 'Describe what this change is supposed to achieve (leaving it empty is fine — the requirement already carries the goal)…',
     reviewIdentityLabel: 'Review identity',
+    // The focus-point palette under the Review box. The goal comes from the
+    // requirement; the candidates are what the system could dig out on its
+    // own. The user ticks what matters and edits the result.
+    reviewFocusLabel: 'Suggested focus points',
+    reviewFocusHint: 'Click one to write it into the box above; click again to remove it. Everything in the box stays editable.',
+    reviewFocusCriteria: 'Acceptance points',
+    reviewFocusDefects: 'Likely defects',
+    reviewFocusNone: 'Nothing to suggest yet — you can also write the goal directly.',
+    reviewScanBtn: '🔍 Scan for defects',
+    reviewScanBusy: 'Scanning…',
+    reviewScanEmpty: 'The static checks reported nothing.',
     reviewLocalOnlyHint: 'Requirement-level Review v1 runs locally only: a re-review has to see the uncommitted fixes in the working tree.',
+    reviewNotDoneHint: 'A Review does not wait for the requirement to be marked "done" — it grades the branch as it stands (committed + uncommitted); whether that is good enough is your call.',
     reviewSubmitBtn: '🔍 Start Review',
     loading: 'Loading…',
     empty: 'No sub-tasks yet. Click "🔄 Re-split" to have the main agent decompose and dispatch, or create one manually above.',
@@ -116,6 +128,19 @@ export const components = {
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
     stalledHint: "Claude stream went silent and the watchdog terminated the sub-task. Use Continue or Redo to retry, or check whether the task triggered an unusually long IO (npm install, large file edit).",
+    // Run diagnostics block — the persisted job snapshot of a failed sub-task
+    // (exit code / machine-readable failure reason / complete log).
+    jobDiagnostics: 'Run diagnostics',
+    jobDiagnosticsHint: 'The complete run record of this failed sub-task, read from the durable job log (it survives a backend restart).',
+    exitCode: 'Exit code',
+    errorKind: 'Failure reason',
+    duration: 'Duration',
+    fullLog: 'Full log',
+    fullLogCollapse: 'Collapse full log',
+    errorKindStalled: 'Stream went silent (watchdog terminated it)',
+    errorKindIdleTimeout: 'Idle timeout (idle watchdog terminated it)',
+    errorKindTerminated: 'Terminated by NovaWorkbench before any result',
+    errorKindUnknown: 'Unknown reason',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 Main agent is generating the summary report…',
     bannerSummaryFailed: '❌ Summary report generation failed — click to retry',
