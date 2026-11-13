@@ -364,6 +364,28 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusNotFound, "REQUIREMENT_NOT_FOUND", "需求不存在")
 		return
 	}
+	// The runner is what actually spawns the child. Without it the fix rows
+	// could be created but never executed — the exact "orphaned pending row"
+	// trap this handler used to fall into (the row was INSERTed and nothing
+	// ever claimed it, so the card sat at 排队中 forever and the
+	// "fix → re-review until P0/P1 clear" loop could never converge).
+	if h.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "子任务执行器未初始化")
+		return
+	}
+
+	// The fixer inherits the DEVELOPER's session, not the reviewer's: it
+	// needs to know how the code was written in order to fix it, while the
+	// reviewer's opinion would only add noise.
+	sourceSID := subTaskSourceSID(req, "")
+	// The fix runs on the model the Review ran on, so the two halves of the
+	// loop speak the same dialect. The "默认模型" sentinel means "no specific
+	// model" and must never reach the CLI — fall back to the runner's own
+	// resolution (the developer role's model) in that case.
+	modelOverride := strings.TrimSpace(rv.Model)
+	if modelOverride == DefaultModelLabel {
+		modelOverride = ""
+	}
 
 	created := []string{}
 	for _, it := range items {
@@ -390,18 +412,30 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 		if strings.TrimSpace(req.WorktreePath) == "" && strings.TrimSpace(req.AgentServerID) != "" {
 			fixAgentServerID = req.AgentServerID
 		}
-		// The fixer inherits the DEVELOPER's session, not the reviewer's: it
-		// needs to know how the code was written in order to fix it, while
-		// the reviewer's opinion would only add noise.
-		st, cerr := h.subTaskSvc.Create(reqID, title, fixPrompt, rv.Model,
-			subTaskSourceSID(req, ""), "", 0, fixAgentServerID, model.SubTaskSessionModeFork, parentID,
-			model.SubTaskSourceManual, model.SubTaskReportModeAuto)
+		// NewPendingSubTask creates the row AND mints the JobStore job and
+		// the pre-cast claude session id — the same three things every
+		// dispatched row carries. A row without a job_id belongs to no
+		// dispatcher: the orchestration tick only claims batch-scoped rows
+		// and the manual path only runs on an explicit user action, so such a
+		// row would sit at "排队中" forever. Creating the job here is what
+		// makes the row dispatchable.
+		st, job, newSID, cerr := h.runner.NewPendingSubTask(reqID, title, fixPrompt, rv.Model,
+			sourceSID, fixAgentServerID, model.SubTaskSessionModeFork, parentID, model.SubTaskReportModeAuto)
 		if cerr != nil {
 			writeError(w, http.StatusInternalServerError, "CREATE_FAILED",
 				fmt.Sprintf("为 %s 建修复子任务失败: %v", it.ref, cerr))
 			return
 		}
 		created = append(created, st.ID)
+		// Dispatch it. The runner takes the per-project admission gate first
+		// and only flips the row to 'running' once it wins a slot, so several
+		// fixes created at once serialize behind the project's concurrency cap
+		// instead of spawning a claude process each.
+		//
+		// fork=true → --resume <sourceSID> --fork-session: the fixer starts
+		// from the developer's conversation, not a blank slate.
+		go h.runner.Run(req, st, job, newSID, sourceSID, fixPrompt, modelOverride, "",
+			false /*adjust*/, true /*fork*/, false /*freshSession*/, false /*bare*/, "", model.SubTaskReportModeAuto)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"sub_task_ids": created})
 }
