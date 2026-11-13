@@ -10,6 +10,7 @@ import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../ut
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { FullscreenButton } from './FullscreenButton';
@@ -369,11 +370,12 @@ export default function DeepRefineChat({
           user_message: userMessage,
           // Per-request model override — empty means the role's configured model.
           ...(selectedModel ? { model: selectedModel } : {}),
-          // Reasoning-effort tier — always sent concretely: the value already
-          // resolves to the configured stage default when the user hasn't
-          // picked one, and the backend drops it wholesale when the effort
-          // master switch is off.
-          effort: analystEffortValue,
+          // Reasoning-effort tier. Sent ONLY when the user actually picked
+          // one: an unpicked run leaves the field off so the backend
+          // resolves the configured stage default (llm.Gateway.ResolveEffort
+          // owns that layer) instead of taking the frontend's copy as an
+          // explicit pick.
+          ...effortPick(analystEffort),
           ...(analysisAgentServerId ? { agent_server_id: analysisAgentServerId } : {}),
         }),
       });

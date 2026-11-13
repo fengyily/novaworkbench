@@ -105,11 +105,17 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
       // The two reasoning-effort tiers ride along with the rest of the
       // per-stage config: `effort` is the design stage, `coding_effort` the
       // developer stage (same naming as the other two-stage surfaces).
+      //
+      // The RAW form value is stored, not the displayed default: '' means
+      // "the operator did not pin a tier", and the dispatch then follows
+      // the configured stage default. Storing the resolved value instead
+      // would freeze today's default into the monitor's saved config, and
+      // a later settings change would no longer reach it.
       const payload: UpdateIssueMonitorReq = {
         ...form,
         recur_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        effort: designEffortValue,
-        coding_effort: codingEffortValue,
+        effort: form.effort,
+        coding_effort: form.coding_effort,
       };
       const updated = await issueMonitorApi.upsert(projectId, payload);
       setMonitor(updated);

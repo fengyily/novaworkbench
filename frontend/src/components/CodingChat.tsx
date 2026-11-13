@@ -5,6 +5,7 @@ import { errorMessage } from '../utils/errMsg';
 import { type UsageInfo } from '../utils/logLines';
 import { ContextUsageBar } from './ContextUsageBar';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 
 interface Props {
@@ -168,11 +169,11 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
         project_path: projectPath,
         requirement_title: requirementTitle,
         user_message: userMessage,
-        // Reasoning-effort tier — always sent concretely: the value already
-        // resolves to the configured stage default when the user hasn't
-        // picked one, and the backend drops it wholesale when the effort
-        // master switch is off.
-        effort: developerEffortValue,
+        // Reasoning-effort tier. Sent ONLY when the user actually picked
+        // one: an unpicked run leaves the field off so the backend resolves
+        // the configured stage default (llm.Gateway.ResolveEffort owns that
+        // layer) instead of taking the frontend's copy as an explicit pick.
+        ...effortPick(developerEffort),
       }),
     });
 

@@ -30,6 +30,7 @@ import {
 import { ApiError } from '../api/client';
 import ModelSelect from './ModelSelect';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
@@ -185,11 +186,12 @@ export function DesignCodingImmediateModal({
         coding_claude_config_id: codingConfigId || undefined,
         coding_agent_server_id: codingAgentServerId || undefined,
         // Reasoning-effort tiers for the two stages (claude CLI --effort).
-        // Always sent concretely: the value already resolves to the
-        // configured stage default when the user hasn't picked one, and the
-        // backend drops it wholesale when the effort master switch is off.
-        design_effort: designEffortValue,
-        coding_effort: codingEffortValue,
+        // Sent ONLY when the user actually picked one: an unpicked stage
+        // leaves its field off so the backend resolves the configured stage
+        // default (llm.Gateway.ResolveEffort owns that layer) instead of
+        // taking the frontend's copy as an explicit pick.
+        ...effortPick(designEffort, 'design_effort'),
+        ...effortPick(codingEffort, 'coding_effort'),
         branch_name: noBranch ? '' : branchName,
         base_branch: baseBranch,
         // v0.6.x no-branch:仅作用于 coding 阶段(后端 wizard_coding.go prologue

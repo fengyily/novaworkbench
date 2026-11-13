@@ -55,3 +55,44 @@ export function normalizeEffortTier(value: string | undefined | null): EffortTie
 export function effortTierLabel(tier: string): string {
   return tier || '';
 }
+
+/**
+ * The WIRE form of a reasoning-tier pick.
+ *
+ * It returns an empty object when the user has NOT picked a tier, so the
+ * field is left off the request entirely.
+ *
+ * WHY THE FIELD IS OMITTED RATHER THAN FILLED WITH THE DISPLAYED DEFAULT:
+ * the backend owns the "configured stage default" layer of the resolution
+ * chain (llm.Gateway.ResolveEffort: explicit pick > configured stage
+ * default > built-in default). Sending the frontend's copy of that default
+ * would arrive as an EXPLICIT pick and take priority over the configured
+ * value — so the two implementations of the same default would become
+ * rival sources of truth.
+ *
+ * That is not a theoretical concern. The frontend's copy can be degraded
+ * (a failed GET /api/settings/effort falls back to the shipped values) or
+ * stale (a tab that has not yet received the config change — the
+ * cross-tab broadcast does not reach a browser without BroadcastChannel,
+ * and the first fetch may not have resolved yet). Either way the backend
+ * can read the real setting — it is the authority — and a frontend guess
+ * must not outrank it.
+ *
+ * The DISPLAY value (`pick ?? configuredDefault`) is unaffected: the bar
+ * still shows which tier the run will use. Only the wire value changes.
+ */
+export function effortPick(pick: EffortTier | null | undefined): { effort?: string };
+export function effortPick(
+  pick: EffortTier | null | undefined,
+  key: 'design_effort',
+): { design_effort?: string };
+export function effortPick(
+  pick: EffortTier | null | undefined,
+  key: 'coding_effort',
+): { coding_effort?: string };
+export function effortPick(
+  pick: EffortTier | null | undefined,
+  key: 'effort' | 'design_effort' | 'coding_effort' = 'effort',
+): { effort?: string; design_effort?: string; coding_effort?: string } {
+  return pick ? ({ [key]: pick } as { effort?: string; design_effort?: string; coding_effort?: string }) : {};
+}

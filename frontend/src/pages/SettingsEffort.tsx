@@ -5,7 +5,7 @@ import { errorMessage } from '../utils/errMsg';
 import { fmtTime } from '../utils/intl';
 import EffortBar, { type EffortTier } from '../components/EffortBar';
 import { normalizeEffortTier, type EffortStage } from '../utils/effort';
-import { setEffortDefaults } from '../hooks/useEffortDefaults';
+import { broadcastEffortDefaults, setEffortDefaults } from '../hooks/useEffortDefaults';
 
 // 设置 → 推理档位: the reasoning-depth policy for every claude run.
 //
@@ -75,6 +75,9 @@ export default function SettingsEffort() {
       // page (and the next navigation) show the values that were just saved
       // instead of the ones they loaded before the save.
       setEffortDefaults(cfg);
+      // …and tell the OTHER open tabs, whose pickers would otherwise keep
+      // advertising the previous tier while the backend runs the new one.
+      broadcastEffortDefaults(cfg);
       setEnabled(cfg.enabled);
       setTiers({
         design: (normalizeEffortTier(cfg.design) || 'high') as EffortTier,

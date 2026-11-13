@@ -14,6 +14,7 @@ import { FullscreenButton } from './FullscreenButton';
 import MarkdownRender from './MarkdownRender';
 import ModelSelect from './ModelSelect';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import QAIndex, { type QAIndexEntry } from './QAIndex';
 import {
@@ -330,11 +331,12 @@ export default function StageQAChat({
         const res = await qaChatApi.ask(requirementId, stage, q, {
           ...(model ? { model } : {}),
           ...(claudeConfigId ? { claude_config_id: claudeConfigId } : {}),
-          // Reasoning-effort tier — always sent concretely: the value already
-          // resolves to the configured stage default when the user hasn't
-          // picked one, and the backend drops it wholesale when the effort
-          // master switch is off.
-          effort: qaEffortValue,
+          // Reasoning-effort tier. Sent ONLY when the user actually picked
+          // one: an unpicked run leaves the field off so the backend
+          // resolves the configured stage default (llm.Gateway.ResolveEffort
+          // owns that layer) instead of taking the frontend's copy as an
+          // explicit pick.
+          ...effortPick(qaEffort),
         });
         // Show the question immediately — the persisted thread only gets the
         // row once the backend has created it.

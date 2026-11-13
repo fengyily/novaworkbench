@@ -43,6 +43,7 @@ import { appendLogLine, type LogLine } from '../utils/logLines';
 import { BranchPicker } from './BranchPicker';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { IconClose } from './icons';
 import ModelSelect from './ModelSelect';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
@@ -768,7 +769,10 @@ export function RequirementSplitModal({
         claude_config_id: configId || undefined,
         agent_server_id: agentServerId || undefined,
         // Reasoning-effort tier (claude CLI --effort) for this split run.
-        effort: splitEffortValue,
+        // Sent ONLY when the user actually picked one — an unpicked run
+        // leaves the field off so the backend resolves the configured stage
+        // default (llm.Gateway.ResolveEffort owns that layer).
+        ...effortPick(splitEffort),
       });
       if (cancelledRef.current) return;
       // Publish the fresh run into the status strip right away — the strip is

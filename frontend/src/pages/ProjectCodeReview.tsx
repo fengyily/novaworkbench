@@ -54,6 +54,8 @@ import ReviewChat from './codeReview/ReviewChat';
 import ReviewHistory from './codeReview/ReviewHistory';
 import type { StreamLine } from './codeReview/shared';
 import { errorMessage } from '../utils/errMsg';
+import { effortPick, normalizeEffortTier } from '../utils/effort';
+import type { EffortTier } from '../utils/effort';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
 import {
   buildReviewMarkdown, downloadReviewMarkdown, reviewExportTitle, reviewTargetLabel,
@@ -104,8 +106,10 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [runConfigId, setRunConfigId] = useState('');
   const [agentServerId, setAgentServerId] = useState('');
   // Reasoning-effort tier (claude CLI --effort) picked in the composer's
-  // advanced section. Empty = the configured 「其他任务」 stage default.
-  const [runEffort, setRunEffort] = useState('');
+  // advanced section. Empty = the user did not pick one, and the request
+  // then leaves the field off so the backend resolves the configured stage
+  // default.
+  const [runEffort, setRunEffort] = useState<EffortTier | ''>('');
   const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
 
   // ── Branch mode ──────────────────────────────────────────────────────────
@@ -288,10 +292,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     model: runModel,
     claude_config_id: runConfigId,
     agent_server_id: agentServerId,
-    // Empty string means "no explicit tier" — the backend then falls back
-    // to the configured stage default. Sending the key with an empty value
-    // and omitting it are equivalent there.
-    ...(runEffort ? { effort: runEffort } : {}),
+    // Sent ONLY when the user actually picked one: an unpicked review
+    // leaves the field off so the backend resolves the configured stage
+    // default (llm.Gateway.ResolveEffort owns that layer) instead of
+    // taking the frontend's copy as an explicit pick.
+    ...effortPick(runEffort || undefined),
   }), [runModel, runConfigId, agentServerId, runEffort]);
 
   const resetPanel = () => {
@@ -529,7 +534,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       setAgentServerId(full.agent_server_id);
       // The reasoning-effort tier the last run used, so 重跑 reproduces the
       // same depth. The backend stamps the EFFECTIVE tier onto the row.
-      setRunEffort(full.effort || '');
+      setRunEffort(normalizeEffortTier(full.effort));
       if (full.review_type === 'branch') {
         setMode('branch');
         setSession(full);

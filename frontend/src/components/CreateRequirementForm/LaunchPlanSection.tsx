@@ -53,6 +53,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ModelSelect from '../ModelSelect';
 import EffortBar, { type EffortTier } from '../EffortBar';
+import { effortPick } from '../../utils/effort';
 import { useEffortDefaults } from '../../hooks/useEffortDefaults';
 import { ExecEnvSelect, type ExecEnvServer } from '../ExecEnvSelect';
 import { IconBranch, IconClock, IconHand, IconPlay, IconRocket } from '../icons';
@@ -351,11 +352,12 @@ export default function LaunchPlanSection({
       coding_claude_config_id: codingClaudeConfigId || undefined,
       coding_agent_server_id: codingAgentServerId || undefined,
       // Reasoning-effort tiers for the two stages (claude CLI --effort).
-      // Always sent concretely: the value already resolves to the
-      // configured stage default when the user hasn't picked one, and the
-      // backend drops it wholesale when the effort master switch is off.
-      design_effort: designEffortValue,
-      coding_effort: codingEffortValue,
+      // Sent ONLY when the user actually picked one: an unpicked stage
+      // leaves its field off so the backend resolves the configured stage
+      // default (llm.Gateway.ResolveEffort owns that layer) instead of
+      // taking the frontend's copy as an explicit pick.
+      ...effortPick(designEffort, 'design_effort'),
+      ...effortPick(codingEffort, 'coding_effort'),
       // no-branch 模式下 branch_name 必须为空(后端 wizard_coding.go 把空
       // 字符串 + no_branch=true 视为「在 base 分支直接开发」)。
       branch_name: noBranch ? '' : (branchName || undefined),

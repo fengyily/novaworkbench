@@ -17,11 +17,12 @@ import {
 // mount several of them at once. Without a cache, that is a dozen parallel
 // GET /api/settings/effort calls for one immutable-ish answer.
 //
-// The cache is deliberately NOT refreshed on a timer: the settings page is
-// where a change is made, and a page reload after saving picks up the new
-// value. A long-lived tab keeps the values it loaded with, which is the
-// same contract the other settings-backed pickers (model / claude config)
-// have.
+// The cache is NOT refreshed on a timer, but it IS refreshed when the
+// settings page saves: the save is broadcast to the other open tabs so
+// their pickers stop advertising a tier that is no longer the configured
+// one. Without that, a tab opened before the change would keep showing
+// the OLD tier while the backend — the authority — ran the NEW one, and
+// the UI would be describing a run that is not the one about to happen.
 //
 // FAILURE IS SILENT AND HARMLESS: if the request fails (backend older than
 // this frontend, network blip, auth expiry), we fall back to the shipped
@@ -44,6 +45,52 @@ const FALLBACK: EffortConfig = {
 
 let cached: EffortConfig | null = null;
 let inflight: Promise<EffortConfig> | null = null;
+
+// ── Cross-tab freshness ─────────────────────────────────────────────────
+//
+// A save on the settings page has to reach the other open tabs, otherwise
+// they keep showing the previous tier. A BroadcastChannel does it without
+// a server round-trip and without persistence.
+//
+// The channel is created LAZILY: a module-scope `new BroadcastChannel()`
+// would be constructed in every environment that imports this file, and in
+// Node it would hold the event loop open. Browsers without the API (or a
+// non-browser runtime) simply keep the stale display until a reload —
+// which is the pre-existing behaviour, so the fallback is safe.
+const CHANNEL_NAME = 'nova-effort-defaults';
+let channel: BroadcastChannel | null = null;
+let channelChecked = false;
+
+function effortChannel(): BroadcastChannel | null {
+  if (channelChecked) return channel;
+  channelChecked = true;
+  if (typeof BroadcastChannel === 'undefined') return null;
+  try {
+    channel = new BroadcastChannel(CHANNEL_NAME);
+    channel.addEventListener('message', (ev) => {
+      const cfg = ev.data as EffortConfig | undefined;
+      if (!cfg) return;
+      // setEffortDefaults updates the cache AND notifies the mounted
+      // pickers, so one call covers both halves.
+      setEffortDefaults(cfg);
+    });
+  } catch {
+    channel = null;
+  }
+  return channel;
+}
+
+// The tabs currently showing a picker. Each one re-renders when the
+// config changes (a save in another tab, or a save in this one).
+const listeners = new Set<(cfg: EffortConfig) => void>();
+
+/**
+ * Announce a newly-saved config to the other open tabs, so their pickers
+ * stop advertising the previous tier.
+ */
+export function broadcastEffortDefaults(cfg: EffortConfig): void {
+  effortChannel()?.postMessage(cfg);
+}
 
 /**
  * Fetch the effort defaults, reusing the module-level cache. Concurrent
@@ -77,8 +124,11 @@ export function invalidateEffortDefaults(): void {
 }
 
 /**
- * Replaces the cached defaults with a freshly-saved config, so the pickers
- * elsewhere on the page update without a reload.
+ * Replaces the cached defaults with a freshly-saved config.
+ *
+ * The mounted pickers are notified, not just the cache: a picker that is
+ * already on screen would otherwise keep rendering the previous tier
+ * while the backend — the authority — runs the new one.
  */
 export function setEffortDefaults(cfg: EffortConfig): void {
   cached = {
@@ -88,6 +138,7 @@ export function setEffortDefaults(cfg: EffortConfig): void {
     commit: normalizeEffortTier(cfg.commit) || FALLBACK.commit,
     other: normalizeEffortTier(cfg.other) || FALLBACK.other,
   };
+  for (const listener of listeners) listener(cached);
 }
 
 export interface EffortDefaults {
@@ -116,8 +167,17 @@ export function useEffortDefaults(): EffortDefaults {
     void fetchEffortDefaults().then((next) => {
       if (!cancelled) setCfg(next);
     });
+    // Re-render when another tab saves a new config — otherwise this
+    // picker would keep advertising the previous tier while the backend
+    // (the authority) runs the new one.
+    const listener = (next: EffortConfig) => {
+      if (!cancelled) setCfg(next);
+    };
+    listeners.add(listener);
+    effortChannel();
     return () => {
       cancelled = true;
+      listeners.delete(listener);
     };
   }, []);
 

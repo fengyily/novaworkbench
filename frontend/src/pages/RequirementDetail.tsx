@@ -19,6 +19,7 @@ import { ExecEnvSelect } from '../components/ExecEnvSelect';
 import { BranchPicker } from '../components/BranchPicker';
 import { SyncModeSelect } from '../components/SyncModeSelect';
 import EffortBar, { type EffortTier } from '../components/EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
@@ -2338,9 +2339,12 @@ export default function RequirementDetail() {
           // backward-compatible (older backends ignore the field).
           ...(regenerate ? { regenerate: true } : {}),
           // Reasoning-effort tier (claude CLI --effort) for this design run.
-          // Empty = the backend falls back to the configured design-stage
-          // default; a concrete tier = the user's pick wins.
-          effort: architectEffortValue,
+          // Sent ONLY when the user actually picked one: an unpicked run
+          // leaves the field off so the backend resolves the configured
+          // design-stage default (llm.Gateway.ResolveEffort owns that
+          // layer) instead of taking the frontend's copy as an explicit
+          // pick.
+          ...effortPick(architectEffort),
           // Designer-context toggle. Inverted on the wire: a checked box
           // means "keep the architect persona". Sent unconditionally so the
           // backend's zero-value default never fights the frontend default.
@@ -2813,9 +2817,12 @@ export default function RequirementDetail() {
           // falls back to requirements.dev_mode or 'session'.
           dev_mode: devMode,
           // Reasoning-effort tier (claude CLI --effort) for this coding run.
-          // Empty = the backend falls back to the configured coding-stage
-          // default; a concrete tier = the user's pick wins.
-          effort: codingEffortValue,
+          // Sent ONLY when the user actually picked one: an unpicked run
+          // leaves the field off so the backend resolves the configured
+          // coding-stage default (llm.Gateway.ResolveEffort owns that
+          // layer) instead of taking the frontend's copy as an explicit
+          // pick.
+          ...effortPick(codingEffort),
         }),
       });
       const json = await res.json();
@@ -2905,8 +2912,9 @@ export default function RequirementDetail() {
           // Per-request claude_config id — see doStartCoding for the rationale.
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
           // Reasoning-effort tier (claude CLI --effort) for this follow-up
-          // round. Same picker as the initial coding run.
-          effort: codingEffortValue,
+          // round. Same picker as the initial coding run — unpicked →
+          // field omitted, backend resolves the stage default.
+          ...effortPick(codingEffort),
           // agent_server_id is intentionally NOT sent here: adjust-coding
           // resumes the same coding session on the same worktree, so the
           // dev_source / agent_server_id stamped by the original StartCoding
@@ -2945,8 +2953,9 @@ export default function RequirementDetail() {
         body: JSON.stringify({
           requirement_id: id,
           // Reasoning-effort tier (claude CLI --effort) for this continuation
-          // round. Same picker as the initial coding run.
-          effort: codingEffortValue,
+          // round. Same picker as the initial coding run — unpicked →
+          // field omitted, backend resolves the stage default.
+          ...effortPick(codingEffort),
         }),
       });
       const json = await res.json();

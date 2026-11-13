@@ -6,6 +6,7 @@ import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeU
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
@@ -197,11 +198,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         user_message: userMessage,
         // Per-request model override — empty means the role's configured model.
         ...(selectedModel ? { model: selectedModel } : {}),
-        // Reasoning-effort tier — always sent concretely: the value already
-        // resolves to the configured stage default when the user hasn't
-        // picked one, and the backend drops it wholesale when the effort
-        // master switch is off.
-        effort: docEffortValue,
+        // Reasoning-effort tier. Sent ONLY when the user actually picked
+        // one: an unpicked run leaves the field off so the backend resolves
+        // the configured stage default (llm.Gateway.ResolveEffort owns that
+        // layer) instead of taking the frontend's copy as an explicit pick.
+        ...effortPick(docEffort),
       }),
     });
 
@@ -493,9 +494,10 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           doc_type: docType,
           // Per-request model override — empty means the role's configured model.
           ...(selectedModel ? { model: selectedModel } : {}),
-          // Reasoning-effort tier — same tier as the refine turn above, so
-          // the "重新生成" lands on the depth the user picked.
-          effort: docEffortValue,
+          // Reasoning-effort tier — same pick as the refine turn above, so
+          // the "重新生成" lands on the depth the user picked. Unpicked →
+          // field omitted, backend resolves the configured stage default.
+          ...effortPick(docEffort),
         }),
       });
       const json = await res.json();

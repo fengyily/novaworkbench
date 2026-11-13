@@ -77,6 +77,25 @@ jobs:
       - name: Typecheck + build
         run: npm run build
 
+  effort-picks:
+    name: effort picks (wire contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The backend owns the --effort resolution chain (explicit pick >
+      # configured stage default > built-in default). The frontend must
+      # therefore send only a RAW pick and leave the field off when the user
+      # has not chosen one — sending the displayed default would arrive as
+      # an explicit pick and silently outrank the operator's setting.
+      # The check needs neither a browser, nor an npm install, nor a model.
+      - name: Reasoning-effort wire contract
+        run: node scripts/check-effort-picks.mjs
+
   worker:
     name: agent-worker (test)
     runs-on: ubuntu-latest

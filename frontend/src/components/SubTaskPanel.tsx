@@ -38,6 +38,7 @@ import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDe
 import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
 import EffortBar, { type EffortTier } from './EffortBar';
+import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
@@ -2852,10 +2853,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         // 报告详略：'auto' 也照实发送——后端再做规范化，0 成本、可观测。
         report_mode: reportMode,
         // Reasoning-effort tier (claude CLI --effort). Sub-tasks are
-        // implementation work → the 'coding' stage default. Sent even when
-        // the user didn't pick: the backend's effort.enabled master switch
-        // still wins over any explicit pick, so this is safe to always send.
-        effort: composerEffortValue,
+        // implementation work → the 'coding' stage default. Sent ONLY when
+        // the user actually picked one: an unpicked run leaves the field off
+        // so the backend resolves the configured stage default
+        // (llm.Gateway.ResolveEffort owns that layer) instead of taking
+        // the frontend's copy as an explicit pick.
+        ...effortPick(composerEffort),
       });
       setPrompt('');
       // Drop the screenshot status pills too — the images are already
@@ -2996,8 +2999,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           ...(createModel ? { model: createModel } : {}),
           ...(createConfigId ? { claude_config_id: createConfigId } : {}),
           // Re-split is coding-stage work (the developer agent decomposes
-          // the requirement), so it runs at the composer's effort tier.
-          effort: composerEffortValue,
+          // the requirement), so it runs at the composer's picked tier.
+          // Unpicked → field omitted, backend resolves the stage default.
+          ...effortPick(composerEffort),
         },
       );
       reSplitEsRef.current?.close();
@@ -3662,8 +3666,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             adjustModel={adjustModel}
             // Per-card runs (Redo / Continue / Adjust) reuse the panel's
             // picked reasoning-effort tier — they are implementation work,
-            // same as the composer.
-            effort={composerEffortValue}
+            // same as the composer. The RAW pick is passed (not the
+            // displayed default): an unpicked run must leave the field off
+            // so the backend resolves the configured stage default.
+            effort={composerEffort ?? undefined}
             onAdjustModelChange={setAdjustModel}
             retryMax={retryMax}
             archivedKbId={archives[tn.node.id]}
