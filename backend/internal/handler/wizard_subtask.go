@@ -936,6 +936,45 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	go h.runSubTask(req, st, job, parentSessionID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID, "")
 }
 
+// Reason lines written into the artifact when a Stop lands on a row whose
+// JobStore job no longer exists. They say WHY the run is over, so the card
+// doesn't just show "已停止" with no context.
+const (
+	stopReasonJobGone     = "（后台任务已不存在：服务重启过，或任务已被回收。该子任务已就地中止，可点「继续」或「重做」重新执行。）"
+	stopReasonJobFinished = "（后台任务已结束，但该子任务没有落库终态。已就地中止，可点「继续」或「重做」重新执行。）"
+)
+
+// reconcileStoppedRow lands a row whose JobStore job is gone on "stopped"
+// and answers 200.
+//
+// This exists because "running" is a state the user can do nothing with:
+// the SubTaskPanel renders 继续/重做 only on 'error'/'stopped' rows and 删除
+// only on 'error' (frontend/src/components/SubTaskPanel.tsx:1227, :1371,
+// :1372; backend gate at handler/wizard_subtask.go:1121). A row parked at
+// "running" because its run died with the backend is therefore a permanent
+// dead end — and "点停止" used to dead-end with it, because the handler
+// answered 409 JOB_GONE without writing a single row.
+func (h *WizardHandler) reconcileStoppedRow(w http.ResponseWriter, st *model.SubTask, reason string) {
+	if perr := h.subTaskSvc.MarkStoppedWithReason(st.ID, st.Artifact, reason); perr != nil {
+		log.Printf("[sub-task stop] failed to mark stopped for %s: %v", st.ID, perr)
+		writeError(w, http.StatusConflict, "STOP_FAILED",
+			"无法中止该子任务，请用「继续」或「重做」重新发起")
+		return
+	}
+	// Report the status the row actually ended up in: MarkStoppedWithReason
+	// is status-guarded, so a row that raced to a terminal state keeps it.
+	status := model.SubTaskStatusStopped
+	if cur, gerr := h.subTaskSvc.Get(st.ID); gerr == nil && cur != nil {
+		status = cur.Status
+	}
+	log.Printf("[sub-task stop] reconciled %s to %s (no live job): %s", st.ID, status, reason)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":      status,
+		"sub_task_id": st.ID,
+		"job_id":      st.JobID,
+	})
+}
+
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.
 //
 // Cancels a running sub-task's underlying claude subprocess and flips the row
@@ -962,10 +1001,16 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 //   - req.AgentServerID != "" → 501 STOP_REMOTE_NOT_SUPPORTED. The remote
 //     worker (Agent server) doesn't yet ship a kill RPC; rolling it out is
 //     future work.
-//   - If the JobStore has already evicted the job (ring buffer cap=50) OR
-//     the job is in a terminal state (the goroutine finished after our
-//     status check but before Cancel), return 409 JOB_GONE — user should
-//     Continue or Redo.
+//
+// NO DEAD END: when the JobStore no longer holds the job — the backend
+// restarted (the store is in-memory), or the 50-slot ring buffer recycled
+// the slot — there is nothing left to cancel, but the ROW still says
+// "running", and "running" is the one state the UI offers no way out of:
+// 继续/重做 are only rendered on 'error'/'stopped' rows and 删除 only on
+// 'error'. So the row is landed on "stopped" (with a reason line in the
+// artifact) and the request succeeds. That is what makes "点停止" work
+// instead of silently doing nothing (req_0ee0bfd8de6f5da6 /
+// st_b1c4395863f9581f, a fix sub-task whose run died with the backend).
 //
 // 6-second watchdog goroutine: in theory gateway's CommandContext chain
 // always finishes the subprocess within 5s + the job.Finish path. If for
@@ -1022,8 +1067,15 @@ func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
 	}
 	job, ok := h.jobs.Get(parent.JobID)
 	if !ok || job == nil {
-		writeError(w, http.StatusConflict, "JOB_GONE",
-			"任务已被回收，请用「继续」或「重做」重新发起")
+		// The JobStore is in-memory only: the job is gone because the
+		// backend restarted, or because the ring buffer recycled the slot
+		// (it never recycles a RUNNING job — store.JobStore keeps that
+		// invariant — so a missing job means the run is not alive here).
+		//
+		// There is nothing to cancel, but the row still says "running", and
+		// that state has no way out in the UI. Land it on "stopped" so the
+		// user regains 继续/重做 instead of watching a spinner forever.
+		h.reconcileStoppedRow(w, parent, stopReasonJobGone)
 		return
 	}
 	// RLock-snapshot the status to avoid racing the goroutine that may be
@@ -1031,8 +1083,11 @@ func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
 	_, _, _ = job.Snapshot()
 	_, jobStatus, _ := job.Snapshot()
 	if jobStatus != store.JobRunning {
-		writeError(w, http.StatusConflict, "JOB_GONE",
-			"任务已被回收，请用「继续」或「重做」重新发起")
+		// The job reached a terminal state but the row is still "running":
+		// the runner writes the row BEFORE it finishes the job, so this
+		// means that write never landed. Same treatment — the row must not
+		// stay in the unreachable "running" state.
+		h.reconcileStoppedRow(w, parent, stopReasonJobFinished)
 		return
 	}
 

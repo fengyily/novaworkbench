@@ -28,9 +28,10 @@ import (
 //   - the manual path only runs on an explicit user action, and every such
 //     action (redo / continue / adjust / delete) is gated on a terminal
 //     status;
-//   - the boot recovery (RecoverInterrupted) deliberately skips rows that
-//     carry a parent_subtask_id — and a fix row's parent IS the Review
-//     sub-task.
+//   - the boot recovery (RecoverInterrupted) only reaches a child row when it
+//     already carries a job_id — a fix row's parent IS the Review sub-task,
+//     so a row stranded BEFORE the job id was stamped stays pending and is
+//     this sweep's business.
 //
 // So the row was claimed by nobody: it showed "排队中" forever, could not be
 // started, cancelled or deleted, and the documented

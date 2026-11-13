@@ -59,8 +59,10 @@ func insertPending(t *testing.T, d *db.DB, id, jobID, batchID string, updatedAt 
 // A pending row that no dispatcher owns — no job_id AND no batch_id — used
 // to sit at "排队中 · 等待项目空闲" forever: the orchestration queue claims
 // by batch_id, the manual path only runs on an explicit user action, and
-// the boot recovery skips rows that carry a parent_subtask_id (which every
-// Review fix row does). The sweep is what gives such a row a second chance.
+// the boot recovery only reaches a child row once it carries a job_id (a
+// row stranded before that keeps a pending child out of its reach — and
+// every Review fix row is a child). The sweep is what gives such a row a
+// second chance.
 func TestSelfHealOrphanPending_DispatchesOnlyUnownedRows(t *testing.T) {
 	d := newQueueTestDB(t)
 	subTaskSvc := service.NewSubTaskService(d, nil)

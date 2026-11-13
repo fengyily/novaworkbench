@@ -200,12 +200,17 @@ func TestContinueReset_OnlyOneWinner(t *testing.T) {
 //   - the "\n\n原结果：\n" separator splits banner from prior content,
 //   - the prior artifact is preserved verbatim at the end so the user
 //     can still scroll back through whatever was on screen at stop time.
+//
+// The row is seeded 'running' — the only state StopSubTask stops a row
+// from. MarkStopped is status-guarded (a row that already reached a
+// terminal state keeps it), so a 'done' row would be left alone; see
+// TestMarkStopped_DoesNotClobberTerminalRow.
 func TestMarkStopped_PrependsBanner(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForContinueStop(t, d, struct {
 		id, reqID, status, sessionID, sourceSID, artifact string
 		withBatchID bool
-	}{id: "st_stop", reqID: "req_1", status: "done", sessionID: "sid_y", sourceSID: "sid_src", artifact: "原报告"})
+	}{id: "st_stop", reqID: "req_1", status: "running", sessionID: "sid_y", sourceSID: "sid_src", artifact: "原报告"})
 
 	svc := NewSubTaskService(d, nil)
 	if err := svc.MarkStopped("st_stop", "原报告"); err != nil {
@@ -271,19 +276,26 @@ func TestRecoverInterrupted_PreservesExistingArtifact(t *testing.T) {
 	}
 }
 
-// TestRecoverInterrupted_ExcludesChildRows locks down the new safety
-// guard added for the Tree feature: a child row (parent_subtask_id != '')
-// that errored on backend crash must NOT be silently flipped to 'error'
-// by RecoverInterrupted, because that would muddle the tree — the
-// parent's "what failed" card is supposed to remain the visible source
-// of truth. The user must explicitly trigger Redo / Continue on the
-// parent to retry the child.
+// TestRecoverInterrupted_IncludesChildRows locks down the boot recovery for
+// TREE CHILDREN (parent_subtask_id != '').
 //
-// We seed two rows under the same requirement: a top-level 'running' row
-// (must be recovered to 'error') and a child row with the same 'running'
-// status pointing at a phantom parent (must stay 'running' — i.e. NOT
-// recovered, NOT flipped).
-func TestRecoverInterrupted_ExcludesChildRows(t *testing.T) {
+// The old behavior excluded children outright, with the rationale "a crashed
+// child must be retried explicitly against its parent, not silently
+// auto-recovered, or the tree's history gets muddled". That rationale is
+// about not RE-RUNNING a child — and RecoverInterrupted never re-runs
+// anything: it only flips the row to 'error' and waits for the user.
+//
+// The exclusion had a much worse side effect: every fix sub-task (created by
+// CreateFixes with the Review's sub-task as parent) and every Review round
+// sub-task carries batch_id='', so pass 2 (the batch pass) skipped them too.
+// Such a row had NO recovery path at all, and 'running' is the one state the
+// SubTaskPanel offers no button for (继续/重做 need 'error'/'stopped', 删除
+// needs 'error') — a permanent dead end. That is exactly how
+// st_b1c4395863f9581f (req_0ee0bfd8de6f5da6) got stuck: the nova process
+// died mid-run, the row stayed 'running', and 继续/重做/删除 never appeared.
+//
+// So the child row is now marked 'error' — visible, retryable, deletable.
+func TestRecoverInterrupted_IncludesChildRows(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForContinueStop(t, d, struct {
 		id, reqID, status, sessionID, sourceSID, artifact string
@@ -299,8 +311,6 @@ func TestRecoverInterrupted_ExcludesChildRows(t *testing.T) {
 		t.Fatalf("RecoverInterrupted: %v", err)
 	}
 
-	// Only the root row should have been flipped. Anything else (the
-	// child) being affected means the parent_subtask_id guard regressed.
 	root, err := svc.Get("st_root")
 	if err != nil {
 		t.Fatalf("Get root: %v", err)
@@ -313,17 +323,129 @@ func TestRecoverInterrupted_ExcludesChildRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get child: %v", err)
 	}
-	if child.Status != "running" {
-		t.Errorf("child status = %q, want running (child rows must NOT be auto-recovered; tree history must stay explicit)", child.Status)
+	if child.Status != "error" {
+		t.Errorf("child status = %q, want error (a child left at 'running' has no UI affordance at all)", child.Status)
 	}
 	if child.ParentSubtaskID != "st_root" {
 		t.Errorf("child ParentSubtaskID = %q, want st_root", child.ParentSubtaskID)
 	}
+	if !strings.Contains(child.Artifact, "服务在子任务执行期间重启") {
+		t.Errorf("child artifact = %q, want the restart-recovery message", child.Artifact)
+	}
 
-	// affected == 1 (just st_root). If a future refactor accidentally
-	// re-removes the parent_subtask_id guard, affected would jump to 2
-	// and this assertion fires.
-	if affected != 1 {
-		t.Errorf("affected = %d, want 1 (only the top-level root must be touched)", affected)
+	if affected != 2 {
+		t.Errorf("affected = %d, want 2 (root + child)", affected)
+	}
+}
+
+// TestRecoverInterrupted_LeavesDispatchlessPendingChildForOrphanSweep is the
+// guard on the OTHER half of the child rule: a 'pending' child with NO
+// job_id is the orphan sweep's row, not the boot recovery's.
+//
+// ListOrphanPending selects exactly `status='pending' AND job_id='' AND
+// batch_id=''` and re-dispatches it (the 2026-11 fix for fix rows stranded
+// between Create and UpdateJobID). If the boot recovery flipped those rows
+// to 'error' it would silently disarm that self-heal — so it must not.
+func TestRecoverInterrupted_LeavesDispatchlessPendingChildForOrphanSweep(t *testing.T) {
+	d := newTestDB(t)
+	seedSubTaskRowForContinueStop(t, d, struct {
+		id, reqID, status, sessionID, sourceSID, artifact string
+		withBatchID bool
+	}{id: "st_root2", reqID: "req_2", status: "running", sessionID: "sid_r", sourceSID: "src", artifact: ""})
+	seedSubTaskChildRow(t, d, struct {
+		id, reqID, parentID, status string
+	}{id: "st_orphan_child", reqID: "req_2", parentID: "st_root2", status: "pending"})
+
+	svc := NewSubTaskService(d, nil)
+	if _, err := svc.RecoverInterrupted(); err != nil {
+		t.Fatalf("RecoverInterrupted: %v", err)
+	}
+
+	child, err := svc.Get("st_orphan_child")
+	if err != nil {
+		t.Fatalf("Get child: %v", err)
+	}
+	if child.Status != "pending" {
+		t.Errorf("child status = %q, want pending (the orphan sweep must still be able to dispatch it)", child.Status)
+	}
+	// It must still be visible to the sweep. (The cutoff is an UPPER bound:
+	// the sweep lists rows whose updated_at is OLDER than it, so a cutoff
+	// in the future matches everything.)
+	orphans, err := svc.ListOrphanPending(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListOrphanPending: %v", err)
+	}
+	found := false
+	for _, o := range orphans {
+		if o.ID == "st_orphan_child" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("pending child without a job_id must stay visible to the orphan sweep")
+	}
+}
+
+// TestRecoverInterrupted_LeavesStoppedAndDoneChildrenAlone pins the
+// terminal states: a row the user stopped, and a row that finished, are not
+// touched by the boot recovery.
+func TestRecoverInterrupted_LeavesStoppedAndDoneChildrenAlone(t *testing.T) {
+	d := newTestDB(t)
+	seedSubTaskRowForContinueStop(t, d, struct {
+		id, reqID, status, sessionID, sourceSID, artifact string
+		withBatchID bool
+	}{id: "st_root3", reqID: "req_3", status: "running", sessionID: "sid_r", sourceSID: "src", artifact: ""})
+	seedSubTaskChildRow(t, d, struct {
+		id, reqID, parentID, status string
+	}{id: "st_stopped_child", reqID: "req_3", parentID: "st_root3", status: "stopped"})
+	seedSubTaskChildRow(t, d, struct {
+		id, reqID, parentID, status string
+	}{id: "st_done_child", reqID: "req_3", parentID: "st_root3", status: "done"})
+
+	svc := NewSubTaskService(d, nil)
+	if _, err := svc.RecoverInterrupted(); err != nil {
+		t.Fatalf("RecoverInterrupted: %v", err)
+	}
+
+	for id, want := range map[string]string{
+		"st_stopped_child": "stopped",
+		"st_done_child":    "done",
+	} {
+		got, err := svc.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if got.Status != want {
+			t.Errorf("%s status = %q, want %q (terminal states must be left alone)", id, got.Status, want)
+		}
+	}
+}
+
+// TestMarkStopped_DoesNotClobberTerminalRow pins the status guard on the
+// stop write: a row that already reached a terminal state keeps it. Without
+// the guard a slow Stop (or the 6s stop watchdog, which may well land after
+// the runner wrote the final state) would overwrite a finished run with
+// "stopped" — and the artifact banner would replace the real report.
+func TestMarkStopped_DoesNotClobberTerminalRow(t *testing.T) {
+	d := newTestDB(t)
+	seedSubTaskRowForContinueStop(t, d, struct {
+		id, reqID, status, sessionID, sourceSID, artifact string
+		withBatchID bool
+	}{id: "st_done_stop", reqID: "req_4", status: "done", sessionID: "sid_y", sourceSID: "sid_src", artifact: "真正的报告"})
+
+	svc := NewSubTaskService(d, nil)
+	if err := svc.MarkStopped("st_done_stop", "原报告"); err != nil {
+		t.Fatalf("MarkStopped: %v", err)
+	}
+
+	got, err := svc.Get("st_done_stop")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "done" {
+		t.Errorf("status = %q, want done (a terminal row must not be rewritten as stopped)", got.Status)
+	}
+	if got.Artifact != "真正的报告" {
+		t.Errorf("artifact = %q, want the original report untouched", got.Artifact)
 	}
 }

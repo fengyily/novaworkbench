@@ -181,9 +181,15 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		job.Finish(0, store.JobDone)
 		return
 	}
-	runStartTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
+	runStartTime, won, mErr := r.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
 		log.Printf("[push-base-shell] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	if !won {
+		log.Printf("[push-base-shell] %s: row was stopped before dispatch — aborting shell run", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止，未执行 git 操作"})
+		job.Finish(0, store.JobDone)
+		return
 	}
 
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送 base 流程启动（no-branch 模式, base=" + base + "）"})

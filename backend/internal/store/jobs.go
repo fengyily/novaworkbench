@@ -151,6 +151,15 @@ func (j *Job) Cancel() {
 	}
 }
 
+// isRunning reports whether the job is still in flight. Callers must hold
+// the JobStore's lock when calling it (the store's lock is always taken
+// before a job's own lock — see Live / ActiveJobs).
+func (j *Job) isRunning() bool {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.Status == JobRunning
+}
+
 func (j *Job) Append(line LogLine) {
 	if line.At == 0 {
 		line.At = time.Now().UnixMilli()
@@ -340,16 +349,27 @@ func (j *Job) Snapshot() (log []LogLine, status JobStatus, exitCode int) {
 }
 
 // JobStore holds the most recent cap jobs in a ring buffer.
+//
+// INVARIANT: a job that is still running is never evicted. The buffer is
+// sized for a bounded number of CONCURRENT jobs; finished jobs are recycled
+// first, and the buffer grows if every slot is busy. This matters because
+// "is this job still alive?" is answered by looking it up in this buffer,
+// and callers (JobStore.Live, and the StopSubTask handler) must be able to
+// tell "the run is gone" from "the run is still going". Evicting a live job
+// would make the second look like the first — the run would be declared dead
+// while its claude process keeps editing the worktree.
 type JobStore struct {
 	mu   sync.Mutex
 	ring []*Job
-	cap  int
 	next int
 	size int
 }
 
+// NewJobStore creates a store whose ring starts with `cap` slots. The ring
+// GROWS from there if every slot holds a running job (see Create) — the size
+// bounds concurrent jobs, not jobs ever created.
 func NewJobStore(cap int) *JobStore {
-	return &JobStore{cap: cap, ring: make([]*Job, cap)}
+	return &JobStore{ring: make([]*Job, cap)}
 }
 
 func (s *JobStore) Create(reqID string) *Job {
@@ -362,9 +382,31 @@ func (s *JobStore) Create(reqID string) *Job {
 		StartedAt:     time.Now(),
 	}
 	s.mu.Lock()
-	s.ring[s.next] = job
-	s.next = (s.next + 1) % s.cap
-	if s.size < s.cap {
+	// Recycle a slot whose previous occupant is done. Scanning from the
+	// round-robin cursor keeps the buffer roughly FIFO for finished jobs
+	// (the common case) while skipping over the ones still in flight.
+	slot := -1
+	for i := 0; i < len(s.ring); i++ {
+		idx := (s.next + i) % len(s.ring)
+		if j := s.ring[idx]; j == nil || !j.isRunning() {
+			slot = idx
+			break
+		}
+	}
+	if slot < 0 {
+		// Every slot holds a live job. The buffer's size bounds CONCURRENT
+		// jobs, not jobs ever created — so grow it rather than dropping a
+		// live run. The process-wide sub-task ceiling bounds the growth in
+		// practice.
+		s.ring = append(s.ring, job)
+		s.size = len(s.ring)
+		s.next = 0
+		s.mu.Unlock()
+		return job
+	}
+	s.ring[slot] = job
+	s.next = (slot + 1) % len(s.ring)
+	if s.size < len(s.ring) {
 		s.size++
 	}
 	s.mu.Unlock()

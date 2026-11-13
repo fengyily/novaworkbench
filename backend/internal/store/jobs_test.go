@@ -331,3 +331,53 @@ func TestSetSecrets_RedactsLines(t *testing.T) {
 		}
 	})
 }
+
+// TestJobStore_NeverEvictsRunningJob pins the JobStore invariant that makes
+// "is this run still alive?" answerable.
+//
+// The ring buffer used to overwrite its next slot unconditionally, so a job
+// that was STILL RUNNING could be dropped once 50 newer jobs had been
+// created. Every caller that asks "is this sub-task's job alive?"
+// (JobStore.Live, and the StopSubTask handler) would then conclude the run
+// is dead while its claude process keeps editing the worktree — and the stop
+// path would have nothing to cancel.
+//
+// The buffer is sized for CONCURRENT jobs, not for total jobs ever created:
+// finished jobs are recycled first.
+func TestJobStore_NeverEvictsRunningJob(t *testing.T) {
+	s := NewJobStore(2)
+	live := s.Create("req_live")
+	for i := 0; i < 5; i++ {
+		s.Create("req_filler")
+	}
+
+	got, ok := s.Get(live.ID)
+	if !ok {
+		t.Fatal("the running job was evicted from the ring buffer")
+	}
+	if _, status, _ := got.Snapshot(); status != JobRunning {
+		t.Errorf("status = %v, want JobRunning", status)
+	}
+}
+
+// TestJobStore_RecyclesFinishedSlots checks the other half: a finished job
+// IS recyclable, so the buffer keeps its capacity bound instead of growing
+// with the number of jobs ever created.
+func TestJobStore_RecyclesFinishedSlots(t *testing.T) {
+	s := NewJobStore(2)
+	first := s.Create("req_a")
+	first.Finish(0, JobDone)
+
+	// Three more jobs into a 2-slot buffer: the finished one must be the
+	// one that gets recycled.
+	s.Create("req_b")
+	s.Create("req_c")
+	newest := s.Create("req_d")
+
+	if _, ok := s.Get(first.ID); ok {
+		t.Error("a finished job must be recyclable (the buffer only grows for LIVE jobs)")
+	}
+	if _, ok := s.Get(newest.ID); !ok {
+		t.Error("the newest job must be in the buffer")
+	}
+}

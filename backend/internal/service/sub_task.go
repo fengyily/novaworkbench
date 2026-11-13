@@ -1038,8 +1038,8 @@ func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) erro
 // A row with BOTH empty belongs to neither bucket, so nothing in the backend
 // will ever look at it again: the card sits at "排队中 · 等待项目空闲"
 // forever, with no way to start it, cancel it, or even delete it (every
-// manual action is gated on a terminal status, and the boot recovery
-// deliberately skips rows that have a parent_subtask_id).
+// manual action is gated on a terminal status, and the boot recovery only
+// reaches a row that already carries a job_id).
 //
 // Real producers of such orphans, all of them bugs of the "created the row
 // but never dispatched it" kind:
@@ -1048,7 +1048,7 @@ func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) erro
 //     was created but never launched, so the documented
 //     "fix → re-review until P0/P1 clear" loop could never converge;
 //   - an Adjust child (CreateAdjustment) still pending when the backend
-//     restarted — RecoverInterrupted skips tree children on purpose;
+//     restarted before its job id was stamped;
 //   - a manual sub-task whose runner was not wired.
 //
 // The age cutoff is applied to updated_at, NOT created_at, and that
@@ -1238,18 +1238,59 @@ func (s *SubTaskService) UpdateReportMode(id, mode string) error {
 // ever spawn (e.g. pre-flight error) doesn't leave the row visible as
 // "running" in the UI. Returns the timestamp used so the caller can pass it
 // into Finish() to compute DurationSeconds without re-reading the row.
-func (s *SubTaskService) MarkRunning(id string) (time.Time, error) {
+//
+// SECOND RETURN VALUE: "won". The write is a compare-and-set against
+// status != 'stopped', so a row the user just stopped is NOT revived.
+//
+// Why the CAS exists: the caller's stopped-check is a READ (Get) and this is
+// a WRITE, so between them the user could hit Stop — and the unguarded
+// UPDATE ... WHERE id=? would flip the row straight back to 'running'. That
+// is exactly the "点停止，它又变回运行中" symptom (req_0ee0bfd8de6f5da6 /
+// st_b1c4395863f9581f): the row went stopped → running on its own.
+//
+// What the CAS is NOT: a mutual-exclusion lock. Two concurrent MarkRunning
+// calls on the same 'pending' row both win (pending → running, then running
+// ≠ stopped → running). Excluding a second runner needs an attempt/session
+// id, which is a different (larger) change — ClaimOrphanPending /
+// ClaimNextPending are where single-owner dispatch is actually enforced.
+//
+// Why the predicate is "!= 'stopped'" and not "IN ('pending','running')": a
+// late Finish from the PREVIOUS attempt can land between ContinueReset
+// (pending) and this call, putting the row in 'done'/'error'. With the tight
+// predicate the new attempt would abort and the user's 「继续」 would silently
+// do nothing; with the loose one the new attempt takes the row over, which
+// is what the user asked for.
+//
+// Dialect note: MySQL reports CHANGED rows (not matched rows) unless
+// clientFoundRows is set, so a no-op UPDATE (row already 'running') can
+// report 0. A 0-row result is therefore re-read to tell "the user stopped
+// this row" (lost) from "nothing changed" (won).
+func (s *SubTaskService) MarkRunning(id string) (time.Time, bool, error) {
 	now := time.Now()
 	// started_at is COALESCE'd so a second manual Run on a row that already
 	// has a stamped start (a "继续开发" against a previously-finished child)
 	// preserves the original first-start timestamp — Finish's
 	// duration_seconds is computed from that stamp, so flipping it would
 	// silently drop the elapsed time of every earlier attempt.
-	_, err := s.db.Exec(`UPDATE sub_tasks
+	res, err := s.db.Exec(`UPDATE sub_tasks
 		SET status=?, started_at=COALESCE(started_at, ?), updated_at=?
-		WHERE id=?`,
-		model.SubTaskStatusRunning, now, now, id)
-	if err == nil {
+		WHERE id=? AND status != ?`,
+		model.SubTaskStatusRunning, now, now, id, model.SubTaskStatusStopped)
+	if err != nil {
+		return now, false, err
+	}
+	won := true
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either the row is 'stopped' (the user won the race — the caller
+		// must NOT spawn anything) or the UPDATE changed nothing (MySQL's
+		// changed-rows semantics on an already-'running' row). Re-read to
+		// tell the two apart.
+		won = false
+		if cur, gerr := s.Get(id); gerr == nil && cur != nil && cur.Status != model.SubTaskStatusStopped {
+			won = true
+		}
+	}
+	if err == nil && won {
 		// Fan-out to per-requirement SSE subscribers so the SubTaskPanel
 		// re-fetches and shows the row as "running" the moment it transitions,
 		// instead of waiting for the 5s poll. Lookup is best-effort — a read
@@ -1259,7 +1300,7 @@ func (s *SubTaskService) MarkRunning(id string) (time.Time, error) {
 			log.Printf("[sub-task-event] %s: sub_task=%s status=running notify", st.RequirementID, id)
 		}
 	}
-	return now, err
+	return now, won, err
 }
 
 // CreateAdjustment inserts a follow-up sub-task that resumes the parent
@@ -1454,22 +1495,54 @@ func (s *SubTaskService) ContinueReset(id, modelOverride string) (*model.SubTask
 // duration are deliberately NOT touched — the row stays semantically
 // "the same sub_task, just halted by the user", and a follow-up
 // Continue or Redo will overwrite or keep these as appropriate.
+//
+// The write is guarded by `status IN ('running','pending')`: a row that has
+// meanwhile reached a terminal state ('done'/'error'/'stopped') is NOT
+// rewritten, so a slow Stop cannot resurrect a finished run as "stopped".
+// (MarkStopped is also called from the 6s stop watchdog, which may well
+// land after the runner already wrote the final state.)
 func (s *SubTaskService) MarkStopped(subTaskID, priorArtifact string) error {
+	return s.MarkStoppedWithReason(subTaskID, priorArtifact, "")
+}
+
+// MarkStoppedWithReason is MarkStopped with an explicit reason line in the
+// banner. The reason is the "why did this stop happen" explanation that
+// doesn't fit the plain "用户中止" wording — e.g. StopSubTask reconciling a
+// row whose JobStore job no longer exists:
+//
+//	⏹ 用户中止于 <RFC3339 timestamp>
+//
+//	<reason>
+//
+//	原结果：
+//	<priorArtifact verbatim>
+//
+// An empty reason reproduces MarkStopped's banner byte for byte.
+func (s *SubTaskService) MarkStoppedWithReason(subTaskID, priorArtifact, reason string) error {
 	if subTaskID == "" {
 		return errors.New("sub_task_id is required")
 	}
 	now := time.Now()
-	banner := "⏹ 用户中止于 " + now.Format(time.RFC3339) + "\n\n原结果：\n"
+	banner := "⏹ 用户中止于 " + now.Format(time.RFC3339) + "\n\n"
+	if reason != "" {
+		banner += reason + "\n\n"
+	}
+	banner += "原结果：\n"
 	newArtifact := banner + priorArtifact
-	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, completed_at=?, updated_at=? WHERE id=?`,
-		model.SubTaskStatusStopped, newArtifact, now, now, subTaskID)
-	if err == nil {
+	res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, completed_at=?, updated_at=?
+		WHERE id=? AND status IN (?, ?)`,
+		model.SubTaskStatusStopped, newArtifact, now, now, subTaskID,
+		model.SubTaskStatusRunning, model.SubTaskStatusPending)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
 		if st, gerr := s.Get(subTaskID); gerr == nil && st != nil {
 			s.notifyChanged(st.RequirementID)
 			log.Printf("[sub-task-event] %s: sub_task=%s status=stopped notify", st.RequirementID, subTaskID)
 		}
 	}
-	return err
+	return nil
 }
 
 // Finish is the terminal write: status (done | error), artifact Markdown, the
@@ -1510,6 +1583,16 @@ func (s *SubTaskService) FinishForSession(id, expectedSessionID, status, artifac
 // actively running under a fresh session). The duration / artifact / token
 // columns stay untouched on mismatch — exactly what we want, because the new
 // owner is the authoritative terminal writer.
+//
+// BOTH variants carry a `status != 'stopped'` guard: a terminal write must
+// never undo a user's Stop. The runner's stop-reconciliation branch
+// (SubTaskRunner.finishSubTask) already reads the row and skips the artifact
+// write when it sees 'stopped', but that check is a READ — a Stop landing
+// between the read and this write used to be overwritten by 'done'/'error'.
+// The push_pr / push_base shell paths have the same shape (their deferred
+// Finish ran unconditionally and turned a stopped row back into 'done').
+// With the guard, a 0-row UPDATE simply leaves the user's 'stopped' alone;
+// the caller treats "no rows changed" as "someone else owns the final state".
 func (s *SubTaskService) finishInternal(id, status, artifact, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time, expectedSessionID string) error {
 	now := time.Now()
 	duration := 0
@@ -1520,34 +1603,38 @@ func (s *SubTaskService) finishInternal(id, status, artifact, modelName string, 
 		}
 	}
 	if expectedSessionID != "" {
-		_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+		res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
 			input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
 			cost_cents=?, duration_seconds=?,
-			completed_at=?, updated_at=? WHERE id=? AND session_id=?`,
+			completed_at=?, updated_at=? WHERE id=? AND session_id=? AND status != ?`,
 			status, artifact, modelName,
 			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 			costCents, duration,
-			now, now, id, expectedSessionID)
+			now, now, id, expectedSessionID, model.SubTaskStatusStopped)
 		if err == nil {
-			if st, gerr := s.Get(id); gerr == nil && st != nil {
-				s.notifyChanged(st.RequirementID)
-				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (session-conditional)", st.RequirementID, id, status)
+			if n, _ := res.RowsAffected(); n > 0 {
+				if st, gerr := s.Get(id); gerr == nil && st != nil {
+					s.notifyChanged(st.RequirementID)
+					log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (session-conditional)", st.RequirementID, id, status)
+				}
 			}
 		}
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+	res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
 		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
 		cost_cents=?, duration_seconds=?,
-		completed_at=?, updated_at=? WHERE id=?`,
+		completed_at=?, updated_at=? WHERE id=? AND status != ?`,
 		status, artifact, modelName,
 		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 		costCents, duration,
-		now, now, id)
+		now, now, id, model.SubTaskStatusStopped)
 	if err == nil {
-		if st, gerr := s.Get(id); gerr == nil && st != nil {
-			s.notifyChanged(st.RequirementID)
-			log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify", st.RequirementID, id, status)
+		if n, _ := res.RowsAffected(); n > 0 {
+			if st, gerr := s.Get(id); gerr == nil && st != nil {
+				s.notifyChanged(st.RequirementID)
+				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify", st.RequirementID, id, status)
+			}
 		}
 	}
 	return err
@@ -1675,42 +1762,46 @@ func (s *SubTaskService) FinishWithPhases(
 		}
 	}
 	if expectedSessionID != "" {
-		_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+		res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
 			input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
 			cost_cents=?, duration_seconds=?,
 			completed_at=?, updated_at=?,
 			phase_understanding=?, phase_implementation=?, phase_summary=?, phase_emitted=1
-			WHERE id=? AND session_id=?`,
+			WHERE id=? AND session_id=? AND status != ?`,
 			status, artifact, modelName,
 			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 			costCents, duration,
 			now, now,
 			phases.Understanding, phases.Implementation, phases.Summary,
-			id, expectedSessionID)
+			id, expectedSessionID, model.SubTaskStatusStopped)
 		if err == nil {
-			if st, gerr := s.Get(id); gerr == nil && st != nil {
-				s.notifyChanged(st.RequirementID)
-				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal, session-conditional)", st.RequirementID, id, status)
+			if n, _ := res.RowsAffected(); n > 0 {
+				if st, gerr := s.Get(id); gerr == nil && st != nil {
+					s.notifyChanged(st.RequirementID)
+					log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal, session-conditional)", st.RequirementID, id, status)
+				}
 			}
 		}
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+	res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
 		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
 		cost_cents=?, duration_seconds=?,
 		completed_at=?, updated_at=?,
 		phase_understanding=?, phase_implementation=?, phase_summary=?, phase_emitted=1
-		WHERE id=?`,
+		WHERE id=? AND status != ?`,
 		status, artifact, modelName,
 		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 		costCents, duration,
 		now, now,
 		phases.Understanding, phases.Implementation, phases.Summary,
-		id)
+		id, model.SubTaskStatusStopped)
 	if err == nil {
-		if st, gerr := s.Get(id); gerr == nil && st != nil {
-			s.notifyChanged(st.RequirementID)
-			log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal)", st.RequirementID, id, status)
+		if n, _ := res.RowsAffected(); n > 0 {
+			if st, gerr := s.Get(id); gerr == nil && st != nil {
+				s.notifyChanged(st.RequirementID)
+				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal)", st.RequirementID, id, status)
+			}
 		}
 	}
 	return err
@@ -1721,10 +1812,19 @@ func (s *SubTaskService) FinishWithPhases(
 // tell the user to redo" behavior while the auto-orchestrated path gets the
 // restart-safe behavior the new OrchestrationQueue expects:
 //
-//  1. Manual path (batch_id=” OR NULL): pending/running rows become error
-//     with a recovery artifact, exactly like the pre-batch behavior. The
-//     sub-task was driven by an in-memory JobStore goroutine that died with
-//     the backend, so there's nothing to recover — the user must re-trigger.
+//  1. Manual path (batch_id=” OR NULL AND parent_subtask_id=” OR NULL):
+//     pending/running rows become error with a recovery artifact, exactly
+//     like the pre-batch behavior. The sub-task was driven by an in-memory
+//     JobStore goroutine that died with the backend, so there's nothing to
+//     recover — the user must re-trigger.
+//  1b. Tree children (batch_id=” OR NULL AND parent_subtask_id != ”): the
+//     same "mark errored, don't re-run" treatment, for the fix sub-tasks a
+//     Review spawns and the Adjust children. These rows used to have NO
+//     recovery path at all — leaving them at 'running' turned the card into
+//     a permanent dead end, because the UI only offers 继续/重做 on
+//     'error'/'stopped' rows and 删除 only on 'error'. A 'pending' child
+//     with no job_id is deliberately left alone: that is the orphan sweep's
+//     row to re-dispatch (see ListOrphanPending).
 //  2. Orchestrated path (batch_id != ”): running rows whose heartbeat
 //     (batch_id_seq_run) is older than 5 minutes are flipped back to
 //     pending. The owning goroutine died with the backend, but the row
@@ -1737,7 +1837,7 @@ func (s *SubTaskService) FinishWithPhases(
 // queue for OrchestrationQueue and remain pending for the next tick to pick
 // up.
 //
-// Returns the total number of rows the two passes affected. main.go logs
+// Returns the total number of rows the three passes affected. main.go logs
 // this so an ops dashboard can spot "many orchestrations interrupted at
 // boot" patterns.
 func (s *SubTaskService) RecoverInterrupted() (int64, error) {
@@ -1755,12 +1855,16 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	// running/pending), so a stopped row stays stopped — the user pressed
 	// Stop on purpose, that's not a backend-restart signal.
 	//
-	// Child rows (parent_subtask_id != '') are intentionally excluded:
-	// a Redo / Continue / Adjust child that errored on backend crash should
-	// be explicitly retried by the user against its parent (via Redo /
-	// Continue on the parent card), NOT silently auto-recovered here —
-	// otherwise the tree's history semantics get muddled (the parent
-	// would no longer be the visible source of truth for "what failed").
+	// Child rows (parent_subtask_id != '') are handled by pass 1b below, not
+	// here: the exclusion used to be deliberate ("a crashed child must be
+	// retried explicitly against its parent, not silently auto-recovered"),
+	// but with the exclusion in place such a row had NO recovery path at all
+	// — batch_id is '' for every fix / Review-round / Adjust child, so pass
+	// 2 (batch rows) skipped them too. A row left at 'running' forever is a
+	// permanent dead end in the UI: the SubTaskPanel only renders 继续/重做 on
+	// 'error'/'stopped' rows and 删除 only on 'error', so a 'running' row
+	// offers the user nothing at all (req_0ee0bfd8de6f5da6 /
+	// st_b1c4395863f9581f).
 	res, err := s.db.Exec(`UPDATE sub_tasks
 		SET status=?, artifact=CASE WHEN artifact != '' THEN artifact ELSE ? END,
 		    completed_at=?, updated_at=?
@@ -1775,6 +1879,36 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 		return 0, fmt.Errorf("recover manual sub_tasks: %w", err)
 	}
 	manualAffected, _ := res.RowsAffected()
+
+	// Pass 1b: TREE CHILDREN (parent_subtask_id != '') — the fix sub-tasks
+	// CreateFixes spawns, the Review round sub-tasks Recheck spawns and the
+	// Adjust children. Same "mark it errored, don't re-run it" semantics as
+	// pass 1 — the boot does NOT retry anything, it only moves the row out of
+	// the unreachable 'running' state so the user gets 继续 / 重做 / 删除 back.
+	// The tree-history intent (don't silently re-run a child) is preserved:
+	// the row stays failed and the user decides.
+	//
+	// The one predicate that matters: a 'pending' child WITHOUT a job_id is
+	// NOT touched. Such a row is the orphan sweep's business — ListOrphanPending
+	// picks up exactly `status='pending' AND job_id='' AND batch_id=''` and
+	// re-dispatches it. Flipping it to 'error' here would silently disarm
+	// that self-heal (the 2026-11 fix for stranded fix rows). A 'pending'
+	// child WITH a job_id, on the other hand, was dispatched by a goroutine
+	// that died with the previous process — nobody will ever run it again.
+	res1b, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, artifact=CASE WHEN artifact != '' THEN artifact ELSE ? END,
+		    completed_at=?, updated_at=?
+		WHERE (status = ? OR (status = ? AND job_id != ''))
+		  AND (batch_id = '' OR batch_id IS NULL)
+		  AND parent_subtask_id != ''`,
+		model.SubTaskStatusError,
+		"❌ 服务在子任务执行期间重启，该子任务已中断。请点「继续」或「重做」重新执行。",
+		now, now,
+		model.SubTaskStatusRunning, model.SubTaskStatusPending)
+	if err != nil {
+		return manualAffected, fmt.Errorf("recover child sub_tasks: %w", err)
+	}
+	childAffected, _ := res1b.RowsAffected()
 
 	// Pass 2: orchestrated sub-tasks — flip stale running rows back to
 	// pending so OrchestrationQueue re-dispatches them. cutoff is bound in
@@ -1796,7 +1930,7 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 		return manualAffected, fmt.Errorf("recover orchestrated sub_tasks: %w", err)
 	}
 	orchestratedAffected, _ := res2.RowsAffected()
-	return manualAffected + orchestratedAffected, nil
+	return manualAffected + childAffected + orchestratedAffected, nil
 }
 
 // RecoverStaleRunningInBatch flips 'running' rows of a single batch whose

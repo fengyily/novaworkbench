@@ -1050,9 +1050,21 @@ func (r *SubTaskRunner) run(
 	// make a queued sub-task render as running for as long as it waits, which
 	// is the exact confusion the project queue is meant to remove. It also
 	// keeps duration_seconds measuring execution time, not queue time.
-	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
+	//
+	// MarkRunning is a compare-and-set: it refuses to revive a row the user
+	// stopped. The check above is a READ, so a Stop landing between the two
+	// would otherwise flip the row straight back to 运行中 — the exact
+	// "点停止，它又变回运行中" symptom. Losing the CAS means the user won:
+	// don't spawn anything.
+	startTime, won, mErr := r.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
 		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	if !won {
+		log.Printf("[sub-task] %s: row was stopped before dispatch — aborting run", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止，未启动执行"})
+		job.Finish(0, store.JobDone)
+		return
 	}
 
 	role := "🤖 调整子任务启动中..."
@@ -1902,6 +1914,27 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
 	defer cancel()
+	// The row may have been stopped while we were getting here: between
+	// MarkRunning and this point the runner resolves the working directory
+	// and may create a git worktree, which can take minutes. job.Cancel()
+	// was a NO-OP for that whole window (cmd/cancel were still nil), so a
+	// Stop landing there killed nothing — the claude process would have
+	// started anyway and kept editing the worktree while the card said
+	// 已停止. Now that the process is killable, honor the stop.
+	//
+	// The empty outcome is deliberate: the CLI was never started, so there
+	// is no result and no error to report. finishSubTask's stop-
+	// reconciliation branch sees the row is 'stopped' and leaves it alone
+	// (it does not overwrite the banner with a synthetic failure), and the
+	// terminal write's `status != 'stopped'` guard is the backstop.
+	if cur, gerr := r.subTaskSvc.Get(st.ID); gerr == nil && cur != nil && cur.Status == model.SubTaskStatusStopped {
+		log.Printf("[sub-task] %s: stopped during workspace preparation — aborting before spawn", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 准备工作目录期间已被停止，未启动执行"})
+		cancel()
+		killProcessGroup(cmd)
+		job.Finish(0, store.JobDone)
+		return claudeStreamOutcome{}
+	}
 	// Absolute wall-clock ceiling (push/PR children only). Idle timeouts reset
 	// on every emitted line, so a child that busy-polls CI never trips them;
 	// this one is unconditional. 0 disables it.

@@ -235,9 +235,19 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	// (sub_task_runner.go: MarkRunning). Without this the SubTaskPanel chip
 	// renders "排队中 · 等待项目空闲" for the entire shell lifetime, even
 	// after the job has finished. runStartTime feeds sub_tasks.duration_seconds.
-	runStartTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
+	//
+	// MarkRunning is a compare-and-set: it refuses to revive a row the user
+	// stopped, so a Stop that landed while this job sat in the queue is
+	// honored instead of being undone.
+	runStartTime, won, mErr := h.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
 		log.Printf("[push-pr-shell] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	if !won {
+		log.Printf("[push-pr-shell] %s: row was stopped before dispatch — aborting shell run", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止，未执行 git 操作"})
+		job.Finish(0, store.JobDone)
+		return
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送流程启动（dev=" + dev + ", base=" + base + "）"})
 
@@ -429,9 +439,15 @@ func (h *WizardHandler) execCommitOnlyShell(reqRow *model.Requirement, st *model
 		job.Finish(0, store.JobDone)
 		return
 	}
-	runStartTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
+	runStartTime, won, mErr := h.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
 		log.Printf("[commit-shell] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	if !won {
+		log.Printf("[commit-shell] %s: row was stopped before dispatch — aborting shell run", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止，未执行 git 操作"})
+		job.Finish(0, store.JobDone)
+		return
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "📝 本地 shell commit-only 流程启动（dev=" + dev + ", base=" + base + "）"})
 
