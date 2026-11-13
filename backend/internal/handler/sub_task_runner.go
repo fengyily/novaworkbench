@@ -984,12 +984,18 @@ func (r *SubTaskRunner) run(
 	reportMode := spec.reportMode
 	// Reasoning effort (claude CLI --effort). Resolved HERE — at dispatch
 	// time — so a settings change takes effect on the next run without
-	// touching the row. The precedence is: the user's explicit pick (spec
-	// or the tier a previous dispatch stored on the row) > the configured
-	// stage default > the built-in stage default.
+	// touching the row. The precedence is: the user's explicit pick (spec)
+	// > the tier the row already carries > the configured stage default >
+	// the built-in stage default.
+	//
+	// The row's stored tier is the fallback for a run that carries no
+	// explicit pick (the orchestration queue). The UI-driven paths always
+	// carry one — the tier picker always holds a concrete value — so they
+	// follow the CONFIGURED stage default instead of being pinned to the
+	// last run's tier.
 	//
 	// The resolved tier is written back onto the row so the sub-task card
-	// can show what actually ran, and so a 重做 / 继续 reproduces it.
+	// can show what actually ran.
 	effortPick := spec.effort
 	if effortPick == "" {
 		effortPick = st.Effort

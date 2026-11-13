@@ -374,7 +374,7 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round
+		task_kind, review_id, review_round, effort
 		FROM sub_tasks
 		WHERE requirement_id = ?
 		  AND source = ?
@@ -459,7 +459,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round
+		task_kind, review_id, review_round, effort
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -500,7 +500,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round
+		task_kind, review_id, review_round, effort
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -560,7 +560,7 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			session_mode, retry_count,
 			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round
+			task_kind, review_id, review_round, effort
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -654,7 +654,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round
+		task_kind, review_id, review_round, effort
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -960,7 +960,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			session_mode, retry_count,
 			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round
+			task_kind, review_id, review_round, effort
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
 			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
@@ -1071,7 +1071,7 @@ func (s *SubTaskService) ListOrphanPending(olderThan time.Time) ([]model.SubTask
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round
+		task_kind, review_id, review_round, effort
 		FROM sub_tasks
 		WHERE status = ?
 		  AND (job_id = '' OR job_id IS NULL)
@@ -1220,8 +1220,18 @@ func (s *SubTaskService) UpdateClaudeConfigID(id, configID string) error {
 
 // UpdateEffort records the reasoning-effort tier (claude CLI --effort) the
 // child actually ran with. Called by SubTaskRunner.Run just before the
-// dispatch, so the SubTaskCard can show the tier and a 重做 / 继续 re-run
-// reproduces it — the same contract as UpdateClaudeConfigID.
+// dispatch, so the tier lands on the row as the audit trail of what
+// actually ran.
+//
+// The column is READ back — every SELECT that feeds scanSubTask carries
+// it — which is what lets a run that supplies no explicit pick fall back
+// to the tier the row already holds. The UI-driven paths (创建 / 重做 /
+// 继续) always supply a pick, because the tier picker always holds a
+// concrete value, and that pick follows the CONFIGURED stage default
+// rather than the previous run's tier: pinning a re-run to the last tier
+// would break the "a settings change takes effect on the next run"
+// promise. The stored tier is therefore the fallback for the paths that
+// carry no pick (the orchestration queue), not an override.
 //
 // A separate method rather than a new Create() parameter: Create already
 // takes 13 positional arguments, and adding a 14th would ripple through
@@ -2122,6 +2132,13 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.ReportMode,
 		&st.PhaseUnderstanding, &st.PhaseImplementation, &st.PhaseSummary, &st.PhaseEmitted,
 		&st.TaskKind, &st.ReviewID, &st.ReviewRound,
+		// effort is APPENDED at the very end of both the column list and
+		// this scan, mirroring the requirements table's rule: inserting a
+		// new column in the middle of a long list shifts every following
+		// one and silently mis-assigns fields (the model column would be
+		// read as the tier, or vice versa) — a bug that compiles, passes
+		// a smoke test and is nearly impossible to spot by eye.
+		&st.Effort,
 	); err != nil {
 		return nil, err
 	}
