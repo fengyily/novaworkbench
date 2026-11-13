@@ -496,6 +496,10 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 				model:           model,
 				claudeConfigID:  claudeConfigID,
 				usage:           h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
+				// The reasoning-effort tier (claude CLI --effort) this run
+				// uses — the same value the local branch passes, so both
+				// environments reason at the same depth.
+				Effort:          p.Effort,
 				PermissionMode:  wikiPermissionMode,
 				SyncMode:        p.SyncMode,
 				SystemPrompt:    p.SystemPrompt,

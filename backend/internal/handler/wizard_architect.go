@@ -1371,6 +1371,12 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				model:          model,
 				claudeConfigID: claudeConfigID,
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
+				// The reasoning-effort tier (claude CLI --effort) this run
+				// uses. Without it the remote design pass would fall back to
+				// the CLI's own default while the local pass used the
+				// configured design tier (high) — the two environments
+				// would silently disagree.
+				Effort:         p.Effort,
 				PermissionMode: "plan",
 				AddDirs:        p.AddDirs,
 				SyncMode:       p.SyncMode,

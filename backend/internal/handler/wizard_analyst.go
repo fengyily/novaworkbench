@@ -255,6 +255,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 					model:          model,
 					claudeConfigID: claudeConfigID,
 					usage:          analystUsage,
+					// The reasoning-effort tier (claude CLI --effort) this
+					// turn uses. The local branch passes the same `effort`
+					// value, so both environments reason at the same depth.
+					Effort:         effort,
 					stageLabel:     "analyst-chat",
 					SystemPrompt:   systemPrompt,
 					baseBranch:     defaultBranch,
