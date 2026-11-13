@@ -996,6 +996,95 @@ func (h *WizardHandler) extractSubtasksWithLLM(reqID, finalResult string) *orche
 	return nil
 }
 
+// DispatchOrphanSubTask re-dispatches a pending sub-task that no dispatcher
+// owns. It is called by scheduler.OrchestrationQueue.selfHealOrphanPending for
+// rows that sit at status='pending' with an empty job_id AND an empty
+// batch_id — a state nothing in the backend would otherwise ever claim:
+//
+//   - the orchestration queue claims by batch_id (ClaimNextPending);
+//   - the manual path only runs on an explicit user action.
+//
+// So such a row would show "排队中 · 等待项目空闲" forever, with no way to
+// start it, cancel it, or delete it.
+//
+// The row already carries everything a run needs — prompt, source_session_id,
+// session_mode, model, report_mode — because it was created by a producer
+// that filled those columns in and simply never launched it. This method
+// only supplies the two things the producer missed: a JobStore job and a
+// pre-minted claude session id.
+//
+// The claim is a compare-and-set (ClaimOrphanPending re-checks the whole
+// orphan predicate, including the age cutoff), so exactly one caller can
+// win and a row that was re-armed in the meantime is left alone.
+func (h *WizardHandler) DispatchOrphanSubTask(st *model.SubTask, olderThan time.Time) {
+	if h.subTaskRunner == nil || h.subTaskSvc == nil || h.jobs == nil {
+		log.Printf("[orch] orphan sweep: %s — runner not wired, leaving the row untouched", st.ID)
+		return
+	}
+	req, err := h.reqSvc.Get(st.RequirementID)
+	if err != nil || req == nil {
+		// The requirement is gone (or unreadable). There is no worktree to
+		// edit and no context to fork, so the row cannot be run. Leaving it
+		// pending is the honest outcome; the boot recovery will surface it.
+		log.Printf("[orch] orphan sweep: %s — requirement %s is unavailable (%v), skipping",
+			st.ID, st.RequirementID, err)
+		return
+	}
+	job := h.jobs.Create(req.ID)
+	// Re-mint the session id: the row's own session_id may be empty (the
+	// producer never got that far) or stale (a previous attempt that died
+	// before writing anything back). A fresh id keeps the run's
+	// resume/fork bookkeeping unambiguous. It is written by the claim
+	// itself, together with the job id, so the row is never observed
+	// half-stamped.
+	newSID := util.NewUUID()
+	claimed, err := h.subTaskSvc.ClaimOrphanPending(st.ID, job.ID, newSID, olderThan)
+	if err != nil {
+		log.Printf("[orch] orphan sweep: %s — claim failed: %v", st.ID, err)
+		job.Finish(1, store.JobError)
+		return
+	}
+	if !claimed {
+		// Somebody else got it (another tick, or a Redo that re-armed the row
+		// a moment ago). Dispatching here would run the same work twice.
+		//
+		// The job was already created, so close it out — an abandoned job
+		// would otherwise sit in the ring buffer as an "active job" forever
+		// and show up in the UI's active-jobs list with nothing behind it.
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Replay the row's recorded session policy onto the runner's flags.
+	// The runner's own priority is bare > freshSession > fork, so exactly
+	// one of these may be set.
+	var fork, freshSession, bare bool
+	switch st.SessionMode {
+	case model.SubTaskSessionModeWithContext:
+		freshSession = true
+	case model.SubTaskSessionModeBare:
+		bare = true
+	default:
+		fork = true
+	}
+	// "默认模型" is a UI sentinel, not a model id — it must never reach the
+	// CLI. An empty override lets the runner resolve the developer role's
+	// model, same as any other manual sub-task.
+	modelOverride := strings.TrimSpace(st.Model)
+	if modelOverride == DefaultModelLabel {
+		modelOverride = ""
+	}
+	reportMode := st.ReportMode
+	if reportMode == "" {
+		reportMode = model.SubTaskReportModeAuto
+	}
+
+	log.Printf("[orch] orphan sweep: %s — dispatched (job %s, session %s, fork=%v fresh=%v bare=%v)",
+		st.ID, job.ID, newSID, fork, freshSession, bare)
+	go h.subTaskRunner.Run(req, st, job, newSID, st.SourceSessionID, st.Prompt,
+		modelOverride, "", false /*adjust*/, fork, freshSession, bare, "", reportMode)
+}
+
 // ExecuteOrchestratedChild is the per-child execution entry point invoked
 // from scheduler.OrchestrationQueue.tick. The sub-task row has ALREADY been
 // claimed (status=running) by ClaimNextPending before this method is called,

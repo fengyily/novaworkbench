@@ -30,6 +30,22 @@ import (
 	"github.com/novaworkbench/backend/internal/service"
 )
 
+// orphanPendingMinAge is how long a pending row with no job_id and no
+// batch_id must sit untouched before the sweep treats it as an orphan and
+// re-dispatches it.
+//
+// It exists to cover the window between a row being INSERTed and its
+// dispatcher stamping a job_id onto it (Create → UpdateJobID). That window
+// is a couple of statements wide, so 60s is orders of magnitude more than
+// enough — and it must be, because the alternative (sweeping a row that was
+// just re-armed by a Redo / Continue, whose dispatch is a few statements
+// behind the reset) would spawn two claude processes on one row.
+//
+// The cutoff is measured against updated_at, not created_at: RedoReset /
+// ContinueReset re-arm a row IN PLACE and bump updated_at, so a re-armed
+// row is protected for a full window after the reset.
+const orphanPendingMinAge = 60 * time.Second
+
 // SubTaskExecutor is the wizard's adapter surface for the two orchestration
 // actions. The handler package owns the concrete implementation; the scheduler
 // only depends on these two methods. Both methods are blocking — the queue
@@ -57,6 +73,18 @@ type SubTaskExecutor interface {
 	// calls this in a goroutine so the tick itself stays short; callers may
 	// also freely block on whatever they need (DB reads, sub-task creation).
 	OnBatchDrained(batchID string)
+	// DispatchOrphanSubTask re-dispatches a pending sub-task that NO
+	// dispatcher owns — status='pending' with an empty job_id AND an empty
+	// batch_id, sitting untouched for longer than the sweep's cutoff.
+	//
+	// Such a row is invisible to the orchestration queue (which claims by
+	// batch_id) and unreachable from the manual path (which only runs on an
+	// explicit user action), so without this hook it would sit at
+	// "排队中 · 等待项目空闲" forever with no way to start, cancel or delete
+	// it. olderThan is the same cutoff the row was listed with — the
+	// implementation must re-check it when claiming the row, so a row that
+	// was re-armed (updated_at bumped) in the meantime is left alone.
+	DispatchOrphanSubTask(st *model.SubTask, olderThan time.Time)
 }
 
 // OrchestrationQueue polls orchestration_batches for active rows and
@@ -338,6 +366,10 @@ func (q *OrchestrationQueue) loop() {
 // ever invoked from the loop above, so this is defensive documentation
 // (matches scheduler.tick()).
 func (q *OrchestrationQueue) tick() {
+	// Sweep for pending rows that no dispatcher owns BEFORE looking at the
+	// batches. This is not batch-scoped, so it must not live inside the
+	// batch loop below.
+	q.selfHealOrphanPending()
 	// Read the auto_summary flag once per tick so a settings flip lands
 	// within one interval without a restart. Cheap KV hit; cheaper than
 	// re-reading per batch.
@@ -559,6 +591,51 @@ func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch, pr
 		}
 		log.Printf("[orch] batch %s summary_status=error, re-armed pending (attempt %d/%d)",
 			batch.ID, batch.SummaryAttempts+1, model.SummaryMaxAttempts)
+	}
+}
+
+// selfHealOrphanPending re-dispatches pending rows that no dispatcher owns.
+//
+// A row qualifies when status='pending' AND job_id='' AND batch_id='' AND it
+// has not been touched for orphanPendingMinAge. That predicate is exact:
+//
+//   - batch_id != '' → an orchestrated child, claimed by ClaimNextPending.
+//   - job_id   != '' → a dispatched manual / Review / push_pr row, waiting
+//     on the per-project concurrency gate inside SubTaskRunner.run.
+//
+// A row with BOTH empty belongs to neither bucket, so nothing in the
+// backend would ever look at it again. The card would sit at
+// "排队中 · 等待项目空闲" forever with no way to start it, cancel it, or even
+// delete it (every manual action is gated on a terminal status, and the boot
+// recovery deliberately skips rows that carry a parent_subtask_id).
+//
+// Producers of such orphans are all "created the row but never dispatched
+// it" bugs — the requirement-level Review "生成修复子任务" path being the
+// one that shipped. This sweep is the safety net for the rows that already
+// exist in users' databases and for any future producer that repeats the
+// mistake.
+//
+// The dispatch itself goes through SubTaskExecutor.DispatchOrphanSubTask,
+// which owns the JobStore and the runner. It re-checks the same predicate
+// when claiming the row, so a row that was re-armed between the listing and
+// the claim is left alone.
+func (q *OrchestrationQueue) selfHealOrphanPending() {
+	cutoff := time.Now().Add(-orphanPendingMinAge)
+	orphans, err := q.subTaskSvc.ListOrphanPending(cutoff)
+	if err != nil {
+		log.Printf("[orch] orphan sweep: %v", err)
+		return
+	}
+	for i := range orphans {
+		st := orphans[i]
+		select {
+		case <-q.stopCh:
+			return
+		default:
+		}
+		log.Printf("[orch] orphan sweep: re-dispatching %s (req %s, parent %q, created %s)",
+			st.ID, st.RequirementID, st.ParentSubtaskID, st.CreatedAt.Format(time.RFC3339))
+		q.wizardH.DispatchOrphanSubTask(&st, cutoff)
 	}
 }
 

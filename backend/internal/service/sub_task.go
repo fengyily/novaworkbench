@@ -1022,6 +1022,116 @@ func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) erro
 	return err
 }
 
+// ListOrphanPending returns the pending sub-tasks that NO dispatcher owns.
+//
+// The signature is exact, and that is the whole point:
+//
+//	status = 'pending' AND job_id = '' AND batch_id = ''
+//
+// Every legitimate pending row falls into exactly one of two buckets:
+//
+//   - batch_id != '' → an orchestrated child, claimed by
+//     OrchestrationQueue via ClaimNextPending(batch_id).
+//   - job_id != ''   → a dispatched manual / Review / push_pr row, waiting
+//     on the per-project concurrency gate inside SubTaskRunner.run.
+//
+// A row with BOTH empty belongs to neither bucket, so nothing in the backend
+// will ever look at it again: the card sits at "排队中 · 等待项目空闲"
+// forever, with no way to start it, cancel it, or even delete it (every
+// manual action is gated on a terminal status, and the boot recovery
+// deliberately skips rows that have a parent_subtask_id).
+//
+// Real producers of such orphans, all of them bugs of the "created the row
+// but never dispatched it" kind:
+//
+//   - requirement-level Review "生成修复子任务" (CreateFixes) — the fix row
+//     was created but never launched, so the documented
+//     "fix → re-review until P0/P1 clear" loop could never converge;
+//   - an Adjust child (CreateAdjustment) still pending when the backend
+//     restarted — RecoverInterrupted skips tree children on purpose;
+//   - a manual sub-task whose runner was not wired.
+//
+// The age cutoff is applied to updated_at, NOT created_at, and that
+// distinction is load-bearing: RedoReset / ContinueReset re-arm a row IN
+// PLACE (status='pending', job_id='', updated_at=now) and dispatch it a few
+// statements later. Filtering on created_at would let the sweep race that
+// window and dispatch the same row twice; filtering on updated_at keeps
+// every freshly re-armed row protected for the whole cutoff window.
+//
+// Returns nil (not an empty slice) when there is nothing to do.
+func (s *SubTaskService) ListOrphanPending(olderThan time.Time) ([]model.SubTask, error) {
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds,
+		created_at, updated_at, completed_at, started_at,
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode, retry_count,
+		report_mode,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round
+		FROM sub_tasks
+		WHERE status = ?
+		  AND (job_id = '' OR job_id IS NULL)
+		  AND (batch_id = '' OR batch_id IS NULL)
+		  AND updated_at < ?
+		ORDER BY updated_at ASC, id ASC`, model.SubTaskStatusPending, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.SubTask{}
+	for rows.Next() {
+		st, err := scanSubTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return out, nil
+}
+
+// ClaimOrphanPending atomically takes ownership of an orphan pending row by
+// stamping its job id AND its pre-minted claude session id onto it.
+//
+// The WHERE clause repeats the full orphan predicate, so the claim is a
+// compare-and-set: exactly one caller can win. A loser (another sweep tick,
+// or a Redo that re-armed the row a moment earlier) sees RowsAffected == 0
+// and must NOT dispatch.
+//
+// The session id is written in the SAME statement as the job id on purpose.
+// Every other dispatch path stamps session_id first and job_id second
+// (SubTaskRunner.NewPendingSubTask), so a row that carries a job id always
+// carries a session id too. Writing them together keeps that invariant —
+// and it means there is no window in which the row looks dispatched (job id
+// set) while the session it needs is still missing.
+//
+// olderThan is the same cutoff ListOrphanPending was called with, so the
+// claim cannot pick up a row that was re-armed (updated_at bumped) after the
+// listing — that is what keeps the Redo / Continue dispatch window safe.
+//
+// Returns true when the row was claimed.
+func (s *SubTaskService) ClaimOrphanPending(id, jobID, sessionID string, olderThan time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE sub_tasks
+		SET job_id=?, session_id=?, updated_at=?
+		WHERE id=?
+		  AND status=?
+		  AND (job_id = '' OR job_id IS NULL)
+		  AND (batch_id = '' OR batch_id IS NULL)
+		  AND updated_at < ?`,
+		jobID, sessionID, time.Now(), id, model.SubTaskStatusPending, olderThan)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 // UpdateSession stores the pre-minted claude session id and the parent
 // session id it forks from. Called once per sub-task, immediately after
 // Create, before the goroutine spawns the claude CLI — that ordering means a
