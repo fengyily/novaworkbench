@@ -344,3 +344,53 @@ func TestRequirementDirDeleteAutoRowIsNotFound(t *testing.T) {
 		t.Fatalf("Delete(auto row) status = %d, want 404, body=%s", w.Code, w.Body.String())
 	}
 }
+
+// ── 授权目录清单的两副措辞（拆分专用 vs 通用）────────────────────────────
+//
+// 方案拆分这一轮禁用了 Bash，所以它拿到的目录清单不能建议模型去调 `ls`；
+// 其它阶段（设计 / 编码 / 答疑 / 文档 / 子任务）仍然可以用 Bash，那里这句
+// 提示是有用的。两副措辞除了这一句以外逐字相同。
+
+// TestDirsManifestWith_BashHintIsSwitchable pins the switch: the Bash hint
+// appears in the Bash-enabled manifest and is gone from the Bash-disabled one,
+// while the directory itself stays listed in both.
+func TestDirsManifestWith_BashHintIsSwitchable(t *testing.T) {
+	h, d := newReqDirTestHandler(t)
+	dirSvc := service.NewRequirementDirService(d)
+	if _, err := dirSvc.Add("req_1", "/tmp/specs", "接口规格", "u1"); err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	withBash := dirsManifestWith(dirSvc, "req_1", true)
+	withoutBash := dirsManifestWith(dirSvc, "req_1", false)
+
+	if !strings.Contains(withBash, "Bash `ls`") {
+		t.Errorf("the Bash hint is missing from the Bash-enabled manifest:\n%s", withBash)
+	}
+	if strings.Contains(withoutBash, "Bash `ls`") {
+		t.Errorf("the Bash hint leaked into the Bash-disabled manifest:\n%s", withoutBash)
+	}
+	for _, want := range []string{"## 📂 已授权读取目录", "/tmp/specs", "接口规格"} {
+		if !strings.Contains(withBash, want) || !strings.Contains(withoutBash, want) {
+			t.Errorf("%q is missing from one of the manifests:\nwith:\n%s\nwithout:\n%s", want, withBash, withoutBash)
+		}
+	}
+	_ = h
+}
+
+// TestDirsManifestFor_Unchanged pins that the shared helper keeps its
+// original behaviour: six other stages call it and must not see any change.
+func TestDirsManifestFor_Unchanged(t *testing.T) {
+	_, d := newReqDirTestHandler(t)
+	dirSvc := service.NewRequirementDirService(d)
+	if _, err := dirSvc.Add("req_1", "/tmp/specs", "接口规格", "u1"); err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	if got, want := dirsManifestFor(dirSvc, "req_1"), dirsManifestWith(dirSvc, "req_1", true); got != want {
+		t.Errorf("dirsManifestFor changed:\ngot:\n%q\nwant:\n%q", got, want)
+	}
+	// Nothing granted → no manifest at all.
+	if got := dirsManifestFor(dirSvc, "req_none"); got != "" {
+		t.Errorf("a requirement without grants produced a manifest:\n%s", got)
+	}
+}

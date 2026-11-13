@@ -74,8 +74,11 @@ type splitExecTarget struct {
 // 生产为 nil → execSplitTasks 走默认实现（本地 claude CLI / 远端 nova-agent-worker）。
 // 测试注入假实现来断言「用户选的执行环境有没有被真正用上」—— WizardHandler.llm
 // 是具体类型 *llm.Gateway、SSH 也是具体类型 *gossh.Client，没有别的替身方式。
+//
+// run 携带这一轮的执行期素材（附件目录 / --add-dir 授权 / 上下文块），让注入
+// 的假实现也能断言「清单与授权是不是一起抵达了执行层」。
 type splitExecFunc func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string)
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string)
 
 // ConfirmSplitReq — POST /api/requirements/{id}/split/confirm 的请求体。
 type ConfirmSplitReq struct {
@@ -345,12 +348,25 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		configID = body.ClaudeConfigID
 	}
 
-	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing)
+	// The requirement's own material: attachments, granted directories and
+	// referenced requirements — plus the --add-dir grants that make the
+	// attachment / directory manifests actually readable. Assembled in ONE
+	// place so the manifest and the grant can never drift apart.
+	//
+	// On a remote run this also syncs the attachments to the agent host, so
+	// it happens BEFORE the "analyzing" phase line — the sync can take a
+	// while and the user must not stare at an empty panel.
+	if strings.TrimSpace(body.AgentServerID) != "" {
+		job.Append(store.LogLine{Type: "phase", Content: "📤 同步附件到 Agent 服务器…"})
+	}
+	run := h.buildSplitContext(context.Background(), reqRow.ID, strings.TrimSpace(body.AgentServerID))
+
+	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing, run.ContextBlock)
 	usage := h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID)
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在分析方案并拆分任务…"})
 
-	tasks, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, usage)
+	tasks, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, run, usage)
 	if errMsg != "" {
 		h.finishSplitError(job, st, errMsg)
 		return
@@ -377,16 +393,16 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 // The injectable h.splitExec short-circuits the whole thing — production
 // leaves it nil and the default local / remote implementations run.
 func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement, body SplitReq,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
 	target := splitExecTarget{AgentServerID: strings.TrimSpace(body.AgentServerID)}
 	target.Remote = target.AgentServerID != ""
 	if h.splitExec != nil {
-		return h.splitExec(job, reqRow, target, promptText, systemPrompt, modelName, configID, usage)
+		return h.splitExec(job, reqRow, target, promptText, systemPrompt, modelName, configID, run, usage)
 	}
 	if target.Remote {
-		return h.runRemoteSplitTasks(job, reqRow, target.AgentServerID, promptText, systemPrompt, modelName, configID, usage)
+		return h.runRemoteSplitTasks(job, reqRow, target.AgentServerID, promptText, systemPrompt, modelName, configID, run, usage)
 	}
-	return h.runLocalSplitTasks(job, reqRow, promptText, systemPrompt, modelName, configID, usage)
+	return h.runLocalSplitTasks(job, reqRow, promptText, systemPrompt, modelName, configID, run, usage)
 }
 
 // runLocalSplitTasks runs the split on this machine: the claude CLI with the
@@ -398,7 +414,7 @@ func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement
 // the HTTP channel from here, which is why the remote path has no such
 // fallback (see requirement_split_remote.go).
 func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Requirement,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, string) {
 	workDir := h.splitWorkDir(reqRow)
 
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
@@ -407,6 +423,10 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
 		ClaudeConfigID: configID,
+		// The directories the manifest points at must be readable, otherwise
+		// the model sees the file names but not their content — and a
+		// non-interactive run has nobody to approve the read.
+		AddDirs: run.AddDirs,
 		// Read-only: the split must not touch the repository. Read / Glob /
 		// Grep stay available so the model can ground the scope in real file
 		// paths.
@@ -423,9 +443,10 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 
 	if len(tasks) == 0 {
 		// CLI path produced nothing usable — fall back to the direct HTTP
-		// channel before giving up.
+		// channel before giving up. The context block travels with it, so the
+		// fallback does not lose the requirement's material.
 		job.Append(store.LogLine{Type: "phase", Content: "⚠️ 本地 CLI 未产出可解析的拆分结果，改用直接 LLM 通道重试…"})
-		raw, ferr := h.llm.ExtractSubRequirementsFromDesign(reqRow.DesignDocs, out.errMsg)
+		raw, ferr := h.llm.ExtractSubRequirementsFromDesign(reqRow.DesignDocs, run.ContextBlock, out.errMsg)
 		if ferr != nil {
 			return nil, "拆分失败: " + ferr.Error()
 		}
@@ -637,6 +658,15 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[split] %s: reference linking failed: %v", reqID, err)
 			warnings = append(warnings, "子需求已创建，但互相引用关系设置失败："+err.Error())
 		}
+	}
+
+	// The children inherit the master's granted directories, so the access
+	// the user authorized for the master keeps working once development is
+	// delegated. Soft failure: the children are the primary fact, a missing
+	// directory grant only costs them read access.
+	if err := h.inheritSplitDirs(reqID, children); err != nil {
+		log.Printf("[split] %s: directory inheritance failed: %v", reqID, err)
+		warnings = append(warnings, "子需求已创建，但继承主需求的授权目录失败："+err.Error())
 	}
 
 	// Shape the response: the frontend needs the ids (to link), the base

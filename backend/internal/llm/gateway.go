@@ -1279,13 +1279,18 @@ func (g *Gateway) ExtractStepsFromPlan(planMarkdown, feedback string) (string, e
 // self-correct on a parse failure — same "parse → feedback → retry" pattern
 // ExtractStepsFromPlan uses.
 //
+// contextBlock carries the requirement's own material (attachments / granted
+// directories / referenced requirements — see prompt.BuildSplitContextBlock).
+// It is appended to the user message so the fallback channel sees exactly
+// what the CLI channel sees; an empty block leaves the message unchanged.
+//
 // The call runs on the heavy channel timeout (default 5m) because it ships
 // the whole design and asks for 8192 tokens.
 //
 // The returned string is a bare JSON payload; the caller parses it (via
 // prompt.NormalizeSplitTasks), which also applies the count cap and the
 // depends_on sanity rules.
-func (g *Gateway) ExtractSubRequirementsFromDesign(designDocs, feedback string) (string, error) {
+func (g *Gateway) ExtractSubRequirementsFromDesign(designDocs, contextBlock, feedback string) (string, error) {
 	if g.llmCfg == nil {
 		return "", fmt.Errorf("llm not configured: no llm config provider")
 	}
@@ -1300,12 +1305,16 @@ func (g *Gateway) ExtractSubRequirementsFromDesign(designDocs, feedback string) 
 	if runes := []rune(designDocs); len(runes) > maxRunes {
 		designDocs = string(runes[:maxRunes]) + "\n…（后文省略）"
 	}
+	userMsg := designDocs
+	if ctxBlock := strings.TrimSpace(contextBlock); ctxBlock != "" {
+		userMsg = designDocs + "\n\n" + ctxBlock
+	}
 	if feedback != "" {
-		designDocs = designDocs +
+		userMsg = userMsg +
 			"\n\n（你上一次的输出无法解析为合法 JSON 或未能生成有效子需求列表，错误信息：" +
 			feedback + "，这次请严格输出合法 JSON。）"
 	}
-	out, _, err := chatCompletion(baseURL, apiKey, model, extractSplitSystemPrompt, designDocs, 8192, HeavyChatTimeout())
+	out, _, err := chatCompletion(baseURL, apiKey, model, extractSplitSystemPrompt, userMsg, 8192, HeavyChatTimeout())
 	if err != nil {
 		return "", err
 	}
