@@ -15,13 +15,14 @@ import (
 // (the root cause of "scheduler ctx not provided; Executor must be
 // invoked through Scheduler.Dispatch").
 type capturingExec struct {
-	gotCtx     context.Context
-	called     bool
-	design     bool
-	coding     bool
-	designCode bool
-	wiki       bool
-	wikiParams WikiParams
+	gotCtx       context.Context
+	called       bool
+	design       bool
+	coding       bool
+	designCode   bool
+	wiki         bool
+	wikiParams   WikiParams
+	codingParams CodingParams
 }
 
 func (c *capturingExec) RunScheduledDesign(ctx context.Context, _ DesignParams) (string, error) {
@@ -34,8 +35,8 @@ func (c *capturingExec) RunScheduledDesign(ctx context.Context, _ DesignParams) 
 	return "", nil
 }
 
-func (c *capturingExec) RunScheduledCoding(ctx context.Context, _ CodingParams) (string, error) {
-	c.gotCtx, c.called, c.coding = ctx, true, true
+func (c *capturingExec) RunScheduledCoding(ctx context.Context, p CodingParams) (string, error) {
+	c.gotCtx, c.called, c.coding, c.codingParams = ctx, true, true, p
 	if v, ok := ctx.Value(SchedCtxKey{}).(SchedCtxValue); ok {
 		return v.JobID, nil
 	}
@@ -145,5 +146,40 @@ func TestDispatchRoutesWikiRow(t *testing.T) {
 	}
 	if e.wikiParams != want {
 		t.Fatalf("WikiParams: got %+v, want %+v", e.wikiParams, want)
+	}
+}
+
+// TestDispatchCarriesEffortToCodingParams pins that a "coding only"
+// scheduled_tasks row's `effort` column reaches CodingParams.
+//
+// This is the FIRST hop of the tier's journey (row → params → wizard run
+// parameters → CLI argv), and it is where a drop is easiest to miss: the
+// column is written by the schedule modal and read by the tick, with no
+// type connecting them. A coding-only schedule stores the developer
+// stage's tier in the `effort` column (the same slot its model uses in
+// that mode), so the tick has to hand it over as CodingParams.Effort.
+//
+// The design / wiki / merged paths forward their tier too — this test
+// covers the coding-only one, which is the path that had no forwarder.
+func TestDispatchCarriesEffortToCodingParams(t *testing.T) {
+	e := &capturingExec{}
+	s := &Scheduler{exec: e}
+
+	s.dispatch(model.ScheduledTask{
+		ID:            "sched_coding",
+		TaskType:      model.SchedTypeCoding,
+		RequirementID: "req_coding",
+		Model:         "claude-opus-5",
+		Effort:        "high",
+		CodingEffort:  "high",
+	})
+
+	if !e.coding {
+		t.Fatalf("coding row did not reach RunScheduledCoding (design=%v wiki=%v designCode=%v)",
+			e.design, e.wiki, e.designCode)
+	}
+	if e.codingParams.Effort != "high" {
+		t.Errorf("CodingParams.Effort = %q, want %q (the row's tier must reach the executor)",
+			e.codingParams.Effort, "high")
 	}
 }

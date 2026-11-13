@@ -107,6 +107,54 @@ func (e *ScheduledExecutor) RunScheduledWiki(ctx context.Context, p scheduler.Wi
 	return jobID, nil
 }
 
+// scheduledCodingParams maps a stored "coding only" schedule onto the
+// wizard's codingRunParams.
+//
+// It is a pure function so the mapping can be asserted directly. A
+// struct literal with twenty fields is exactly where a field gets
+// dropped by accident: the value still compiles, the run still works,
+// and the setting simply stops having any effect — a dead control in
+// the UI that looks configured. The tier was dropped here in practice:
+// the design, wiki and merged (design_and_coding) paths all forwarded
+// their tier, so the coding-only path was the odd one out and its
+// picker did nothing.
+//
+// req supplies the requirement's CURRENT title / description (the user
+// may have edited them after the schedule was created); everything else
+// comes from the schedule row.
+func scheduledCodingParams(p scheduler.CodingParams, req *model.Requirement) *codingRunParams {
+	// NoBranch:scheduled_tasks.no_branch 透传到 codingRunParams(wizard prologue
+	// 的 UpdateNoBranch 会持久化到 requirements.no_branch,后续的
+	// ContinueCoding / AdjustCoding / autoPushPR / LocalMerge / Cleanup 都从
+	// 那里读)。用 pointer 复用 prologue 的 nil-vs-non-nil 语义:scheduler
+	// 总是 stamp 显式值,所以这里也是 *bool{&p.NoBranch},保证 prologue
+	// 一定执行 UpdateNoBranch 而不是「保留行值」(后者会让 DB 永远是 0)。
+	noBranch := p.NoBranch
+	return &codingRunParams{
+		RequirementID:    p.RequirementID,
+		RequirementTitle: req.Title,
+		RequirementDesc:  req.Description,
+		BranchName:       p.BranchName,
+		BaseBranch:       p.BaseBranch,
+		Model:            p.Model,
+		// The reasoning-effort tier (claude CLI --effort) the schedule was
+		// created with. Empty = the configured coding-stage default at
+		// dispatch time.
+		//
+		// For a coding-only schedule this is the tier the user picked for
+		// the developer stage — the schedule modal writes it into the
+		// `effort` column (the same slot its model uses in that mode).
+		Effort:        p.Effort,
+		ReadKnowledge: p.ReadKnowledge,
+		AgentServerID: p.AgentServerID,
+		SplitTasks:    p.SplitTasks,
+		SyncMode:      p.SyncMode,
+		NoBranch:      &noBranch,
+		// ProjectPath 由 wizard exec body 自身从 reqRow.ProjectID + projectSvc 解析
+		// （保留 HTTP 路径完全相同的逻辑），此处不传。
+	}
+}
+
 // RunScheduledCoding satisfies scheduler.Executor for the coding path.
 // Implements the state gates from plan §3.7:
 //
@@ -144,29 +192,7 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 
 	// 构造 codingRunParams（按 wizard 既有字段）。Title / Desc 从最新需求
 	// 行读取——用户在调度后修改了标题/描述也以最新值为准。
-	//
-	// NoBranch:scheduled_tasks.no_branch 透传到 codingRunParams(wizard prologue
-	// 的 UpdateNoBranch 会持久化到 requirements.no_branch,后续的
-	// ContinueCoding / AdjustCoding / autoPushPR / LocalMerge / Cleanup 都从
-	// 那里读)。用 pointer 复用 prologue 的 nil-vs-non-nil 语义:scheduler
-	// 总是 stamp 显式值,所以这里也是 *bool{&p.NoBranch},保证 prologue
-	// 一定执行 UpdateNoBranch 而不是「保留行值」(后者会让 DB 永远是 0)。
-	noBranch := p.NoBranch
-	cp := &codingRunParams{
-		RequirementID:    p.RequirementID,
-		RequirementTitle: req.Title,
-		RequirementDesc:  req.Description,
-		BranchName:       p.BranchName,
-		BaseBranch:       p.BaseBranch,
-		Model:            p.Model,
-		ReadKnowledge:    p.ReadKnowledge,
-		AgentServerID:    p.AgentServerID,
-		SplitTasks:       p.SplitTasks,
-		SyncMode:         p.SyncMode,
-		NoBranch:         &noBranch,
-		// ProjectPath 由 wizard exec body 自身从 reqRow.ProjectID + projectSvc 解析
-		// （保留 HTTP 路径完全相同的逻辑），此处不传。
-	}
+	cp := scheduledCodingParams(p, req)
 	jobID, schedID, err := e.dispatchFromCtx(ctx)
 	if err != nil {
 		return "", err
