@@ -869,6 +869,28 @@ export const subTasksApi = {
     ),
 };
 
+// ReviewCandidate 是 Review 输入框里的一条候选审查要点。
+//
+// kind='criterion' — 一条验收点（从需求描述里抽出来的「应该做到什么」）。
+// kind='defect'    — 静态检查（go vet / tsc）报出来的疑似缺陷，附带
+//                    file:line 出处。
+export interface ReviewCandidate {
+  id: string;
+  kind: 'criterion' | 'defect';
+  title: string;
+  detail?: string;
+}
+
+// ReviewCandidates 是 Review 输入框的起始素材：需求自带的审核目标 +
+// 可勾选的验收点 + 静态检查发现的缺陷。
+export interface ReviewCandidates {
+  /** The pre-filled goal — the requirement's title + the background part of
+      its description. */
+  goal: string;
+  criteria: ReviewCandidate[];
+  defects: ReviewCandidate[];
+}
+
 // requirementReviewsApi — 需求级 Review（以子任务的方式发起）。
 //
 // 报告的权威源是 code_reviews 表，所以追问 / 重新生成 / 版本 / 导出全部复用
@@ -924,6 +946,20 @@ export const requirementReviewsApi = {
     api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
       `/api/requirements/${requirementId}/reviews/${reviewId}/recheck`,
       data,
+    ),
+  // The composer's starting point: the requirement's own goal + the
+  // acceptance points its description implies. Instant — pure string work,
+  // no process spawned.
+  candidates: (requirementId: string) =>
+    api.post<ReviewCandidates>(
+      `/api/requirements/${requirementId}/reviews/candidates`, {},
+    ),
+  // The defects the static checks report in the requirement's working tree.
+  // Slow (it spawns go vet / tsc), hence a separate endpoint the user
+  // triggers on demand — the composer stays usable while it runs.
+  scan: (requirementId: string) =>
+    api.post<ReviewCandidates>(
+      `/api/requirements/${requirementId}/reviews/candidates/scan`, {},
     ),
 };
 

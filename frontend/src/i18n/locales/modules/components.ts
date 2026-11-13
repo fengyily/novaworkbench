@@ -113,8 +113,19 @@ export const components = {
       codeHint: '派发一个实现子任务：继承主任务上下文，直接落盘代码改动。',
       reviewHint: '以子任务的方式发起一次代码 Review：可选 Review 身份与模型，产出的问题可一键转成修复子任务并回归 Review。',
     },
-    reviewComposerPlaceholder: '描述本次改动的目标（Review 判断「目标是否达成」的唯一依据）…',
+    reviewComposerPlaceholder: '描述本次改动的目标（留空也可以 —— 目标已经写在需求里了）…',
     reviewIdentityLabel: 'Review 身份',
+    // The focus-point palette under the Review box. The goal comes from the
+    // requirement; the candidates are what the system could dig out on its
+    // own. The user ticks what matters and edits the result.
+    reviewFocusLabel: '候选审查要点',
+    reviewFocusHint: '点一下就把这条写进上面的框里；再点一次移除。框里的内容随时可以改。',
+    reviewFocusCriteria: '验收点',
+    reviewFocusDefects: '疑似缺陷',
+    reviewFocusNone: '暂时没有可提供的要点 —— 直接在框里写目标也可以。',
+    reviewScanBtn: '🔍 扫描疑似缺陷',
+    reviewScanBusy: '扫描中…',
+    reviewScanEmpty: '静态检查没有报出问题。',
     reviewLocalOnlyHint: '需求级 Review v1 仅在本地执行：回归 Review 必须看到工作区里未提交的修复。',
     reviewSubmitBtn: '🔍 启动 Review',
     loading: '加载中…',

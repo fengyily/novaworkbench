@@ -640,6 +640,11 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/reviews", reqReviewH.ListReviews)
 	mux.HandleFunc("POST /api/requirements/{id}/reviews/{rid}/fixes", reqReviewH.CreateFixes)
 	mux.HandleFunc("POST /api/requirements/{id}/reviews/{rid}/recheck", reqReviewH.Recheck)
+	// The composer's starting point: the requirement's own goal plus the
+	// acceptance points it implies (instant), and the defects the project's
+	// static checks report (slow, on demand — it spawns the toolchain).
+	mux.HandleFunc("POST /api/requirements/{id}/reviews/candidates", reqReviewH.ReviewCandidates)
+	mux.HandleFunc("POST /api/requirements/{id}/reviews/candidates/scan", reqReviewH.ReviewCandidatesScan)
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)

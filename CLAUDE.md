@@ -188,8 +188,21 @@ UI 由 `ProjectDetail` 的 Review tab 以 `<ProjectCodeReview projectId={id} pro
 | GET | `/api/requirements/{id}/reviews` | — | `[{review_id, sub_task_id, review_round, status, verdict, p0/p1/p3_count, goal_met, title, model, role_key, created_at, finished_at}]` |
 | POST | `/api/requirements/{id}/reviews/{rid}/fixes` | `{finding_ref?, severities?[]}` | `{sub_task_ids: [...]}` |
 | POST | `/api/requirements/{id}/reviews/{rid}/recheck` | `{model?, claude_config_id?, role_key?}` | `{job_id, sub_task_id, review_id}` |
+| POST | `/api/requirements/{id}/reviews/candidates` | — | `{goal, criteria[], defects[]}`(即时) |
+| POST | `/api/requirements/{id}/reviews/candidates/scan` | — | `{goal, criteria[], defects[]}`(跑静态检查,慢) |
 
-前端:`components/RequirementReviewCard.tsx`(verdict 横幅 / 分级 ledger / 问题清单 / 生成修复子任务 / 回归 Review)+ `components/ReviewIdentitySelect.tsx`(身份下拉)+ `SubTaskPanel` 的「普通子任务 | 🔍 Review」模式切换。**Review 模式只在 done 阶段的那次 `SubTaskPanel` 挂载开放**(`allowReview` prop)—— 需求页挂载了两次面板,否则同一页会出现两个 Review 入口。
+**「改动目标」不再要求用户从零写**(`handler/review_candidates.go`)。需求里本来就有审核目标,让用户再抄一遍是无谓劳动;另一方面「有没有 BUG」里有一部分**系统自己就能找到**。于是输入框改成「系统给素材、用户来挑」:
+
+- **goal(预填)** —— 需求标题 + 描述里的**背景部分**(`buildReviewGoal`)。
+- **criteria(验收点)** —— 从描述里抽出来的「应该做到什么」(`splitRequirementDescription`)。判定规则:列表项 **或** 强语气动词(应该/必须/需要/…)且无否定词(「不应该」不是验收点)。**默认直接写进框里** —— 它们就是「目标是否达成」的判据,评审必须看到;弱语气词(返回/展示)不进列表,否则「需求背景:一次返回太多数据」这种散文会被误判。
+- **defects(疑似缺陷)** —— **项目自己的静态检查**(`go vet` / `tsc --noEmit`)在工作区里报出来的东西,带 `file:line`。这是「系统捞出来的 BUG」的真身(不是模型猜的)。**默认不写进框**:静态检查可能报十几条低价值项,全塞进去会淹没目标本身;用户点一下才加。
+- 两类候选都以 **chip** 呈现(点一下写入 / 再点移除),框里的内容始终可编辑 —— chip 是快捷方式,不是表单。
+- **扫描与素材分两个端点**:`candidates` 是纯字符串处理、瞬时返回;`candidates/scan` 要起进程(`go vet` 在大仓库上要几十秒),按需触发,不挡输入框可用。
+- **description 可以为空**:需求本身就是目标,评审 prompt 的降级路径是「从 diff 自行推断意图」。强制非空框是这次要改掉的核心不合理。
+
+**身份下拉的样式** —— `ReviewIdentitySelect` 只渲染 `<select>`,`className="form-input"`(`index.css` 里**唯一**的表单控件类,`select.form-input` 有专门样式),由调用方提供 label 包装 —— 与 `ExecEnvSelect` 结构完全一致。第一版用了不存在的 `form-select` 类,渲染成浏览器原生下拉,在 composer 那一排里格外扎眼(用户标注的「样式不统一」)。
+
+前端:`components/RequirementReviewCard.tsx`(verdict 横幅 / 分级 ledger / 问题清单 / 生成修复子任务 / 回归 Review)+ `components/ReviewIdentitySelect.tsx`(身份下拉)+ `components/ReviewFocusChips.tsx`(候选要点 chip)+ `SubTaskPanel` 的「普通子任务 | 🔍 Review」模式切换。**Review 模式只在 done 阶段的那次 `SubTaskPanel` 挂载开放**(`allowReview` prop)—— 需求页挂载了两次面板,否则同一页会出现两个 Review 入口。Review 模式的输入框与普通子任务**分开存**(`reviewGoal` vs `prompt`),切模式不会毁掉另一边写的草稿。
 
 ### Role config (`roles` 表 + `acl_roles` 表 — 两个"角色"含义不同)
 

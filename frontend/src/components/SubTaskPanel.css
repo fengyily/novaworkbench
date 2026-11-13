@@ -2244,3 +2244,117 @@
   line-height: 1.5;
   color: var(--color-text-muted);
 }
+
+/* ── 候选审查要点 (ReviewFocusChips) ────────────────────────────────────────
+   The palette of focus points under the Review box. Two weights on purpose:
+   the acceptance points are the expected shape of the work (quiet, neutral),
+   the static-check findings are facts (loud, monospace, error colour). */
+.sub-review-focus {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+.sub-review-focus-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sub-review-focus-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #64748B);
+}
+.sub-review-focus-hint {
+  flex: 1;
+  min-width: 180px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.sub-review-focus-scan {
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
+.sub-review-focus-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sub-review-focus-group-tag {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.sub-review-focus-group-tag.is-defect { color: var(--color-error-deep, #dc2626); }
+.sub-review-focus-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* A chip is a toggle: picking one writes it into the box, and the filled
+   state says so at a glance (border + tinted surface), so the user can see
+   what is already included without opening the box. */
+.sub-review-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  max-width: 100%;
+  margin: 0;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  color: var(--color-text-secondary, #64748B);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.sub-review-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+.sub-review-chip.is-applied {
+  border-color: var(--color-primary);
+  background: rgba(79, 70, 229, 0.08);
+  color: var(--color-text);
+}
+/* Keyboard-only focus ring — the chips are real buttons and have to be
+   reachable without a mouse. */
+.sub-review-chip:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.sub-review-chip-defect {
+  border-color: rgba(220, 38, 38, 0.35);
+}
+.sub-review-chip-defect.is-applied {
+  border-color: var(--color-error, #DC2626);
+  background: rgba(220, 38, 38, 0.08);
+}
+.sub-review-chip-loc {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  /* The -deep variant: --color-error (#EF4444) on white is only ~3.3:1,
+     which is under the 4.5:1 floor for body text. The plain variant is
+     reserved for the border tint. */
+  color: var(--color-error-deep, #dc2626);
+}
+.sub-review-chip-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-review-focus-empty {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
