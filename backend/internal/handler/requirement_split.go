@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -646,15 +645,18 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	// Order the candidates and pre-mint their ids so the dependency edges
 	// (which reference real ids) can be inserted in the same transaction as
 	// the rows themselves.
-	tasks := make([]model.SplitTaskInput, len(body.Tasks))
-	copy(tasks, body.Tasks)
-	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].Order < tasks[j].Order })
+	//
+	// OrderSplitTasks is the ONE place that decides the batch order: it
+	// sorts by `order`, renumbers to a contiguous 1..N, and hands back the
+	// old→new ordinal mapping. The mapping is what makes the ordinal-based
+	// references (depends_on / the "互相参考" pairs) survive the sort — the
+	// client speaks in `order` numbers, the rows are stored in position
+	// order, and without the remap a non-contiguous `order` would attach
+	// every dependency to the wrong row.
+	tasks, ordinalRemap := service.OrderSplitTasks(body.Tasks)
 
 	ids := make([]string, len(tasks))
 	for i := range tasks {
-		if tasks[i].Order <= 0 {
-			tasks[i].Order = i + 1
-		}
 		ids[i] = util.NewID("req")
 		tasks[i].ID = ids[i]
 	}
@@ -663,7 +665,7 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	// real ids here.
 	edges := []model.DependencyEdge{}
 	for i, task := range tasks {
-		for _, dep := range task.DependsOn {
+		for _, dep := range service.RemapSplitOrdinals(task.DependsOn, ordinalRemap) {
 			// dep is an ordinal into the ordered task list.
 			idx := dep - 1
 			if idx < 0 || idx >= len(tasks) || idx == i {
@@ -698,8 +700,12 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	warnings := append([]string{}, stackWarnings...)
-	if len(body.References) > 0 {
-		if err := h.applySplitReferences(children, body.References); err != nil {
+	// The reference pairs speak the same ordinal language as depends_on, so
+	// they go through the same remap — otherwise a non-contiguous `order`
+	// would link the wrong pair of children.
+	refs := remapSplitReferences(body.References, ordinalRemap)
+	if len(refs) > 0 {
+		if err := h.applySplitReferences(children, refs); err != nil {
 			log.Printf("[split] %s: reference linking failed: %v", reqID, err)
 			warnings = append(warnings, "子需求已创建，但互相引用关系设置失败："+err.Error())
 		}
@@ -772,6 +778,25 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		"stack_base":  stackBase,
 		"pushed":      stackPushed,
 	})
+}
+
+// remapSplitReferences translates the "互相参考" pairs from the client's
+// ordinal space into the batch's position space.
+//
+// A pair whose ends don't survive the remap (pointing at a candidate that
+// isn't there) is dropped — a reference to a nonexistent sibling would make
+// SetReferences fail for the WHOLE batch.
+func remapSplitReferences(refs [][2]int, remap map[int]int) [][2]int {
+	out := make([][2]int, 0, len(refs))
+	for _, pair := range refs {
+		from, okFrom := remap[pair[0]]
+		to, okTo := remap[pair[1]]
+		if !okFrom || !okTo || from == to {
+			continue
+		}
+		out = append(out, [2]int{from, to})
+	}
+	return out
 }
 
 // applySplitReferences writes the user-picked "互相参考" links.

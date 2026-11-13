@@ -165,6 +165,36 @@ function lines(text: string): string[] {
 }
 
 /**
+ * Puts the candidates into their display order and renumbers them to a
+ * contiguous 1..N — the ordinal space the dependency edges and the
+ * "互相参考" pairs speak.
+ *
+ * The renumbering has to carry the dependencies along. The model's `order`
+ * values may be non-contiguous (1, 3, 7), and "depends_on: [3]" then names
+ * a different row once the list is renumbered — the dependency would land on
+ * the wrong candidate. The backend applies the same remapping
+ * (service.OrderSplitTasks), so both sides agree on which row an ordinal
+ * refers to.
+ */
+function orderRows(rows: Row[]): Row[] {
+  const sorted = [...rows].sort((a, b) => a.order - b.order);
+  // old ordinal → new ordinal. The first occurrence wins (a duplicated
+  // input ordinal is ambiguous; the backend resolves it the same way).
+  const remap = new Map<number, number>();
+  sorted.forEach((r, i) => {
+    if (!remap.has(r.order)) remap.set(r.order, i + 1);
+  });
+  return sorted.map((r, i) => ({
+    ...r,
+    order: i + 1,
+    dependsOn: r.dependsOn
+      .map((d) => remap.get(d))
+      .filter((d): d is number => d !== undefined && d !== i + 1)
+      .sort((a, b) => a - b),
+  }));
+}
+
+/**
  * Pulls the candidates out of a terminal frame's `result`.
  *
  * Three shapes are accepted on purpose:
@@ -514,8 +544,7 @@ export function RequirementSplitModal({
               setStage('config');
               return;
             }
-            const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
-            const ordered = next.map((r, i) => ({ ...r, order: i + 1 }));
+            const ordered = orderRows(tasks.map(toRow));
             setRows(ordered);
             // The model's "互相参考" judgement comes with the candidates: the
             // user cannot work this layer out on their own, so the model
@@ -616,8 +645,7 @@ export function RequirementSplitModal({
         return;
       }
       if (st.status === 'done' && st.candidates && st.candidates.length > 0) {
-        const next = st.candidates.map(toRow).sort((a, b) => a.order - b.order);
-        const ordered = next.map((r, i) => ({ ...r, order: i + 1 }));
+        const ordered = orderRows(st.candidates.map(toRow));
         setRows(ordered);
         // The restored run carries the model's reference judgement too —
         // closing and reopening the modal must not lose it.

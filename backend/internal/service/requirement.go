@@ -215,7 +215,14 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	// 其他场景维持原本的 done 沉底 + 标记置顶 + created_at DESC 行为。
 	// NULL 行（理论上 completed_at 永远会被 stamp 上，但兼容历史脏数据）
 	// 通过 CASE WHEN 显式排到末尾，跨 SQLite / MySQL / PostgreSQL 一致。
-	orderBy := "ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC"
+	//
+	// 末尾的 r.split_order ASC 是**拆分批次的顺序**兜底：同一批子需求共用
+	// 一个 created_at（一次事务一个 now），只按 created_at 排的话它们之间
+	// 的先后是未定义的（实际退化成按随机 req_<hex> id 排 —— 顺序会乱）。
+	// split_order 是批次内持久化的序号（1 起算），拿它做同 created_at 的
+	// 次级排序键，一批子需求在列表里就保持用户排好的顺序。split_order=0
+	// 的行（人工创建 / 历史数据）不受影响，仍按 id 兜底。
+	orderBy := "ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC, r.split_order ASC, r.id ASC"
 	if status == "done" {
 		orderBy = "ORDER BY CASE WHEN r.completed_at IS NULL THEN 1 ELSE 0 END ASC, r.completed_at DESC, r.id ASC"
 	}
@@ -248,7 +255,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
 			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count,"+
 			// qa_turn_count — how many stage-Q&A turns this requirement has been
@@ -273,7 +280,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
@@ -391,7 +398,10 @@ func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string
 	// as the main List endpoint floats marked rows above unmarked ones in
 	// the calendar grid (consistency with the requirements list view).
 	q := "SELECT id, project_id, title, status, priority, kind, created_at, updated_at, completed_at, planned_start_at, planned_end_at, marks FROM requirements " +
-		where + " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN marks IS NULL OR marks = '' OR marks = '[]' THEN 1 ELSE 0 END ASC, created_at DESC"
+		// split_order ASC is the same tie-breaker the main List uses: a split
+		// batch shares one created_at, so without it the batch's rows come
+		// back in an arbitrary order.
+		where + " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN marks IS NULL OR marks = '' OR marks = '[]' THEN 1 ELSE 0 END ASC, created_at DESC, split_order ASC, id ASC"
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -468,12 +478,12 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,

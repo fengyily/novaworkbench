@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,76 @@ import (
 // ErrDependencyCycle — 依赖边成环。
 var ErrDependencyCycle = errors.New("requirement dependency cycle detected")
 
+// OrderSplitTasks 把候选子需求整理成**展示顺序**，并把序号归一成连续的
+// 1..N（批次内序号空间）。
+//
+// 返回值：
+//   - ordered —— 按展示顺序排好的副本，每条任务的 Order 已被改写成它的新
+//     序号（1 起算、连续、无重复）。
+//   - remap —— **旧序号 → 新序号**的映射。调用方用它把「按序号表达」的
+//     引用翻译到新序号空间：depends_on（前置依赖）与 references（互相参考）。
+//     旧序号不存在于映射里 = 这个引用指向了不存在的候选，调用方应当丢掉它。
+//
+// 规则：
+//   - Order > 0 的按 Order 排序（稳定排序：Order 相同者保持输入顺序）。
+//   - Order 缺失 / 非正的，按**输入位置**补一个序号（与 prompt 归一化层
+//     和前端的处理口径一致）。
+//   - 排序后统一重编号为 1..N —— 于是「序号」在整条链路上只有一个坐标系：
+//     模型输出 → 前端候选表 → 落库顺序 → 依赖标记，全都指向同一批行。
+//
+// 输入里出现**重复**的 Order 是自相矛盾的输入（同一个序号指向两行）：
+// 映射按**首次出现**为准，另一行指向的引用会被丢弃。真实链路不会走到
+// 这条分支 —— prompt 归一化层与前端都保证序号连续唯一。
+func OrderSplitTasks(tasks []model.SplitTaskInput) ([]model.SplitTaskInput, map[int]int) {
+	ordered := make([]model.SplitTaskInput, len(tasks))
+	copy(ordered, tasks)
+
+	// 缺失的序号按输入位置补齐。
+	for i := range ordered {
+		if ordered[i].Order <= 0 {
+			ordered[i].Order = i + 1
+		}
+	}
+	// 稳定排序：Order 相同者保持输入顺序。
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Order < ordered[j].Order })
+
+	// 重编号为 1..N，并记录旧序号 → 新序号。
+	remap := make(map[int]int, len(ordered))
+	for i := range ordered {
+		old := ordered[i].Order
+		if _, dup := remap[old]; !dup {
+			remap[old] = i + 1
+		}
+		ordered[i].Order = i + 1
+	}
+	return ordered, remap
+}
+
+// RemapSplitOrdinals 把一批「按序号表达」的引用翻译到新的序号空间。
+//
+// 指向不存在序号的引用会被丢掉（返回的切片里没有它）—— 一个指向虚空的
+// 前置依赖会让子需求永远卡在「前置未完成」，比没有依赖更糟。
+func RemapSplitOrdinals(in []int, remap map[int]int) []int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(in))
+	seen := map[int]struct{}{}
+	for _, ord := range in {
+		next, ok := remap[ord]
+		if !ok {
+			continue
+		}
+		if _, dup := seen[next]; dup {
+			continue
+		}
+		seen[next] = struct{}{}
+		out = append(out, next)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // SplitCreateOpts — CreateChildren 的可选参数。
 type SplitCreateOpts struct {
 	// BatchID — 本次拆分的批次 id。留空则新铸一个 spb_<hex>。
@@ -59,9 +130,14 @@ const splitMaxTasks = 12
 
 // CreateChildren —— 在一个事务里把候选子需求落库。
 //
-// parent 必须是主需求（顶层需求）。tasks 是已经按顺序整理好的候选；deps 是
-// 依赖边（调用方负责把「批次内序号」翻译成真实 id —— 边必须和子需求行在
-// 同一个事务里插，所以 id 要先铸好）。
+// parent 必须是主需求（顶层需求）。tasks 是候选；deps 是依赖边（调用方负责
+// 把「批次内序号」翻译成真实 id —— 边必须和子需求行在同一个事务里插，所以
+// id 要先铸好）。
+//
+// **顺序**：函数内部用 OrderSplitTasks 把候选排成展示顺序，并把这一顺序
+// 写进 requirements.split_order（1 起算）。调用方**必须**用同一个
+// OrderSplitTasks 排过一遍再铸 id —— 排序是幂等的（对已排好的输入是恒等
+// 变换），所以两边结果一致，id 与序号永远对齐。
 //
 // 返回落库后的子需求行（读回，保证 base_branch / split_batch_id 等字段完整）。
 func (s *RequirementService) CreateChildren(
@@ -85,6 +161,11 @@ func (s *RequirementService) CreateChildren(
 	if err := s.validateParentTarget(parent.ProjectID, parent.ID, true); err != nil {
 		return nil, err
 	}
+
+	// 展示顺序 = 落库顺序。序号在这里被归一成连续的 1..N，并写进
+	// split_order —— 一批子需求共用同一个 created_at，没有这一列的话顺序
+	// 只能靠随机 id 排，回来就是乱的。
+	tasks, _ = OrderSplitTasks(tasks)
 
 	base := strings.TrimSpace(opts.BaseBranch)
 	if base == "" {
@@ -128,11 +209,11 @@ func (s *RequirementService) CreateChildren(
 			}
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at,parent_id,base_branch,base_branch_source,split_batch_id,dev_delegated)
-			 VALUES (?,?,?,?,'draft','medium','requirement',?,'[]','[]','user','',?,0,?,?,?,?,?,?,0)`,
+			`INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at,parent_id,base_branch,base_branch_source,split_batch_id,dev_delegated,split_order)
+			 VALUES (?,?,?,?,'draft','medium','requirement',?,'[]','[]','user','',?,0,?,?,?,?,?,?,0,?)`,
 			ids[i], parent.ProjectID, strings.TrimSpace(task.Title), buildSplitDescription(task),
 			criteria, boolToInt(skipAnalysis), now, now, parent.ID,
-			base, model.BaseSourceParent, batchID); err != nil {
+			base, model.BaseSourceParent, batchID, i+1); err != nil {
 			return nil, fmt.Errorf("split: insert sub-requirement %d: %w", i, err)
 		}
 	}
@@ -315,15 +396,23 @@ func checkDependencyAcyclic(nodeIDs []string, deps []model.DependencyEdge) error
 	return nil
 }
 
-// ListChildren returns the direct children of a requirement, oldest first.
-// The children of a split are siblings (same parent_id) — this is the list
-// the master detail page renders.
+// ListChildren returns the direct children of a requirement, in the order the
+// user arranged them.
+//
+// 排序规则：**批次序号优先**。split_order > 0 的行（拆分产物）按序号升序，
+// split_order = 0 的行（人工创建 / 历史数据）排在后面并按创建时间兜底。
+//
+// 为什么不能只按 created_at：一次拆分的一批子需求**共用同一个 created_at**
+//（一个事务、一个 now），所以「按创建时间排」在批内是未定义的 —— 实际退化成
+// 按随机 req_<hex> id 排，子需求回来时顺序是乱的，依赖标记（「依赖 ②」）也
+// 跟着指错行。split_order 是批次顺序唯一的持久化落点。
 func (s *RequirementService) ListChildren(parentID string) ([]*model.Requirement, error) {
 	if strings.TrimSpace(parentID) == "" {
 		return []*model.Requirement{}, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT id FROM requirements WHERE parent_id = ? ORDER BY created_at, id`, parentID)
+		`SELECT id FROM requirements WHERE parent_id = ?
+		 ORDER BY CASE WHEN split_order > 0 THEN 0 ELSE 1 END ASC, split_order ASC, created_at ASC, id ASC`, parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -358,12 +447,15 @@ func (s *RequirementService) ListChildren(parentID string) ([]*model.Requirement
 // A prerequisite that was deleted is filtered out by the JOIN (its row is
 // gone) — and the delete path cleans both edge directions, so a dangling edge
 // cannot block the gate forever.
+//
+// 前置依赖按**批次序号**排序（split_order），与子需求列表同序 —— 用户在
+// 拆分预览里看到的「① → ② → ③」在「还差哪些前置」里也是同一个顺序。
 func (s *RequirementService) UnmetDependencies(reqID string) ([]*model.Requirement, error) {
 	rows, err := s.db.Query(
 		`SELECT r.id FROM requirements r
 		 JOIN requirement_dependencies d ON d.depends_on_id = r.id
 		 WHERE d.requirement_id = ? AND r.status != 'done'
-		 ORDER BY r.created_at, r.id`, reqID)
+		 ORDER BY CASE WHEN r.split_order > 0 THEN 0 ELSE 1 END ASC, r.split_order ASC, r.created_at ASC, r.id ASC`, reqID)
 	if err != nil {
 		return nil, err
 	}

@@ -198,6 +198,47 @@ func TestNormalizeSplitTasks_ReassignsMissingOrder(t *testing.T) {
 	}
 }
 
+// The ordinal space must be CONTIGUOUS — the model may hand out 1, 3, 7, but
+// "depends_on: [3]" then has no single meaning: the model counts by its own
+// `order`, the frontend counts by position, the database stores by position.
+// Renumbering to 1..N (and translating the references along) is what keeps
+// the three in agreement.
+func TestNormalizeSplitOutput_RenumbersToContiguousOrdinals(t *testing.T) {
+	raw := `{"tasks":[
+		{"title":"C","order":7,"depends_on":[5]},
+		{"title":"A","order":2,"depends_on":[]},
+		{"title":"B","order":5,"depends_on":[2]}
+	],"references":[{"from":5,"to":7,"reason":"B 与 C 共享同一份协议"}]}`
+	out := NormalizeSplitOutput(raw)
+	if len(out.Tasks) != 3 {
+		t.Fatalf("got %d tasks, want 3", len(out.Tasks))
+	}
+	wantTitles := []string{"A", "B", "C"}
+	for i, task := range out.Tasks {
+		if task.Title != wantTitles[i] {
+			t.Errorf("task %d: title = %q, want %q", i, task.Title, wantTitles[i])
+		}
+		if task.Order != i+1 {
+			t.Errorf("task %d: order = %d, want %d (contiguous 1..N)", i, task.Order, i+1)
+		}
+	}
+	// B (old order 5 → new 2) depended on A (old order 2 → new 1).
+	if len(out.Tasks[1].DependsOn) != 1 || out.Tasks[1].DependsOn[0] != 1 {
+		t.Errorf("B depends_on = %v, want [1]", out.Tasks[1].DependsOn)
+	}
+	// C (old order 7 → new 3) depended on B (old order 5 → new 2).
+	if len(out.Tasks[2].DependsOn) != 1 || out.Tasks[2].DependsOn[0] != 2 {
+		t.Errorf("C depends_on = %v, want [2]", out.Tasks[2].DependsOn)
+	}
+	// The reference pair follows the same renumbering (5,7 → 2,3).
+	if len(out.References) != 1 {
+		t.Fatalf("references = %v, want 1", out.References)
+	}
+	if out.References[0].From != 2 || out.References[0].To != 3 {
+		t.Errorf("reference = %d→%d, want 2→3", out.References[0].From, out.References[0].To)
+	}
+}
+
 // The assembled description is what the child's execution agent reads. It
 // must carry every section, and empty sections must be omitted rather than
 // left as dangling headings.

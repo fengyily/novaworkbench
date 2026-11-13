@@ -273,6 +273,84 @@ func TestConfirmSplit_PersistsChildrenAndEdges(t *testing.T) {
 	}
 }
 
+// The batch order is the ONE thing that tells the user which child came
+// first, and the dependency edges have to land on the same rows the user
+// numbered.
+//
+// The candidates come in with non-contiguous `order` values (3, 1, 2 — the
+// model is free to do that) and the edges are expressed in that same ordinal
+// space. The children must land as 1, 2, 3 with the edges attached to the
+// rows they named: 第三 depends on 第二, 第二 depends on 第一.
+func TestConfirmSplit_PersistsBatchOrderAndKeepsEdgesAligned(t *testing.T) {
+	h, reqSvc, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+
+	body := `{"tasks":[
+		{"title":"第三","order":3,"depends_on":[2]},
+		{"title":"第一","order":1,"depends_on":[]},
+		{"title":"第二","order":2,"depends_on":[1]}
+	]}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_m/split/confirm", strings.NewReader(body))
+	req.SetPathValue("id", "req_m")
+	rec := httptest.NewRecorder()
+	h.ConfirmSplit(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			Children []struct {
+				ID        string   `json:"id"`
+				Title     string   `json:"title"`
+				DependsOn []string `json:"depends_on"`
+			} `json:"children"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	children := resp.Data.Children
+	if len(children) != 3 {
+		t.Fatalf("got %d children, want 3", len(children))
+	}
+	// The response is in the batch order (the order the candidates were
+	// confirmed in), so the frontend can render the list as-is.
+	wantTitles := []string{"第一", "第二", "第三"}
+	for i, c := range children {
+		if c.Title != wantTitles[i] {
+			t.Errorf("child %d: title = %q, want %q", i, c.Title, wantTitles[i])
+		}
+	}
+	// The edges follow the rows: 第二 depends on 第一, 第三 depends on 第二.
+	if len(children[0].DependsOn) != 0 {
+		t.Errorf("第一 depends_on = %v, want none", children[0].DependsOn)
+	}
+	if len(children[1].DependsOn) != 1 || children[1].DependsOn[0] != children[0].ID {
+		t.Errorf("第二 depends_on = %v, want [%s]", children[1].DependsOn, children[0].ID)
+	}
+	if len(children[2].DependsOn) != 1 || children[2].DependsOn[0] != children[1].ID {
+		t.Errorf("第三 depends_on = %v, want [%s]", children[2].DependsOn, children[1].ID)
+	}
+
+	// The order is persisted, and the read path hands the children back in it.
+	listed, err := reqSvc.ListChildren("req_m")
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	if len(listed) != 3 {
+		t.Fatalf("ListChildren returned %d children, want 3", len(listed))
+	}
+	for i, c := range listed {
+		if c.Title != wantTitles[i] {
+			t.Errorf("listed child %d: title = %q, want %q (order not preserved)", i, c.Title, wantTitles[i])
+		}
+		if c.SplitOrder != i+1 {
+			t.Errorf("listed child %d: split_order = %d, want %d", i, c.SplitOrder, i+1)
+		}
+	}
+}
+
 // A master that already has its own development branch hands that branch
 // down as the children's base — the stacked-PR stack bottom.
 func TestConfirmSplit_ChildrenBaseOnTheMasterBranch(t *testing.T) {

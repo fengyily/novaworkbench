@@ -295,7 +295,79 @@ func NormalizeSplitOutput(raw string) SplitOutput {
 		out.Tasks = out.Tasks[:splitMaxTasks]
 	}
 
-	out.References = normalizeSplitReferences(envelope.References, len(out.Tasks))
+	// 归一成**连续**的 1..N 序号空间。
+	//
+	// 模型的 order 未必连续（可能给 1、3、7），而 depends_on 与 references
+	// 都是按 order 编号的 —— 序号不连续时，「依赖 3」指向的是哪一行取决于
+	// 读的人怎么解释序号空间：模型以为 3 是第三个，前端以为是第二个，落库
+	// 时又按位置算 —— 三套坐标系必然对不上，依赖会挂到错误的行上。
+	//
+	// 所以这里把序号重编号成连续的 1..N，并把 depends_on / references 一起
+	// 翻译到新空间：从此「序号」在整条链路上只有**一个**含义 —— 候选表里的
+	// 第几行。
+	remap := renumberSplitTasks(out.Tasks)
+	for i := range out.Tasks {
+		out.Tasks[i].DependsOn = remapOrdinals(out.Tasks[i].DependsOn, remap)
+	}
+
+	out.References = normalizeSplitReferences(remapSplitRefs(envelope.References, remap), len(out.Tasks))
+	return out
+}
+
+// renumberSplitTasks rewrites the tasks' Order to a contiguous 1..N (in the
+// current slice order) and returns the old→new ordinal mapping.
+//
+// Duplicated input orders are ambiguous (one ordinal pointing at two rows);
+// the mapping keeps the FIRST occurrence, so a reference to the duplicate
+// resolves to that first row instead of vanishing.
+func renumberSplitTasks(tasks []SplitTask) map[int]int {
+	remap := make(map[int]int, len(tasks))
+	for i := range tasks {
+		old := tasks[i].Order
+		if _, dup := remap[old]; !dup {
+			remap[old] = i + 1
+		}
+		tasks[i].Order = i + 1
+	}
+	return remap
+}
+
+// remapOrdinals translates ordinals from the old space into the new one.
+// Ordinals with no counterpart are dropped.
+func remapOrdinals(in []int, remap map[int]int) []int {
+	out := []int{}
+	seen := map[int]struct{}{}
+	for _, ord := range in {
+		next, ok := remap[ord]
+		if !ok {
+			continue
+		}
+		if _, dup := seen[next]; dup {
+			continue
+		}
+		seen[next] = struct{}{}
+		out = append(out, next)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+// remapSplitRefs translates the reference pairs into the new ordinal space.
+// A pair whose ends don't survive the remap is dropped.
+func remapSplitRefs(in []SplitReference, remap map[int]int) []SplitReference {
+	out := make([]SplitReference, 0, len(in))
+	for _, ref := range in {
+		from, okFrom := remap[ref.From]
+		to, okTo := remap[ref.To]
+		if !okFrom || !okTo {
+			continue
+		}
+		out = append(out, SplitReference{From: from, To: to, Reason: ref.Reason})
+	}
 	return out
 }
 
