@@ -38,6 +38,8 @@ import {
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { toRFC3339Local, WEEK_LABELS } from '../utils/time';
 
 // WEEK_LABELS is Monday-first (一二三四五六日); the backend recur_days uses
@@ -140,6 +142,21 @@ export function ScheduleModal({
   // '' = origin clone/push (default), 'local' = git bundle over SFTP.
   const [syncMode, setSyncMode] = useState<'' | 'local'>('');
 
+  // Reasoning-effort tiers (claude CLI --effort) for the two stages.
+  //
+  // The hook loads the configured per-stage defaults asynchronously, so
+  // each picker's state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage(...)` instead would
+  // freeze the shipped fallback on the first render and silently override
+  // a configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [designEffort, setDesignEffort] = useState<EffortTier | null>(null);
+  const designEffortValue = designEffort ?? effortDefaults.forStage('design');
+  const [codingEffort, setCodingEffort] = useState<EffortTier | null>(null);
+  const codingEffortValue = codingEffort ?? effortDefaults.forStage('coding');
+
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -216,6 +233,21 @@ export function ScheduleModal({
       if (isMerged) {
         body.coding_model = codingModel || undefined;
         body.coding_agent_server_id = codingAgentServerId || undefined;
+      }
+      // Reasoning-effort tiers (claude CLI --effort). The design half's
+      // tier rides in `effort`, the coding half's in `coding_effort` — the
+      // same split the model fields use.
+      //
+      // A coding-only schedule has no design half: its single tier goes
+      // into the primary `effort` slot (which is where its model goes in
+      // that mode too) and is mirrored into `coding_effort`, so the
+      // backend finds the tier under either name.
+      if (isCoding && !isDesign) {
+        body.effort = codingEffortValue;
+        body.coding_effort = codingEffortValue;
+      } else {
+        body.effort = designEffortValue;
+        if (isMerged) body.coding_effort = codingEffortValue;
       }
       const created = await schedulesApi.create(body);
       onScheduled(created);
@@ -386,6 +418,19 @@ export function ScheduleModal({
                 </small>
               </div>
 
+              {/* Reasoning-effort picker for the design stage — sits right
+                  below the model picker, the other per-stage knob that
+                  decides how the architect run thinks. */}
+              <div className="modal-field">
+                <EffortBar
+                  id="sched-design-effort"
+                  label={t('components.effortBar.ariaLabel')}
+                  value={designEffortValue}
+                  onChange={setDesignEffort}
+                  disabled={!effortDefaults.enabled || submitting}
+                />
+              </div>
+
               <div className="modal-field modal-check-row">
                 <label>
                   <input
@@ -482,6 +527,19 @@ export function ScheduleModal({
                 <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
                   {t('schedules.modal.modelHint')}
                 </small>
+              </div>
+
+              {/* Reasoning-effort picker for the coding stage — mirrors the
+                  design-stage picker above: the tier this stage's run
+                  thinks at. */}
+              <div className="modal-field">
+                <EffortBar
+                  id="sched-coding-effort"
+                  label={t('components.effortBar.ariaLabel')}
+                  value={codingEffortValue}
+                  onChange={setCodingEffort}
+                  disabled={!effortDefaults.enabled || submitting}
+                />
               </div>
 
               {isMerged && (

@@ -44,6 +44,9 @@
 //                       (drop only the user source).
 //   addDirs        → --add-dir <dir>... (directories the session is granted
 //                       read access to; the paths are resolved on THIS host)
+//   effort         → --effort <level> (reasoning-depth tier: low / medium /
+//                       high / xhigh / max; omitted when the local claude
+//                       build doesn't know the flag)
 //
 // Two reliability layers:
 //   1) Preflight — before invoking claude we spawn 'claude --print ping'
@@ -180,6 +183,62 @@ function resolveClaudeCommand(claudeBin, extraPaths, baseEnv) {
 // Running the worker directly via 'npm start' in dev reports the raw
 // placeholder, which is harmless — no dev flow depends on this value.
 const WORKER_VERSION = '__WORKER_VERSION__';
+
+// EFFORT_TIERS is the CLI's own whitelist for --effort. Anything outside it
+// is dropped rather than forwarded: the CLI aborts the whole run on an
+// unknown option value, so one bad tier would kill a coding job.
+const EFFORT_TIERS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+// normalizeEffort trims a tier and returns it only when the CLI would
+// accept it. '' means "don't pass --effort at all".
+//
+// The whitelist is case-SENSITIVE on purpose, and it matches the Go side's
+// llm.NormalizeEffort exactly: the CLI's value domain is all-lowercase
+// literals, so "HIGH" is an unknown tier (dropped) rather than something to
+// quietly rewrite into "high". Two implementations of the same whitelist
+// that disagree on case would be a silent cross-boundary divergence.
+function normalizeEffort(value) {
+  if (typeof value !== 'string') return '';
+  const v = value.trim();
+  return EFFORT_TIERS.has(v) ? v : '';
+}
+
+// effortSupportCache memoizes "does the claude on THIS host understand
+// --effort?", keyed by the resolved binary path. The agent host's claude
+// version is independent of the backend's, so the worker probes for itself.
+const effortSupportCache = new Map();
+
+// cliSupportsEffort asks the local claude binary whether it accepts
+// --effort. An older build aborts the whole run with "unknown option", so
+// the flag is dropped instead of killing the job.
+//
+// Failure policy: FAIL OPEN (assume supported) when the probe itself fails.
+// A probe failure almost always means the CLI is unusable anyway, and the
+// run then fails with a far more accurate error than a silently dropped
+// feature would suggest. The user-facing escape hatch is the effort.enabled
+// master switch in NovaWorkbench's settings page.
+function cliSupportsEffort(cmd, env) {
+  if (!cmd) return true;
+  const key = String(cmd);
+  if (effortSupportCache.has(key)) {
+    return effortSupportCache.get(key);
+  }
+  let supported = true;
+  try {
+    const out = execFileSync(cmd, ['--help'], {
+      encoding: 'utf8',
+      timeout: 10000,
+      env: env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    supported = String(out).includes('--effort');
+  } catch (e) {
+    // Probe failed → fail open (see above).
+    supported = true;
+  }
+  effortSupportCache.set(key, supported);
+  return supported;
+}
 
 const app = express();
 // 50MB cap: the prompt can carry pre-read project context (~40KB) plus
@@ -330,6 +389,30 @@ app.post('/v1/run', async (req, res) => {
   // host's CLI defaults, which a third-party endpoint may not serve).
   const settingsArg = buildSettingsArg(opts);
 
+  // Resolve the claude command ONCE and use the same {cmd, env} for the
+  // effort probe, the preflight probe and the real run — otherwise a
+  // preflight that passed via the absolute path could be followed by a real
+  // run that fell back to PATH (or vice versa), and the probe would stop
+  // being predictive of the thing it's supposed to gate.
+  const claudeCmd = resolveClaudeCommand(opts.claudeBin, opts.extraPaths, childEnv);
+  if (claudeCmd.cmd !== 'claude') {
+    res.write(JSON.stringify({ type: 'log', content: '使用下发的 claude 绝对路径: ' + claudeCmd.cmd }) + '\n');
+  }
+
+  // Reasoning-depth capability probe. --effort is a fairly recent CLI flag;
+  // an older build aborts the whole run with "unknown option '--effort'".
+  // Ask the binary once (cached per path) and drop the flag when it isn't
+  // there, so a reasoning-depth knob can never take down a coding job.
+  // The agent host's claude version is independent of the backend's, which
+  // is why the worker probes for itself instead of trusting the backend's
+  // answer.
+  if (opts.effort && !cliSupportsEffort(claudeCmd.cmd, claudeCmd.env)) {
+    console.error('[nova-agent-worker] claude 不支持 --effort，本次不下发该参数');
+    res.write(JSON.stringify({ type: 'log', content: '当前 claude 版本不支持 --effort，本次使用 CLI 默认推理档位' }) + '\n');
+    if (typeof res.flush === 'function') res.flush();
+    opts.effort = '';
+  }
+
   // Log BOTH the preflight command and the planned real-run command up front
   // — before any spawn. The previous shape only logged after preflight
   // succeeded, so a preflight failure (timeout / unrecognized_model /
@@ -339,28 +422,18 @@ app.post('/v1/run', async (req, res) => {
   // missing. We now write three lines to stderr + the NDJSON stream so a
   // failure shows the exact arg list the CLI was invoked with.
   const realArgs = buildClaudeArgs(opts, settingsArg);
-  const realRendered = renderCommand(realArgs);
   // The preflight uses its own (smaller) pingArgs list — render it the same
   // way so the logged command is copy-pasteable, then append the same
   // --settings JSON so the two logs diff cleanly on auth / base URL / model.
   const pingArgs = ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'];
   if (settingsArg) pingArgs.push('--settings', settingsArg);
   const pingRendered = renderCommand(pingArgs);
+  const realRendered = renderCommand(realArgs);
   console.error('[nova-agent-worker] exec preflight: ' + pingRendered);
   console.error('[nova-agent-worker] exec planned:  ' + realRendered);
   res.write(JSON.stringify({ type: 'log', content: '准备 preflight: ' + pingRendered }) + '\n');
   res.write(JSON.stringify({ type: 'log', content: '准备执行主命令: ' + realRendered }) + '\n');
   if (typeof res.flush === 'function') res.flush();
-
-  // Resolve the claude command ONCE and use the same {cmd, env} for both
-  // the preflight probe and the real run — otherwise a preflight that
-  // passed via the absolute path could be followed by a real run that
-  // fell back to PATH (or vice versa), and the probe would stop being
-  // predictive of the thing it's supposed to gate.
-  const claudeCmd = resolveClaudeCommand(opts.claudeBin, opts.extraPaths, childEnv);
-  if (claudeCmd.cmd !== 'claude') {
-    res.write(JSON.stringify({ type: 'log', content: '使用下发的 claude 绝对路径: ' + claudeCmd.cmd }) + '\n');
-  }
 
   const pf = await preflight(opts.workDir, claudeCmd, settingsArg);
   if (pf.ok && pf.warning) {
@@ -989,6 +1062,7 @@ function buildRunRequest(body) {
     workDir,
     prompt,
     model,
+    effort,
     systemPrompt,
     sessionId,
     resume,
@@ -1049,6 +1123,11 @@ function buildRunRequest(body) {
     workDir,
     prompt,
     model: model || '',
+    // effort is the reasoning-depth tier the CLI is invoked with
+    // (--effort <level>). It is validated against the CLI's own
+    // whitelist here so a malformed value can never reach argv — the CLI
+    // aborts the whole run on an unknown option.
+    effort: normalizeEffort(effort),
     systemPrompt: systemPrompt || '',
     sessionId: sessionId || '',
     resume: !!resume,
@@ -1251,6 +1330,23 @@ function buildClaudeArgs(opts, settingsArg) {
     args.push('--disallowedTools', opts.disallowedTools.join(' '));
   }
 
+  // --effort is the reasoning-depth tier (low|medium|high|xhigh|max). It is
+  // a plain CLI flag with no env equivalent (the model rides inside the
+  // --settings env block, but effort does not), so it has to be emitted here
+  // as a real argv element.
+  //
+  // Position matters: it must land BEFORE --add-dir, which is variadic and
+  // has to stay last in argv or it would swallow this flag as another
+  // directory value. The Go side (gateway.go streamArgs) uses the same
+  // order.
+  //
+  // The tier was already validated against the CLI's whitelist (and
+  // dropped entirely when the local claude build doesn't know the flag), so
+  // an empty value here simply means "don't pass it".
+  if (opts.effort) {
+    args.push('--effort', opts.effort);
+  }
+
   // --add-dir grants the session read access to directories outside its
   // working directory. It is a VARIADIC option (the CLI takes
   // '--add-dir <dir>...'), so it must be the LAST flag in argv — anything
@@ -1315,8 +1411,25 @@ function httpError(status, message) {
 // from NovaWorkbench, never directly from the network. Override via env if
 // a deployment really needs another bind (e.g. inside a container with port
 // mapped), but the safe default is loopback.
+//
+// NOVA_AGENT_WORKER_NO_LISTEN=1 keeps the process from binding the port.
+// It exists so the unit tests can import this module and exercise the pure
+// helpers (buildRunRequest / buildClaudeArgs) without a listener racing for
+// port 7000. Production never sets it — the systemd unit and the nohup
+// fallback both start the worker as "node server.mjs".
 const port = parseInt(process.env.NOVA_AGENT_WORKER_PORT ?? '7000', 10);
 const host = process.env.NOVA_AGENT_WORKER_HOST ?? '127.0.0.1';
-app.listen(port, host, () => {
-  console.log('nova-agent-worker listening on http://' + host + ':' + port);
-});
+if (process.env.NOVA_AGENT_WORKER_NO_LISTEN !== '1') {
+  app.listen(port, host, () => {
+    console.log('nova-agent-worker listening on http://' + host + ':' + port);
+  });
+}
+
+// Exported for the unit tests (agent-worker/server.test.mjs). The pure
+// helpers are what the tests need; they are also the parts whose contract
+// the Go side depends on (the argv order in particular).
+export {
+  buildRunRequest,
+  buildClaudeArgs,
+  normalizeEffort,
+};

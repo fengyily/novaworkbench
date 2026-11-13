@@ -52,6 +52,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ModelSelect from '../ModelSelect';
+import EffortBar, { type EffortTier } from '../EffortBar';
+import { useEffortDefaults } from '../../hooks/useEffortDefaults';
 import { ExecEnvSelect, type ExecEnvServer } from '../ExecEnvSelect';
 import { IconBranch, IconClock, IconHand, IconPlay, IconRocket } from '../icons';
 import { API_BASE, authedFetch } from '../../api/client';
@@ -202,6 +204,17 @@ export default function LaunchPlanSection({
   const [designModel, setDesignModel] = useState('');
   const [designClaudeConfigId, setDesignClaudeConfigId] = useState('');
   const [designAgentServerId, setDesignAgentServerId] = useState('');
+  // Reasoning-effort tiers (claude CLI --effort). The hook loads the
+  // configured per-stage defaults asynchronously, so the picker state stays
+  // `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage(...)` instead would
+  // freeze the shipped fallback on the first render and silently override
+  // a configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [designEffort, setDesignEffort] = useState<EffortTier | null>(null);
+  const designEffortValue = designEffort ?? effortDefaults.forStage('design');
   // Read-knowledge is a single checkbox (shared between the design and
   // coding stages in DesignCodingImmediateModal).
   const [readKnowledge, setReadKnowledge] = useState(false);
@@ -210,6 +223,8 @@ export default function LaunchPlanSection({
   const [codingModel, setCodingModel] = useState('');
   const [codingClaudeConfigId, setCodingClaudeConfigId] = useState('');
   const [codingAgentServerId, setCodingAgentServerId] = useState('');
+  const [codingEffort, setCodingEffort] = useState<EffortTier | null>(null);
+  const codingEffortValue = codingEffort ?? effortDefaults.forStage('coding');
   const [branchName, setBranchName] = useState('');
   // Shared base branch — single source of truth for BOTH the design and
   // coding stages. Mirrors how the backend treats it: spec.BaseBranch is
@@ -335,6 +350,12 @@ export default function LaunchPlanSection({
       coding_model: codingModel || undefined,
       coding_claude_config_id: codingClaudeConfigId || undefined,
       coding_agent_server_id: codingAgentServerId || undefined,
+      // Reasoning-effort tiers for the two stages (claude CLI --effort).
+      // Always sent concretely: the value already resolves to the
+      // configured stage default when the user hasn't picked one, and the
+      // backend drops it wholesale when the effort master switch is off.
+      design_effort: designEffortValue,
+      coding_effort: codingEffortValue,
       // no-branch 模式下 branch_name 必须为空(后端 wizard_coding.go 把空
       // 字符串 + no_branch=true 视为「在 base 分支直接开发」)。
       branch_name: noBranch ? '' : (branchName || undefined),
@@ -363,6 +384,10 @@ export default function LaunchPlanSection({
     codingModel, codingClaudeConfigId, codingAgentServerId,
     branchName, baseBranch, splitTasks, autoCommit, autoPush, autoCreatePR, readKnowledge,
     syncMode, devMode, noBranch,
+    // The resolved tiers, not the raw pick state: they also change when
+    // the effort defaults finish loading, and the spec must be re-emitted
+    // with the configured default then.
+    designEffortValue, codingEffortValue,
   ]);
 
   const fieldDisabled = !!disabled;
@@ -568,6 +593,19 @@ export default function LaunchPlanSection({
             </small>
           </div>
 
+          {/* Reasoning-effort picker for the design stage — sits right
+              below the model picker, the other per-stage knob that decides
+              how the architect run thinks. */}
+          <div className="modal-field">
+            <EffortBar
+              id="launch-plan-design-effort"
+              label={t('components.effortBar.ariaLabel')}
+              value={designEffortValue}
+              onChange={setDesignEffort}
+              disabled={!effortDefaults.enabled || fieldDisabled}
+            />
+          </div>
+
           <label className={`preflight-toggle ${readKnowledge ? 'is-checked' : ''}`}>
             <input
               type="checkbox"
@@ -720,6 +758,18 @@ export default function LaunchPlanSection({
             <small className="launch-plan-section__note">
               {t('schedules.modal.modelHint')}
             </small>
+          </div>
+
+          {/* Reasoning-effort picker for the coding stage — mirrors the
+              design-stage picker above. */}
+          <div className="modal-field">
+            <EffortBar
+              id="launch-plan-coding-effort"
+              label={t('components.effortBar.ariaLabel')}
+              value={codingEffortValue}
+              onChange={setCodingEffort}
+              disabled={!effortDefaults.enabled || fieldDisabled}
+            />
           </div>
 
           <div className="modal-field">

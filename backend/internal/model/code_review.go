@@ -65,6 +65,14 @@ type CodeReview struct {
 	// override → config default → "默认模型" literal) once a run starts, so
 	// the picker always shows what the last run actually used.
 	Model string `json:"model"`
+	// Effort is the review's reasoning-effort tier binding (claude CLI
+	// --effort): the user's pick from the Review toolbar when one was made,
+	// overwritten with the EFFECTIVE tier once a run starts, so the picker
+	// always shows what the last run actually used.
+	//
+	// 追问 (follow-up) and 「基于对话重新生成」 both resume this review's
+	// session and INHERIT this tier — they must not silently re-resolve it.
+	Effort         string `json:"effort"`
 	// ClaudeConfigID is the claude_configs row the gateway sources auth +
 	// base URL from. Empty = fall back to the reviewer role's binding, then
 	// the global active config.

@@ -161,6 +161,10 @@ type designRunParams struct {
 	// and a non-interactive run has nobody to make it.
 	AddDirs        []string
 	Model          string // 已经应用请求体覆盖
+	// Effort — the reasoning-effort tier (claude CLI --effort) for this
+	// design run. Resolved once in prepareArchitectDesign and carried here
+	// so the local and remote branches emit the SAME tier.
+	Effort         string
 	ClaudeConfigID string
 	ReadKnowledge  bool
 	// AgentServerID — agent_servers.id chosen in the design toolbar
@@ -208,6 +212,9 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this run. Empty = use the stage default.
+		Effort string `json:"effort"`
 		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
 		// empty = backend resolves via the priority chain in
 		// resolveConfigIDForRun.
@@ -252,6 +259,11 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	if writeIfAPIError(w, af) {
 		return
 	}
+	// The user's explicit reasoning-effort pick wins over the stage default
+	// prepareArchitectDesign resolved. Overwritten here (not threaded through
+	// the prepare signature) so the twelve test call sites stay untouched —
+	// same pattern as the Continue flag.
+	p.Effort = resolveEffort(h.llm, body.Effort, llm.StageDesign)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 	go h.execArchitectDesign(p, job, nil)
 }
@@ -516,7 +528,7 @@ func (h *WizardHandler) ImportDesignFile(w http.ResponseWriter, r *http.Request)
 // forward; empty falls back to project.DefaultBranch inside
 // prepareArchitectDesign. Same fallback chain as the HTTP path so a cron
 // user can override the base per-schedule without touching project settings.
-func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, baseBranch string, cb *runCallbacks) (string, error) {
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, baseBranch string, effort string, cb *runCallbacks) (string, error) {
 	// regenerate is reserved exclusively for the user-driven "重新生成"
 	// HTTP CTA in ArchitectDesign. Schedules treat every dispatch as a
 	// first-run / re-run, never a deliberate re-fork-from-scratch.
@@ -527,6 +539,12 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 	if af != nil {
 		return "", af
 	}
+	// The reasoning-effort tier picked when the schedule was created wins
+	// over the stage default prepareArchitectDesign resolved. Overwritten
+	// here (not threaded through the prepare signature) so the prepare
+	// function's test call sites stay untouched — same pattern as the
+	// Continue flag.
+	p.Effort = resolveEffort(h.llm, effort, llm.StageDesign)
 	go h.execArchitectDesign(p, job, cb)
 	return job.ID, nil
 }
@@ -862,6 +880,15 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// Align the gateway config with the picked model. See resolveConfigIDForRun.
 	claudeConfigID = h.resolveConfigIDForRun(claudeConfigIDOverride, model, claudeConfigID)
 	job.SetModel(model)
+	// Reasoning-effort tier for the design run. The design stage's shipped
+	// default is high — a technical plan is the one place where the deepest
+	// reasoning actually pays for itself.
+	//
+	// The HTTP handler OVERWRITES this with the user's explicit pick right
+	// after prepareArchitectDesign returns — the same "set it on the params
+	// after prepare" pattern the Continue flag uses, so the prepare signature
+	// (and its dozen test call sites) stay untouched.
+	effort := resolveEffort(h.llm, "", llm.StageDesign)
 
 	// Sub-requirement design needs the master's already-settled decisions in
 	// view. Built here (synchronously, next to the attachment manifest above
@@ -917,6 +944,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		DirsManifest:    dirsManifest,
 		AddDirs:         addDirs,
 		Model:           model,
+		Effort:          effort,
 		ClaudeConfigID:  claudeConfigID,
 		ReadKnowledge:   readKnowledge,
 		AgentServerID:   agentServerID,
@@ -1370,6 +1398,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			WorkDir:        workDir,
 			SystemPrompt:   p.SystemPrompt,
 			Model:          cliModelArg(model),
+			Effort:         p.Effort,
 			ClaudeConfigID: claudeConfigID,
 			SessionID:      sessionArg,
 			Resume:         sourceSID != "",
@@ -1644,6 +1673,10 @@ func (h *WizardHandler) finalizeArchitectRun(
 	// config dropdown, and the dev stage can fall back to a persisted config.
 	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
 		log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	}
+	// Same contract for the reasoning-effort tier: success path only.
+	if perr := h.reqSvc.UpdateArchitectEffort(id, p.Effort); perr != nil {
+		log.Printf("[architect-design] failed to persist architect_effort for %s: %v", id, perr)
 	}
 	if perr := h.reqSvc.UpdateArchitectConfig(id, p.ClaudeConfigID); perr != nil {
 		log.Printf("[architect-design] failed to persist architect_config_id for %s: %v", id, perr)

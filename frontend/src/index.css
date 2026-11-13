@@ -15,6 +15,29 @@
   --color-hover: #F1F5F9;
   --color-active: #EEF2FF;
 
+  /* ── Reasoning-effort ramp (claude CLI --effort) ──────────────────────
+     The 档位条 renders five segments in a light→deep indigo ramp, so the
+     control reads as an AXIS of reasoning depth rather than as five
+     unrelated buttons.
+
+     Every tier but `max` carries DARK text (--color-text, #1E293B) on its
+     fill: #1E293B scores ≈13:1 / 9.8:1 / 7.3:1 / 4.9:1 against the four
+     lighter fills, all above WCAG AA's 4.5:1. `max` is the only tier that
+     needs flipped text — white on #4F46E5 scores ≈6.3:1 — and it lands
+     exactly on the brand color, so "the deepest tier is the brand color"
+     reads as intentional.
+
+     The ramp is deliberately NOT the signal for the selected state: the
+     selection is carried by the underline + weight + position, so the
+     control stays readable for colour-blind and greyscale-print users
+     (see .effort-bar-segment.is-active). */
+  --effort-low: #EEF2FF;
+  --effort-medium: #C7D2FE;
+  --effort-high: #A5B4FC;
+  --effort-xhigh: #818CF8;
+  --effort-max: #4F46E5;
+  --effort-max-on: #FFFFFF;
+
   /* Mobile-only accents — warmer parchment surface + amber highlight for
      "AI working" pulse / key CTAs. Kept scoped so the desktop palette stays
      consistent (these are referenced only inside @media blocks below). */
@@ -1801,4 +1824,149 @@ select.form-input { cursor: pointer; }
 .project-table td.col-star {
   width: 36px;
   text-align: center;
+}
+
+/* ── Reasoning-effort bar (EffortBar) ─────────────────────────────────
+   The 档位条 is a five-segment control that reads as an AXIS of reasoning
+   depth: each segment is filled with its own tier's colour, so the strip
+   as a whole looks like a light→deep ramp.
+
+   Structure mirrors the existing segmented controls
+   (.sub-session-mode-*): a role="radiogroup" container holding one
+   <label> per option, each wrapping a visually-hidden radio input and a
+   text span. Reusing that shape is what keeps the new control from
+   reading as a foreign object next to the session-mode switch.
+
+   THE SELECTED STATE IS NOT CARRIED BY COLOUR ALONE. Three redundant
+   signals mark it: the 2px underline (position), the 700 weight (type),
+   and the raised segment (elevation). Colour-blind and greyscale-print
+   users therefore still see which tier is selected — the ramp only
+   communicates the ORDER of the axis.
+
+   The underline uses --color-text (#1E293B), which scores ≈14.6:1 against
+   the card background — far above the 3:1 WCAG 1.4.11 asks of a
+   non-text state indicator. */
+.effort-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.effort-bar-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+.effort-bar-segments {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  overflow: hidden;
+  width: fit-content;
+  max-width: 100%;
+}
+.effort-bar-segment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+/* Hairline between segments (not the first one) so the group reads as one
+   continuous ramp rather than five loose buttons. */
+.effort-bar-segment + .effort-bar-segment {
+  border-left: 1px solid rgba(30, 41, 59, 0.14);
+}
+/* The radio input is the accessible control; the visible affordance is
+   the segment itself. It stays in the DOM (not display:none) so keyboard
+   navigation and screen readers work, but is visually hidden. */
+.effort-bar-segment input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  pointer-events: none;
+}
+/* Focus ring on the SEGMENT, not the hidden input — the input can't show
+   a ring the user can see. */
+.effort-bar-segment:has(input:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+/* Each tier wears its own ramp colour. The text stays dark on the four
+   lighter fills (all ≥4.9:1 against --color-text); `max` is the only tier
+   that flips to white, and it sits on the brand colour. */
+.effort-bar-segment[data-tier="low"]    { background: var(--effort-low); }
+.effort-bar-segment[data-tier="medium"] { background: var(--effort-medium); }
+.effort-bar-segment[data-tier="high"]   { background: var(--effort-high); }
+.effort-bar-segment[data-tier="xhigh"]  { background: var(--effort-xhigh); }
+.effort-bar-segment[data-tier="max"] {
+  background: var(--effort-max);
+  color: var(--effort-max-on);
+}
+.effort-bar-segment:hover:not(.is-active) {
+  filter: brightness(0.96);
+}
+/* Selected: a deep underline under the segment, bold text, and a 1px lift.
+   Three signals, so the state survives greyscale and colour blindness. */
+.effort-bar-segment.is-active {
+  font-weight: 700;
+  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.16);
+}
+.effort-bar-segment.is-active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--color-text);
+}
+.effort-bar-segment[data-tier="max"].is-active::after {
+  background: var(--effort-max-on);
+}
+.effort-bar-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  padding-left: 2px;
+}
+/* Compact variant for toolbars — the bar is ~200px wide at the default
+   size, which is too much to drop into a row that already carries a model
+   picker and an environment picker. */
+.effort-bar--sm .effort-bar-segment {
+  padding: 4px 7px;
+  font-size: 11px;
+}
+.effort-bar--sm .effort-bar-desc { font-size: 11.5px; }
+/* Disabled (the master switch is off, or the surrounding form is busy). */
+.effort-bar.is-disabled .effort-bar-segments {
+  opacity: 0.5;
+  filter: grayscale(0.6);
+}
+.effort-bar.is-disabled .effort-bar-segment {
+  cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+  /* On narrow screens the ramp is allowed to shrink before it wraps —
+     the five tiers keep their order, which is what carries the meaning. */
+  .effort-bar-segments {
+    width: 100%;
+  }
+  .effort-bar-segment {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 6px 4px;
+  }
 }

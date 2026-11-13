@@ -39,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
@@ -109,6 +110,19 @@ func NewRequirementReviewHandler(
 	}
 }
 
+// gateway returns the claude gateway used to resolve reasoning-effort tiers.
+//
+// The requirement-level Review drives its rounds THROUGH the SubTaskRunner,
+// which owns the gateway. Asking the runner for it keeps both sides on one
+// instance — and therefore on one effort provider and one settings snapshot
+// — without adding an eleventh constructor parameter to either type.
+func (h *RequirementReviewHandler) gateway() *llm.Gateway {
+	if h == nil || h.runner == nil {
+		return nil
+	}
+	return h.runner.Gateway()
+}
+
 // StartRequirementReviewReq is the body of POST /api/requirements/{id}/reviews.
 //
 // It is deliberately a separate type from the project-level StartReviewReq:
@@ -135,6 +149,10 @@ type StartRequirementReviewReq struct {
 	// SessionMode is "with_context" (default: new session + requirement
 	// context) or "fork" (inherit the developer's coding session).
 	SessionMode string `json:"session_mode"`
+	// Effort is the reasoning-effort tier (claude CLI --effort). Empty =
+	// the 「其他任务」 stage default. A Review grades other people's work,
+	// so it belongs to 「其他任务」 rather than 「开发实现」.
+	Effort string `json:"effort"`
 }
 
 // StartReview creates the review session + its sub-task and starts the run.
@@ -192,6 +210,7 @@ func (h *RequirementReviewHandler) StartReview(w http.ResponseWriter, r *http.Re
 		Title:          reviewTitle(req, body.Description),
 		Description:    body.Description,
 		Model:          modelName,
+		Effort:         resolveEffort(h.gateway(), body.Effort, llm.StageOther),
 		ClaudeConfigID: configID,
 		CreatedBy:      currentUserID(r),
 	})
@@ -305,6 +324,11 @@ type CreateFixesReq struct {
 	// Severities filters the batch mode. Empty = ["P0", "P1"] (P3 findings
 	// are nits nobody files).
 	Severities []string `json:"severities"`
+	// Effort is the reasoning-effort tier (claude CLI --effort) the fix
+	// children run at. Empty = the 「开发实现」 stage default — a fix writes
+	// code, so it belongs to the coding stage even though the finding it
+	// answers came from a Review.
+	Effort string `json:"effort"`
 }
 
 // CreateFixes turns a Review's findings into fix sub-tasks.
@@ -426,6 +450,9 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 				fmt.Sprintf("为 %s 建修复子任务失败: %v", it.ref, cerr))
 			return
 		}
+		// A fix writes code → 「开发实现」 stage, even though the finding it
+		// answers came from a Review.
+		stampSubTaskEffort(h.gateway(), h.subTaskSvc, st, body.Effort, llm.StageCoding)
 		created = append(created, st.ID)
 		// Dispatch it. The runner takes the per-project admission gate first
 		// and only flips the row to 'running' once it wins a slot, so several
@@ -445,6 +472,10 @@ type RecheckReq struct {
 	Model          string `json:"model"`
 	ClaudeConfigID string `json:"claude_config_id"`
 	RoleKey        string `json:"role_key"`
+	// Effort is the reasoning-effort tier (claude CLI --effort) for the
+	// next round. Empty = inherit the previous round's tier, else the
+	// 「其他任务」 stage default.
+	Effort string `json:"effort"`
 }
 
 // Recheck starts the next round of the Review chain.
@@ -497,6 +528,13 @@ func (h *RequirementReviewHandler) Recheck(w http.ResponseWriter, r *http.Reques
 	if pickedConfig == "" {
 		pickedConfig = strings.TrimSpace(prev.ClaudeConfigID)
 	}
+	// The reasoning depth carries over from the previous round unless the
+	// user picked another one: a 回归 Review grades the same kind of work
+	// and should do it at the same depth, so the chain stays comparable.
+	effortPick := strings.TrimSpace(body.Effort)
+	if effortPick == "" {
+		effortPick = strings.TrimSpace(prev.Effort)
+	}
 	persona, modelName, configID, err := h.resolveReviewIdentity(roleKey, pickedModel, pickedConfig)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
@@ -519,6 +557,7 @@ func (h *RequirementReviewHandler) Recheck(w http.ResponseWriter, r *http.Reques
 		Title:          prev.Title,
 		Description:    prev.Description,
 		Model:          modelName,
+		Effort:         resolveEffort(h.gateway(), effortPick, llm.StageOther),
 		ClaudeConfigID: configID,
 		CreatedBy:      currentUserID(r),
 	})
@@ -772,6 +811,10 @@ func (h *RequirementReviewHandler) launchReview(
 		configIDOverride:     configID,
 		fork:                 true,
 		freshSession:         sessionMode != model.SubTaskSessionModeFork,
+		// The Review grades other people's work → 「其他任务」 stage. The
+		// tier is resolved once, here, and carried on the row so the
+		// sub-task card and any re-run show what actually ran.
+		effort:             rv.Effort,
 		// 'full', not 'auto': the auto heuristic would look at the (empty)
 		// body and pick 'brief', which would stamp a misleading chip on the
 		// row. A Review always produces a full report.

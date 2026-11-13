@@ -148,6 +148,15 @@ type subTaskRunSpec struct {
 	parentSourceSID string
 	// reportMode is the report-detail policy (auto / brief / full).
 	reportMode string
+	// effort is the reasoning-effort tier (claude CLI --effort) the user
+	// picked for this run. Empty = fall back to the stage default for the
+	// sub-task's kind (see subTaskEffortStage).
+	//
+	// It lives on the spec rather than on Run's positional signature: Run
+	// already takes 13 positional arguments and is called from a dozen
+	// places. The plain path leaves it empty and lets the stage default
+	// apply; the Review path (which already builds a spec) fills it in.
+	effort string
 
 	// ── Review-only fields ────────────────────────────────────────────────
 	// taskKind is model.SubTaskKindCode (default) or model.SubTaskKindReview.
@@ -595,6 +604,22 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 	r.remoteCoding = fn
 }
 
+// Gateway exposes the claude gateway the runner dispatches with.
+//
+// The requirement-level Review handler drives its rounds THROUGH this
+// runner, but it still has to resolve the reasoning-effort tier (the
+// gateway owns the "user pick > configured stage default > built-in
+// default" chain). Rather than adding an eleventh constructor parameter to
+// both types, the handler asks the runner for the gateway it already uses —
+// so both sides provably share one instance, and therefore one effort
+// provider and one settings snapshot.
+func (r *SubTaskRunner) Gateway() *llm.Gateway {
+	if r == nil {
+		return nil
+	}
+	return r.llm
+}
+
 // SetAttachmentSvc injects the shared attachment service used to render the
 // parent requirement's attachment manifest into the sub-task prompt. Wired
 // by main right after SetRemoteCoding so the existing constructor
@@ -902,6 +927,28 @@ func promptPreview(body, override string) string {
 	return body
 }
 
+// subTaskEffortStage maps a sub-task to the pipeline stage its reasoning
+// depth belongs to, which decides the default tier when the user picked
+// none.
+//
+// The mapping mirrors where the sub-task sits in the product's flow:
+//
+//   - a Review sub-task grades other people's work → "其他任务"
+//   - a push_pr / push_base sub-task commits and opens a PR → "提交推送"
+//   - everything else writes code → "开发实现"
+func subTaskEffortStage(st *model.SubTask, spec subTaskRunSpec) string {
+	if spec.taskKind == model.SubTaskKindReview {
+		return llm.StageOther
+	}
+	if st != nil {
+		switch st.Source {
+		case model.SubTaskSourcePushPR, model.SubTaskSourcePushBase:
+			return llm.StageCommit
+		}
+	}
+	return llm.StageCoding
+}
+
 // subTaskFinishHooks are the terminal-bookkeeping extensions a run can
 // install. They exist so the shared finish path stays generic: a plain
 // sub-task passes an empty struct, a Review passes the two callbacks it
@@ -935,6 +982,24 @@ func (r *SubTaskRunner) run(
 	bare := spec.bare
 	parentSourceSID := spec.parentSourceSID
 	reportMode := spec.reportMode
+	// Reasoning effort (claude CLI --effort). Resolved HERE — at dispatch
+	// time — so a settings change takes effect on the next run without
+	// touching the row. The precedence is: the user's explicit pick (spec
+	// or the tier a previous dispatch stored on the row) > the configured
+	// stage default > the built-in stage default.
+	//
+	// The resolved tier is written back onto the row so the sub-task card
+	// can show what actually ran, and so a 重做 / 继续 reproduces it.
+	effortPick := spec.effort
+	if effortPick == "" {
+		effortPick = st.Effort
+	}
+	st.Effort = resolveEffort(r.llm, effortPick, subTaskEffortStage(st, spec))
+	if r.subTaskSvc != nil {
+		if perr := r.subTaskSvc.UpdateEffort(st.ID, st.Effort); perr != nil {
+			log.Printf("[sub-task] UpdateEffort warn for %s: %v", st.ID, perr)
+		}
+	}
 	// The terminal-bookkeeping extensions this run installs. A plain
 	// sub-task installs nothing; a Review installs the report rewrite + the
 	// write-back onto its code_reviews row.
@@ -1517,6 +1582,7 @@ func (r *SubTaskRunner) run(
 			sessionArg:     remoteSessionArg,
 			forkSessionID:  newSID,
 			model:          modelName,
+			Effort:         st.Effort,
 			claudeConfigID: finalConfigID,
 			usage:          subUsage,
 			FreshSession:   freshSession,
@@ -1884,6 +1950,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		WorkDir:        workDir,
 		SystemPrompt:   systemPromptForRun,
 		Model:          cliModelArg(modelName),
+		Effort:         st.Effort,
 		ClaudeConfigID: finalConfigID,
 		// --resume <sourceSID> --session-id <newSID> [--fork-session]:
 		//   - fork=true  → --fork-session on, child executes in a fresh JSONL

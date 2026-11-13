@@ -125,6 +125,14 @@ type Requirement struct {
 	ArchitectModel string `json:"architect_model"`
 	DeveloperModel string `json:"developer_model"`
 	ReviewerModel  string `json:"reviewer_model"`
+	// Effective reasoning-effort tier (claude CLI --effort) actually used
+	// for each stage. Same semantics as the *_model columns above: written
+	// only on the success path, empty = the stage hasn't run yet (or predates
+	// this column). The tier is what the档位条 in the UI re-hydrates to when
+	// the user re-enters a stage.
+	AnalystEffort   string `json:"analyst_effort"`
+	ArchitectEffort string `json:"architect_effort"`
+	DeveloperEffort string `json:"developer_effort"`
 	// Effective Claude-config (claude_configs.id) the user selected for the
 	// architect-design / developer stage, persisted on the success path so the
 	// config dropdown and the model both re-hydrate on refresh, and adjust /
@@ -538,6 +546,11 @@ type LaunchSpec struct {
 	CodingModel         string `json:"coding_model,omitempty"`
 	CodingClaudeConfigID string `json:"coding_claude_config_id,omitempty"`
 	CodingAgentServerID  string `json:"coding_agent_server_id,omitempty"`
+	// DesignEffort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) picked for each stage. Empty = follow the configured stage
+	// default at dispatch time.
+	DesignEffort string `json:"design_effort,omitempty"`
+	CodingEffort string `json:"coding_effort,omitempty"`
 
 	// Shared options — apply to whichever stage the dispatch picks.
 	ReadKnowledge bool   `json:"read_knowledge"`

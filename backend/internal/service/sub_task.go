@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -1214,6 +1215,23 @@ func (s *SubTaskService) UpdateClaudeConfigID(id, configID string) error {
 	}
 	_, err := s.db.Exec(`UPDATE sub_tasks SET claude_config_id=?, updated_at=? WHERE id=?`,
 		configID, time.Now(), id)
+	return err
+}
+
+// UpdateEffort records the reasoning-effort tier (claude CLI --effort) the
+// child actually ran with. Called by SubTaskRunner.Run just before the
+// dispatch, so the SubTaskCard can show the tier and a 重做 / 继续 re-run
+// reproduces it — the same contract as UpdateClaudeConfigID.
+//
+// A separate method rather than a new Create() parameter: Create already
+// takes 13 positional arguments, and adding a 14th would ripple through
+// every call site for a value that is only known at dispatch time.
+func (s *SubTaskService) UpdateEffort(id, effort string) error {
+	if id == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET effort=?, updated_at=? WHERE id=?`,
+		llm.NormalizeEffort(effort), time.Now(), id)
 	return err
 }
 

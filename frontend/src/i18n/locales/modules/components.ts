@@ -22,6 +22,21 @@ export const components = {
     outOfList: '当前：{{model}}（不在当前配置列表中）',
     noModels: '该配置未配置模型列表',
   },
+  // effortBar: the 推理档位 (reasoning effort) picker. The tier NAMES
+  // (low / medium / high / xhigh / max) are the CLI's own vocabulary and are
+  // deliberately NOT translated — they are the literal values sent to
+  // `--effort`, and a translated label would hide what the backend receives.
+  // Only the explanations below are localized.
+  effortBar: {
+    ariaLabel: '推理档位',
+    tiers: {
+      lowHint: '推理最少，适用于简单、范围明确或对延迟敏感的任务，token 消耗最低。',
+      mediumHint: '在成本与智能之间折中，减少 token 消耗。',
+      highHint: '平衡 token 使用量与推理深度，是许多模型的默认级别。',
+      xhighHint: '比 high 更深入的推理，消耗更多 token，介于 high 与 max 之间。',
+      maxHint: '最深度的推理级别，适合解决极难问题，但可能产生边际效益递减。',
+    },
+  },
   devSource: {
     localTitle: '该需求在本机 NovaWorkbench 上开发',
     local: '本地开发',

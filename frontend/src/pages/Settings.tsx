@@ -19,6 +19,10 @@ const settingsTabs = [
   // Reuses the setting.llm permission rather than seeding a new ACL key —
   // both are "AI 执行通道" knobs for the same operator role.
   { to: '/settings/subtask', labelKey: 'settings.tabs.subtask', permission: 'setting.llm' },
+  // Reasoning-effort policy (the claude CLI --effort tiers per stage).
+  // Same permission as the sub-task policy — both are AI execution-channel
+  // knobs for the same operator role, no need to seed a fresh ACL key.
+  { to: '/settings/effort', labelKey: 'settings.tabs.effort', permission: 'setting.llm' },
   // Git sync timeout (design-stage hard sync to origin/<base>). Same
   // permission as sub-task — both are AI execution-channel knobs for the
   // operator role, no need to seed a fresh ACL key.

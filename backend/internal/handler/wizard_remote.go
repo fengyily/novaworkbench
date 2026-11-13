@@ -36,17 +36,20 @@ import (
 // need. The shared SSH / worktree / session-sync / worker-call trunk lives in
 // prepareRemoteAgentRun and is fed by remoteRunInput (below).
 type remoteCodingInput struct {
-	job            *store.Job
-	serverID       string
-	req            startCodingReq
-	reqRow         *model.Requirement
-	prompt         string
-	workDir        string // local worktree path (used only for SFTP upload source)
-	sourceSID      string
-	fork           bool
-	sessionArg     string
-	forkSessionID  string
-	model          string
+	job           *store.Job
+	serverID      string
+	req           startCodingReq
+	reqRow        *model.Requirement
+	prompt        string
+	workDir       string // local worktree path (used only for SFTP upload source)
+	sourceSID     string
+	fork          bool
+	sessionArg    string
+	forkSessionID string
+	model         string
+	// Effort is the reasoning-effort tier (claude CLI --effort) for the
+	// remote coding run. Forwarded to the worker as a CLI flag.
+	Effort         string
 	claudeConfigID string // role-bound claude config; empty = global active
 	usage          *usageCtx
 	// FreshSession skips the --resume path entirely: when true, no
@@ -96,8 +99,11 @@ type startCodingReq struct {
 	BranchName       string
 	BaseBranch       string
 	Model            string
-	ReadKnowledge    bool
-	AgentServerID    string
+	// Effort is the reasoning-effort tier (claude CLI --effort) forwarded to
+	// the worker. Empty = the worker keeps the CLI's own default.
+	Effort        string
+	ReadKnowledge bool
+	AgentServerID string
 }
 
 // remoteRunInput is the SHARED parameter struct consumed by
@@ -115,16 +121,19 @@ type startCodingReq struct {
 // to ~/.claude/plans/<slug>.md); the dev stage leaves it empty so the
 // worker falls back to --dangerously-skip-permissions.
 type remoteRunInput struct {
-	job            *store.Job
-	serverID       string
-	reqRow         *model.Requirement
-	prompt         string
-	workDir        string // local worktree path (used only for SFTP upload source)
-	sourceSID      string
-	fork           bool
-	sessionArg     string
-	forkSessionID  string
-	model          string
+	job           *store.Job
+	serverID      string
+	reqRow        *model.Requirement
+	prompt        string
+	workDir       string // local worktree path (used only for SFTP upload source)
+	sourceSID     string
+	fork          bool
+	sessionArg    string
+	forkSessionID string
+	model         string
+	// Effort is the reasoning-effort tier (claude CLI --effort) for the
+	// remote run. Forwarded to the worker as a CLI flag.
+	Effort         string
 	claudeConfigID string
 	usage          *usageCtx
 	// PermissionMode is forwarded to the worker (see workerRunBody).
@@ -606,6 +615,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		WorkDir:                wtPath,
 		SystemPrompt:           "",
 		Model:                  cliModelArg(in.model),
+		Effort:                 in.Effort,
 		ClaudeConfigID:         in.claudeConfigID,
 		SessionID:              in.sessionArg,
 		Resume:                 resume,
@@ -1028,6 +1038,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		WorkDir:                wtPath,
 		SystemPrompt:           in.SystemPrompt,
 		Model:                  cliModelArg(in.model),
+		Effort:                 in.Effort,
 		ClaudeConfigID:         in.claudeConfigID,
 		SessionID:              in.sessionArg,
 		Resume:                 in.sourceSID != "",
@@ -2248,13 +2259,14 @@ func findSessionJsonlFallback(sid string) (string, bool) {
 // its own cwd-slug or scans the projects tree.
 //
 // Returns:
-//   synced      — number of jsonl files actually uploaded.
-//   missingSIDs — sids whose <sid>.jsonl was NOT found in ANY candidate dir;
-//                 the caller should classify this as "local" missing and
-//                 surface the ids in the user-facing error.
-//   err         — non-nil only when Mkdirp / PutFile itself failed (network,
-//                 permission, etc.); the caller should classify this as
-//                 "sync-failed".
+//
+//	synced      — number of jsonl files actually uploaded.
+//	missingSIDs — sids whose <sid>.jsonl was NOT found in ANY candidate dir;
+//	              the caller should classify this as "local" missing and
+//	              surface the ids in the user-facing error.
+//	err         — non-nil only when Mkdirp / PutFile itself failed (network,
+//	              permission, etc.); the caller should classify this as
+//	              "sync-failed".
 //
 // wantSIDs empty and candidateDirs empty are defensive paths — production
 // callers guard against them upstream, but if we somehow get here we still
@@ -2358,15 +2370,20 @@ func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *sto
 // A struct makes typos like `OverrideSettingSoures` a compile error rather
 // than a "worker returns 400 with no detail" at runtime.
 type workerRunBody struct {
-	WorkDir         string            `json:"workDir"`
-	Prompt          string            `json:"prompt"`
-	Model           string            `json:"model,omitempty"`
-	SystemPrompt    string            `json:"systemPrompt,omitempty"`
-	SessionID       string            `json:"sessionId,omitempty"`
-	Resume          bool              `json:"resume,omitempty"`
-	Fork            bool              `json:"fork,omitempty"`
-	ForkSessionID   string            `json:"forkSessionId,omitempty"`
-	PermissionMode  string            `json:"permissionMode,omitempty"`
+	WorkDir string `json:"workDir"`
+	Prompt  string `json:"prompt"`
+	Model   string `json:"model,omitempty"`
+	// Effort is the reasoning-effort tier the worker turns into the CLI's
+	// `--effort <level>` flag. omitempty keeps the field off the wire for
+	// callers that don't set one, so their request bodies stay byte-identical
+	// to the pre-field shape.
+	Effort         string `json:"effort,omitempty"`
+	SystemPrompt   string `json:"systemPrompt,omitempty"`
+	SessionID      string `json:"sessionId,omitempty"`
+	Resume         bool   `json:"resume,omitempty"`
+	Fork           bool   `json:"fork,omitempty"`
+	ForkSessionID  string `json:"forkSessionId,omitempty"`
+	PermissionMode string `json:"permissionMode,omitempty"`
 	// AddDirs are the directories the remote claude session is granted read
 	// access to — the worker turns them into the CLI's variadic
 	// `--add-dir <dir>...` flag (always last in argv). omitempty keeps the
@@ -2374,7 +2391,7 @@ type workerRunBody struct {
 	// bodies stay byte-identical to the pre-field shape.
 	//
 	// The paths resolve on the agent host. See remoteRunInput.AddDirs.
-	AddDirs []string `json:"addDirs,omitempty"`
+	AddDirs         []string          `json:"addDirs,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	AllowedTools    []string          `json:"allowedTools,omitempty"`
 	DisallowedTools []string          `json:"disallowedTools,omitempty"`
@@ -2629,6 +2646,7 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, srv *model.AgentSe
 		WorkDir:       opts.WorkDir,
 		Prompt:        opts.Prompt,
 		Model:         opts.Model,
+		Effort:        opts.Effort,
 		SystemPrompt:  opts.SystemPrompt,
 		SessionID:     opts.SessionID,
 		Resume:        opts.Resume,

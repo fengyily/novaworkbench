@@ -299,3 +299,96 @@ func (h *SettingHandler) UpdateAgentWorktree(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, 200, resp)
 }
+
+// EffortConfigResponse is the API shape for the reasoning-effort policy
+// (claude CLI --effort): the master switch plus one default tier per
+// pipeline stage. Mirrors service.SettingService.EffortConfig one-for-one.
+type EffortConfigResponse struct {
+	// Enabled turns --effort emission on for every run. false = no run
+	// emits the flag (the CLI keeps its own default).
+	Enabled bool `json:"enabled"`
+	// Design is the default tier for the design stage (方案设计).
+	Design string `json:"design"`
+	// Coding is the default tier for the coding stage (开发实现).
+	Coding string `json:"coding"`
+	// Commit is the default tier for the commit stage (提交推送).
+	Commit string `json:"commit"`
+	// Other is the default tier for every remaining run (分析 / Review /
+	// 答疑 / 压缩 / Wiki / 周报).
+	Other string `json:"other"`
+}
+
+// GetEffortConfig returns the current reasoning-effort policy.
+// GET /api/settings/effort
+func (h *SettingHandler) GetEffortConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := h.svc.EffortConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, effortConfigResponse(cfg))
+}
+
+// UpdateEffortConfig persists the reasoning-effort policy. The write only
+// touches the settings table — every claude run re-reads it through
+// llm.Gateway.ResolveEffort, so the new values take effect on the next run
+// without a restart.
+//
+// Tiers are validated at the service boundary (service.SettingService
+// .SetEffortConfig): an unknown tier falls back to the shipped default
+// rather than being persisted in a shape the run sites would have to defend
+// against.
+func (h *SettingHandler) UpdateEffortConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled *bool   `json:"enabled"`
+		Design  *string `json:"design"`
+		Coding  *string `json:"coding"`
+		Commit  *string `json:"commit"`
+		Other   *string `json:"other"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	cfg, err := h.svc.EffortConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	if req.Enabled != nil {
+		cfg.Enabled = *req.Enabled
+	}
+	if req.Design != nil {
+		cfg.Design = *req.Design
+	}
+	if req.Coding != nil {
+		cfg.Coding = *req.Coding
+	}
+	if req.Commit != nil {
+		cfg.Commit = *req.Commit
+	}
+	if req.Other != nil {
+		cfg.Other = *req.Other
+	}
+	if err := h.svc.SetEffortConfig(cfg); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted (validated) state.
+	stored, err := h.svc.EffortConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, effortConfigResponse(stored))
+}
+
+func effortConfigResponse(cfg service.EffortConfig) EffortConfigResponse {
+	return EffortConfigResponse{
+		Enabled: cfg.Enabled,
+		Design:  cfg.Design,
+		Coding:  cfg.Coding,
+		Commit:  cfg.Commit,
+		Other:   cfg.Other,
+	}
+}

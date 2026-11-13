@@ -42,8 +42,10 @@ import { fmtDateTime } from '../utils/intl';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import { BranchPicker } from './BranchPicker';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
 import { IconClose } from './icons';
 import ModelSelect from './ModelSelect';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import './RequirementSplitModal.css';
 
 /**
@@ -359,6 +361,21 @@ export function RequirementSplitModal({
       ? initialAgentServerId
       : '';
   });
+  // Reasoning-effort tier (claude CLI --effort) for the split run.
+  //
+  // The hook loads the configured per-stage defaults asynchronously, so
+  // the picker's state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('design')` would freeze
+  // the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  //
+  // Splitting belongs to the design stage — the architect persona is the
+  // one reading the requirement and cutting it up.
+  const effortDefaults = useEffortDefaults();
+  const [splitEffort, setSplitEffort] = useState<EffortTier | null>(null);
+  const splitEffortValue = splitEffort ?? effortDefaults.forStage('design');
 
   /**
    * The material this split will hand to the AI: the uploaded attachments,
@@ -750,6 +767,8 @@ export function RequirementSplitModal({
         model: model || undefined,
         claude_config_id: configId || undefined,
         agent_server_id: agentServerId || undefined,
+        // Reasoning-effort tier (claude CLI --effort) for this split run.
+        effort: splitEffortValue,
       });
       if (cancelledRef.current) return;
       // Publish the fresh run into the status strip right away — the strip is
@@ -778,7 +797,7 @@ export function RequirementSplitModal({
       setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
       setStage('config');
     }
-  }, [requirementId, model, configId, agentServerId, t]);
+  }, [requirementId, model, configId, agentServerId, splitEffortValue, t]);
 
   const update = (index: number, patch: Partial<Row>) => {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
@@ -1023,6 +1042,20 @@ export function RequirementSplitModal({
                     {t('requirements.split.execEnvRemoteHint')}
                   </small>
                 )}
+              </div>
+
+              {/* Reasoning-effort picker (claude CLI --effort) — the third
+                  per-run knob of the config block, next to the model and the
+                  execution environment. Splitting reads the requirement and
+                  cuts it up, so it follows the design stage's default. */}
+              <div className="req-split-config-field">
+                <EffortBar
+                  id="split-effort"
+                  label={t('components.effortBar.ariaLabel')}
+                  value={splitEffortValue}
+                  onChange={setSplitEffort}
+                  disabled={!effortDefaults.enabled || busy}
+                />
               </div>
 
               <div className="req-split-hint req-split-hint-muted">

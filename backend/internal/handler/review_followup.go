@@ -189,14 +189,19 @@ func (h *ReviewHandler) runReviewTurn(ctx context.Context, job *store.Job, rv *m
 // streams it into the job. Shared by 追问 and 「重新生成」 — it only knows how
 // to run a prompt, not what the prompt is for.
 //
+// effort is the reasoning-depth tier inherited from the review row (the tier
+// the report itself was written at); it is passed in rather than looked up
+// because this function has no review row of its own.
+//
 // stale=true means the run failed specifically because `--resume` pointed at
 // a conversation the CLI no longer has, which the caller retries fresh.
-func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, sessionID string, resume bool, uctx *usageCtx) (answer string, stale bool, errMsg string) {
+func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, effort, sessionID string, resume bool, uctx *usageCtx) (answer string, stale bool, errMsg string) {
 	opts := llm.StreamOpts{
 		Prompt:         taskPrompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
+		Effort:         effort,
 		ClaudeConfigID: claudeConfigID,
 	}
 	if resume {

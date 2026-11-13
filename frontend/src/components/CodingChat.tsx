@@ -4,6 +4,8 @@ import { API_BASE, authedFetch, wizardApi } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import { type UsageInfo } from '../utils/logLines';
 import { ContextUsageBar } from './ContextUsageBar';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 
 interface Props {
   reqId: string;
@@ -32,6 +34,18 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   const [compressing, setCompressing] = useState(false);
   const [compressedAt, setCompressedAt] = useState<string | null>(null);
   const [summaryModal, setSummaryModal] = useState<string | null>(null);
+
+  // Reasoning-effort tier (claude CLI --effort) for the developer-chat
+  // turns. The hook loads the configured per-stage defaults asynchronously,
+  // so the picker state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('coding')` instead would
+  // freeze the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [developerEffort, setDeveloperEffort] = useState<EffortTier | null>(null);
+  const developerEffortValue = developerEffort ?? effortDefaults.forStage('coding');
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -154,6 +168,11 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
         project_path: projectPath,
         requirement_title: requirementTitle,
         user_message: userMessage,
+        // Reasoning-effort tier — always sent concretely: the value already
+        // resolves to the configured stage default when the user hasn't
+        // picked one, and the backend drops it wholesale when the effort
+        // master switch is off.
+        effort: developerEffortValue,
       }),
     });
 
@@ -215,7 +234,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
     });
 
     return aiText.trim();
-  }, [reqId, projectPath, requirementTitle]);
+  }, [reqId, projectPath, requirementTitle, developerEffortValue]);
 
   const handleSend = async () => {
     const msg = input.trim();
@@ -250,6 +269,24 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
     <div className="detail-section coding-chat-panel">
       <div className="deep-refine-header">
         <h3>{t('components.codingChat.composerTitle')}</h3>
+      </div>
+
+      {/* Reasoning-effort tier for the developer-chat turns — the panel's
+          "how deep should the CLI think" knob, sitting right above the
+          conversation so it travels with the composer. Its own row (not
+          inside the header row) because the bar carries a caption + an
+          explanatory line, which would blow the header's height up. */}
+      <div style={{ marginBottom: 8 }}>
+        <EffortBar
+          id="developer-chat-effort"
+          size="sm"
+          label={t('components.effortBar.ariaLabel')}
+          value={developerEffortValue}
+          onChange={setDeveloperEffort}
+          // The master switch (Settings → Reasoning effort) off → the backend sends no
+          // --effort at all, so an interactive-looking bar would be a lie.
+          disabled={!effortDefaults.enabled || thinking}
+        />
       </div>
 
       {hasConversation && (() => {

@@ -27,6 +27,9 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Model          string `json:"model"`
 		ClaudeConfigID string `json:"claude_config_id"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this re-orchestration. Empty = use the stage default.
+		Effort string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -187,6 +190,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
 			Model:          cliModelArg(modelName),
+			Effort:         resolveEffort(h.llm, body.Effort, llm.StageCoding),
 			ClaudeConfigID: claudeConfigID,
 			SessionID:      sessionID,
 			Resume:         resume,
@@ -1394,6 +1398,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   execSystemPrompt,
 		Model:          cliModelArg(modelName),
+		Effort:         resolveEffort(h.llm, "", llm.StageCoding),
 		ClaudeConfigID: finalConfigID,
 		SessionID:      batch.OrchestratorSessionID,
 		Resume:         true,
@@ -1436,6 +1441,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			sessionArg:    batch.OrchestratorSessionID,
 			forkSessionID: childSID,
 			model:         modelName,
+			Effort:        resolveEffort(h.llm, "", llm.StageCoding),
 			usage:         childUsage,
 		})
 	} else {
@@ -1730,6 +1736,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   "", // resumed session already has developer persona
 		Model:          cliModelArg(batch.Model),
+		Effort:         resolveEffort(h.llm, "", llm.StageCoding),
 		ClaudeConfigID: batch.ClaudeConfigID,
 		SessionID:      batch.OrchestratorSessionID,
 		Resume:         true,
@@ -1757,6 +1764,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 			WorkDir:        batch.WorkDir,
 			SystemPrompt:   "",
 			Model:          cliModelArg(batch.Model),
+			Effort:         resolveEffort(h.llm, "", llm.StageCoding),
 			ClaudeConfigID: batch.ClaudeConfigID,
 			SessionID:      freshSID,
 			Resume:         false,

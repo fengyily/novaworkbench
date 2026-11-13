@@ -51,6 +51,9 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		CurrentAnalysis  string `json:"current_analysis"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this run. Empty = use the stage default.
+		Effort string `json:"effort"`
 		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
 		// empty = backend resolves via the priority chain in
 		// resolveConfigIDForRun.
@@ -111,6 +114,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Align the gateway config with the picked model. See resolveConfigIDForRun.
 	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
+	// Reasoning-effort tier for this turn. The analyst stage lives in the
+	// "other" bucket (no product-defined default of its own), so it inherits
+	// effort.other — whose shipped value (high) is the CLI's own default.
+	effort := resolveEffort(h.llm, req.Effort, llm.StageOther)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. The claude turn runs in a goroutine writing progress
@@ -260,7 +267,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				resume:          !isFirstRound,
 			})
 		} else {
-			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.grantDirsFor(req.RequirementID, ""))
+			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.grantDirsFor(req.RequirementID, ""))
 		}
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -293,6 +300,11 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateAnalystModel(req.RequirementID, model); perr != nil {
 			log.Printf("[analyst-chat] failed to persist analyst_model for %s: %v", req.RequirementID, perr)
 		}
+		// Same contract for the reasoning-effort tier: success path only, so a
+		// failed run never clobbers the last good record.
+		if perr := h.reqSvc.UpdateAnalystEffort(req.RequirementID, effort); perr != nil {
+			log.Printf("[analyst-chat] failed to persist analyst_effort for %s: %v", req.RequirementID, perr)
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[analyst-chat] job %s finished for %s", job.ID, req.RequirementID)
 	}()
@@ -318,6 +330,9 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		RequirementTitle string `json:"requirement_title"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this run. Empty = use the stage default.
+		Effort string `json:"effort"`
 		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
 		// empty = backend resolves via the priority chain in
 		// resolveConfigIDForRun.
@@ -441,6 +456,9 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Align the gateway config with the picked model. See resolveConfigIDForRun.
 	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
+	// The developer chat runs under the developer persona, so it shares the
+	// coding stage's tier (shipped default: medium).
+	effort := resolveEffort(h.llm, req.Effort, llm.StageCoding)
 
 	// The resumed coding conversation already carries the requirement, analysis,
 	// and design, so a resume turn only sends the framed adjustment message. The
@@ -498,7 +516,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxForConfig("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage, claudeConfigID)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.grantDirsFor(req.RequirementID, ""))
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.grantDirsFor(req.RequirementID, ""))
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -566,7 +584,7 @@ func analystFirstTurnDisallowedToolsForKind(kind string) []string {
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -588,6 +606,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		Effort:          effort,
 		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionID,
 		Resume:          resume,
@@ -614,6 +633,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			Effort:          effort,
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
@@ -648,7 +668,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // (--session-id); it is "" on a plain resume. Returns the final result text and
 // the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -673,6 +693,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		Effort:          effort,
 		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionArg,
 		Resume:          resume,
@@ -697,6 +718,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			Effort:          effort,
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,

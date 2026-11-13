@@ -37,6 +37,8 @@ import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload
 import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDescriptionEditor/imageIngest';
 import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
 import { stripArtifactHeader, stripArtifactCodeFence } from '../utils/subTaskArtifact';
@@ -730,6 +732,11 @@ interface CardProps {
   // `redoModel` (re-runs a failed sub-task with a possibly different
   // model).
   adjustModel?: string;
+  // Panel-level reasoning-effort tier (claude CLI --effort). The composer's
+  // EffortBar owns the pick; every per-card run (Redo / Continue / Adjust)
+  // reuses it, because they are all implementation work. Empty = the
+  // backend resolves the stage default.
+  effort?: string;
   // Mirror setter so the per-card ModelSelect in the adjust drawer can
   // write back to the panel-level adjustModel state. Without this each
   // card would need its own picker copy.
@@ -761,12 +768,15 @@ interface CardProps {
 function useRestartSubTask(args: {
   st: SubTask;
   requirementId: string;
+  // Reasoning-effort tier (claude CLI --effort) for the re-run. Empty =
+  // let the backend resolve the stage default.
+  effort?: string;
   onChanged: (next: SubTask) => void;
   onRestarted?: (subTaskId: string, newJobId: string) => void;
   setStreaming: (b: boolean) => void;
   setLines: (l: LogLine[]) => void;
 }) {
-  const { st, requirementId, onChanged, onRestarted, setStreaming, setLines } = args;
+  const { st, requirementId, effort, onChanged, onRestarted, setStreaming, setLines } = args;
   return useCallback(async (kind: 'redo' | 'continue', model?: string) => {
     // Snapshot for rollback on error.
     const snapshot = { ...st };
@@ -777,9 +787,16 @@ function useRestartSubTask(args: {
     setLines([]);
     onChanged({ ...st, status: 'running', job_id: '', artifact: '' });
     try {
+      // The effort tier travels with the re-run: a redo / continue is
+      // still implementation work, so it uses the same coding-stage tier
+      // the composer picked.
+      const body = {
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+      };
       const resp = kind === 'redo'
-        ? await subTasksApi.redo(requirementId, st.id, model ? { model } : {})
-        : await subTasksApi.continue(requirementId, st.id, model ? { model } : {});
+        ? await subTasksApi.redo(requirementId, st.id, body)
+        : await subTasksApi.continue(requirementId, st.id, body);
       // Hand off to the parent: it stamps job_id on the row and
       // subscribes the SSE stream for the new job.
       onRestarted?.(st.id, resp.job_id);
@@ -789,7 +806,7 @@ function useRestartSubTask(args: {
       setStreaming(false);
       throw e;
     }
-  }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
+  }, [st, requirementId, effort, onChanged, onRestarted, setStreaming, setLines]);
 }
 
 // ArchiveButton is the shared "归档到知识库" / "已归档" toggle used in
@@ -877,6 +894,7 @@ function SubTaskCard({
   onDeleted,
   canStop,
   adjustModel = '',
+  effort = '',
   onAdjustModelChange,
   retryMax = 0,
   archivedKbId,
@@ -1038,6 +1056,7 @@ function SubTaskCard({
   const restartSubTask = useRestartSubTask({
     st,
     requirementId: st.requirement_id,
+    effort,
     onChanged,
     onRestarted,
     setStreaming,
@@ -1170,6 +1189,9 @@ function SubTaskCard({
       const resp = await subTasksApi.adjust(st.requirement_id, st.id, {
         prompt: p,
         ...(adjustModel ? { model: adjustModel } : {}),
+        // A follow-up round is implementation work too — it runs at the
+        // panel's picked effort tier.
+        ...(effort ? { effort } : {}),
       });
       // Replace this card with a brand-new one driven by the new
       // sub_task_id via the parent's onChanged; for now, drop the
@@ -1189,7 +1211,7 @@ function SubTaskCard({
     } finally {
       setAdjustBusy(false);
     }
-  }, [adjustInput, adjustBusy, adjustModel, st.id, st.requirement_id, t, onCreated]);
+  }, [adjustInput, adjustBusy, adjustModel, effort, st.id, st.requirement_id, t, onCreated]);
 
   const submitRedo = useCallback(async () => {
     if (redoBusy) return;
@@ -2139,6 +2161,20 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // report-mode knobs — a review has its own contract and its own report
   // shape.
   const [composerMode, setComposerMode] = useState<'code' | 'review'>('code');
+  // Reasoning-effort tier (claude CLI --effort) for the ordinary sub-task
+  // composer. Sub-tasks are implementation work, so the stage is 'coding'.
+  //
+  // The configured per-stage default lives in the settings page, and the
+  // hook loads it asynchronously — the first render only carries the shipped
+  // fallback. So the pick is held as `null` until the user actually clicks a
+  // segment: null means "follow the configured default", a concrete tier
+  // means "the user chose this and it wins". Seeding the state with
+  // `effortDefaults.forStage('coding')` instead would freeze the FIRST
+  // render's fallback into the state, silently discarding a configured
+  // default that arrives a moment later.
+  const effortDefaults = useEffortDefaults();
+  const [composerEffort, setComposerEffort] = useState<EffortTier | null>(null);
+  const composerEffortValue = composerEffort ?? effortDefaults.forStage('coding');
   // The AI persona the review runs under (roles.key). Default 'reviewer' —
   // the same default the project-level Review uses.
   const [reviewRoleKey, setReviewRoleKey] = useState(DEFAULT_REVIEW_ROLE_KEY);
@@ -2815,6 +2851,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         agent_server_id: createAgentServerId,
         // 报告详略：'auto' 也照实发送——后端再做规范化，0 成本、可观测。
         report_mode: reportMode,
+        // Reasoning-effort tier (claude CLI --effort). Sub-tasks are
+        // implementation work → the 'coding' stage default. Sent even when
+        // the user didn't pick: the backend's effort.enabled master switch
+        // still wins over any explicit pick, so this is safe to always send.
+        effort: composerEffortValue,
       });
       setPrompt('');
       // Drop the screenshot status pills too — the images are already
@@ -2832,7 +2873,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
+  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -2954,6 +2995,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         {
           ...(createModel ? { model: createModel } : {}),
           ...(createConfigId ? { claude_config_id: createConfigId } : {}),
+          // Re-split is coding-stage work (the developer agent decomposes
+          // the requirement), so it runs at the composer's effort tier.
+          effort: composerEffortValue,
         },
       );
       reSplitEsRef.current?.close();
@@ -2985,7 +3029,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       setError(e?.message || t('components.subTaskPanel.errReSplit'));
       setReSplitBusy(false);
     }
-  }, [reSplitBusy, createModel, createConfigId, requirementId, loadList, t]);
+  }, [reSplitBusy, createModel, createConfigId, composerEffortValue, requirementId, loadList, t]);
 
   // Close the re-split stream on unmount.
   useEffect(() => () => { reSplitEsRef.current?.close(); reSplitEsRef.current = null; }, []);
@@ -3490,6 +3534,29 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           <span className="sub-session-mode-desc" role="note">{activeReportMode.desc}</span>
         </div>
         )}
+        {/* Reasoning-effort picker — how deep the CLI thinks on this run.
+            Placed right under the two segmented controls above so the
+            three "how this run behaves" knobs read as one group; the
+            wrapper reuses .sub-session-mode for the vertical rhythm, the
+            segments themselves come from the shared EffortBar.
+
+            ORDINARY sub-tasks only: a requirement-level Review picks its
+            tier on the Review card, not here — showing a second picker for
+            the same run would be two spellings of one choice. */}
+        {composerMode === 'code' && (
+        <div className="sub-session-mode">
+          <EffortBar
+            id="subtask-effort"
+            label={t('components.effortBar.ariaLabel')}
+            value={composerEffortValue}
+            onChange={setComposerEffort}
+            // The master switch (设置 → 推理档位) is off → the backend
+            // sends no --effort at all, so an interactive-looking bar
+            // would be a lie.
+            disabled={!effortDefaults.enabled || submitting || reSplitBusy}
+          />
+        </div>
+        )}
         {uploads.length > 0 && (
           <div className="sub-composer-uploads">
             {uploads.map((u) => (
@@ -3593,6 +3660,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             // fallback the environment badge above uses.
             canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
             adjustModel={adjustModel}
+            // Per-card runs (Redo / Continue / Adjust) reuse the panel's
+            // picked reasoning-effort tier — they are implementation work,
+            // same as the composer.
+            effort={composerEffortValue}
             onAdjustModelChange={setAdjustModel}
             retryMax={retryMax}
             archivedKbId={archives[tn.node.id]}

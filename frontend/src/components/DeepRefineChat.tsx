@@ -9,6 +9,8 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
@@ -113,6 +115,18 @@ export default function DeepRefineChat({
       setSelectedModel(v === DefaultModelLabel ? '' : v);
     }
   }, [model]);
+
+  // Reasoning-effort tier (claude CLI --effort) for this analyst turn.
+  // The hook loads the configured per-stage defaults asynchronously, so the
+  // picker state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('other')` instead would
+  // freeze the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [analystEffort, setAnalystEffort] = useState<EffortTier | null>(null);
+  const analystEffortValue = analystEffort ?? effortDefaults.forStage('other');
 
   // Mirror of `messages` for use inside async callbacks (POST / stream) where
   // the state closure would otherwise be stale.
@@ -355,6 +369,11 @@ export default function DeepRefineChat({
           user_message: userMessage,
           // Per-request model override — empty means the role's configured model.
           ...(selectedModel ? { model: selectedModel } : {}),
+          // Reasoning-effort tier — always sent concretely: the value already
+          // resolves to the configured stage default when the user hasn't
+          // picked one, and the backend drops it wholesale when the effort
+          // master switch is off.
+          effort: analystEffortValue,
           ...(analysisAgentServerId ? { agent_server_id: analysisAgentServerId } : {}),
         }),
       });
@@ -374,7 +393,7 @@ export default function DeepRefineChat({
         return next;
       });
     }
-  }, [projectPath, reqId, requirementTitle, currentAnalysis, selectedModel, saveMessages, streamAnalystJob, t]);
+  }, [projectPath, reqId, requirementTitle, currentAnalysis, selectedModel, analystEffortValue, saveMessages, streamAnalystJob, t]);
 
   const handleSend = async () => {
     if (!input.trim() || chatting) return;
@@ -558,6 +577,24 @@ export default function DeepRefineChat({
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.analyst.collapseBtn')}</button>
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
+      </div>
+
+      {/* Reasoning-effort tier for the analyst turns. Sits in its own row
+          right under the header's model picker — the two per-turn knobs that
+          decide how the analyst runs. Its own row (not inside the header's
+          inline-flex group) because the bar carries a caption + an
+          explanatory line, which would blow the header's height up. */}
+      <div style={{ marginBottom: 8 }}>
+        <EffortBar
+          id="analyst-chat-effort"
+          size="sm"
+          label={t('components.effortBar.ariaLabel')}
+          value={analystEffortValue}
+          onChange={setAnalystEffort}
+          // The master switch (设置 → 推理档位) off → the backend sends no
+          // --effort at all, so an interactive-looking bar would be a lie.
+          disabled={!effortDefaults.enabled || isWorking}
+        />
       </div>
 
       {/* Stack container for the three panels that should appear together

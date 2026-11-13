@@ -120,6 +120,7 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 		WorkDir:        baseRepo,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
+		Effort:         run.Effort,
 		ClaudeConfigID: configID,
 		// Same grant as the local path: the attachment mirror that
 		// resolveAttachDir synced to this agent host + the directories the

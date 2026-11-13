@@ -173,6 +173,9 @@ type AskStageQAReq struct {
 	// frontend's ModelSelect). Empty = the stage role's default.
 	Model          string `json:"model"`
 	ClaudeConfigID string `json:"claude_config_id"`
+	// Effort — the reasoning-effort tier (claude CLI --effort) the user
+	// picked for this Q&A turn. Empty = use the stage default.
+	Effort string `json:"effort"`
 }
 
 // AskStageQA records a question, dispatches the turn and returns the JobStore
@@ -511,6 +514,7 @@ func (h *WizardHandler) runQATurn(
 			WorkDir:         workDir,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(modelName),
+			Effort:          resolveEffort(h.llm, req.Effort, llm.StageOther),
 			ClaudeConfigID:  claudeConfigID,
 			DisallowedTools: qaChatDisallowedTools,
 		}

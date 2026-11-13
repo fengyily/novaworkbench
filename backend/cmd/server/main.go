@@ -227,6 +227,12 @@ func main() {
 	// the next subprocess — no restart needed.
 	llmGateway := llm.New(claudeCfgSvc, settingSvc)
 
+	// Reasoning-effort policy (claude CLI --effort): the per-stage default
+	// tiers + the master switch live in the settings table, so a change takes
+	// effect on the next run without a restart. Wired with a setter rather
+	// than a third New() argument so llm.New's signature stays unchanged.
+	llmGateway.SetEffortProvider(settingSvc)
+
 	// Scanner depends on the LLM gateway (auto project description generation)
 	// and the project service (description persistence).
 	scannerSvc := service.NewScannerService(database, projectSvc, llmGateway)
@@ -768,6 +774,15 @@ func main() {
 	// orchestration tick and SubTaskRunner, so a change needs no restart.
 	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
 	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
+
+	// Reasoning-effort policy (settings) — the per-stage default tiers for the
+	// claude CLI's --effort flag (方案设计 / 开发实现 / 提交推送 / 其他) plus a
+	// master switch that turns the flag off entirely. Read live on every
+	// claude run through llm.Gateway.ResolveEffort, so a change needs no
+	// restart. Permission key reuses "setting.llm" (same as the subtask
+	// settings, see SettingsSubTask).
+	mux.HandleFunc("GET /api/settings/effort", settingH.GetEffortConfig)
+	mux.HandleFunc("PUT /api/settings/effort", settingH.UpdateEffortConfig)
 
 	// Agent Server remote work root — editable in 设置 → Agent 服务器; env
 	// NOVA_AGENT_WORKTREE_ROOT still wins. Remote workers resync before runs.

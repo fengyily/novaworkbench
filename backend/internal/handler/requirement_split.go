@@ -58,6 +58,9 @@ type SplitReq struct {
 	// 拆分是只读运行，远端走 scratch clone + nova-agent-worker，
 	// 与远端 Review 同构（见 requirement_split_remote.go）。
 	AgentServerID string `json:"agent_server_id"`
+	// Effort — 用户选的推理档位（claude CLI --effort）。空 = 用「方案设计」
+	// 阶段的默认档位。
+	Effort string `json:"effort"`
 }
 
 // splitExecTarget 描述这一轮拆分跑在哪里。
@@ -300,6 +303,8 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		job.Append(store.LogLine{Type: "phase", Content: "📤 同步附件到 Agent 服务器…"})
 	}
 	run := h.buildSplitContext(context.Background(), reqRow.ID, strings.TrimSpace(body.AgentServerID))
+	// 拆分属于「方案设计」阶段：用户选的档位优先，否则取该阶段的默认档位。
+	run.Effort = resolveEffort(h.llm, body.Effort, llm.StageDesign)
 
 	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing, run.ContextBlock)
 	usage := h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID)
@@ -364,6 +369,7 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
+		Effort:         run.Effort,
 		ClaudeConfigID: configID,
 		// The directories the manifest points at must be readable, otherwise
 		// the model sees the file names but not their content — and a

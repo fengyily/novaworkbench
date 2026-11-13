@@ -8,6 +8,9 @@ import {
 } from '../api/client';
 import { ExecEnvSelect, type ExecEnvServer } from '../components/ExecEnvSelect';
 import ModelSelect from '../components/ModelSelect';
+import EffortBar, { type EffortTier } from '../components/EffortBar';
+import { normalizeEffortTier } from '../utils/effort';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { IconHand, IconRocket, IconClock } from '../components/icons';
 import { errorMessage } from '../utils/errMsg';
 import { fmtTime } from '../utils/intl';
@@ -47,6 +50,23 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
   const [serverList, setServerList] = useState<ExecEnvServer[]>([]);
   const [testResult, setTestResult] = useState<{ issues: IssuePreview[]; count: number } | null>(null);
   const [testing, setTesting] = useState(false);
+  // Reasoning-effort tiers (claude CLI --effort) for the two dispatched
+  // stages. The hook loads the configured per-stage defaults
+  // asynchronously, so the picker state stays `null` until the user
+  // actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage(...)` instead would
+  // freeze the shipped fallback on the first render and silently override a
+  // configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  // The tier shown in each picker: the monitor's persisted tier when it has
+  // one, else the configured stage default. Like every other per-stage
+  // field on this form the value lives in `form`, so it survives a reload.
+  const designEffortValue = (normalizeEffortTier(form.effort)
+    || effortDefaults.forStage('design')) as EffortTier;
+  const codingEffortValue = (normalizeEffortTier(form.coding_effort)
+    || effortDefaults.forStage('coding')) as EffortTier;
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -81,9 +101,15 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
       // Stamp the tz at save time so "每天 09:00" means the operator's local
       // wall clock, not the server's. The backend projects recur_time onto a
       // UTC instant using this value.
+      //
+      // The two reasoning-effort tiers ride along with the rest of the
+      // per-stage config: `effort` is the design stage, `coding_effort` the
+      // developer stage (same naming as the other two-stage surfaces).
       const payload: UpdateIssueMonitorReq = {
         ...form,
         recur_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        effort: designEffortValue,
+        coding_effort: codingEffortValue,
       };
       const updated = await issueMonitorApi.upsert(projectId, payload);
       setMonitor(updated);
@@ -346,6 +372,18 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
               localOptionLabel={t('schedules.modal.designAgentServerDefaultMerged')}
             />
           </div>
+          {/* Reasoning-effort tier for the design stage — the other
+              per-stage knob next to the model picker. */}
+          <div className="im-stage-field">
+            <EffortBar
+              id="issue-monitor-design-effort"
+              size="sm"
+              label={t('components.effortBar.ariaLabel')}
+              value={designEffortValue}
+              onChange={(tier) => setForm({ ...form, effort: tier })}
+              disabled={!effortDefaults.enabled}
+            />
+          </div>
         </div>
       )}
 
@@ -374,6 +412,18 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
               value={form.coding_agent_server_id}
               onChange={v => setForm({ ...form, coding_agent_server_id: v })}
               localOptionLabel={t('schedules.modal.codingAgentServerDefault')}
+            />
+          </div>
+          {/* Reasoning-effort tier for the coding stage — mirrors the
+              design-stage picker above. */}
+          <div className="im-stage-field">
+            <EffortBar
+              id="issue-monitor-coding-effort"
+              size="sm"
+              label={t('components.effortBar.ariaLabel')}
+              value={codingEffortValue}
+              onChange={(tier) => setForm({ ...form, coding_effort: tier })}
+              disabled={!effortDefaults.enabled}
             />
           </div>
         </div>
@@ -522,6 +572,8 @@ function emptyForm(): UpdateIssueMonitorReq {
     coding_model: '',
     coding_claude_config_id: '',
     coding_agent_server_id: '',
+    effort: '',
+    coding_effort: '',
     recurrence: 'daily',
     recur_time: '09:00',
     recur_days: '',
@@ -548,6 +600,8 @@ function toForm(mon: IssueMonitor): UpdateIssueMonitorReq {
     coding_model: mon.coding_model,
     coding_claude_config_id: mon.coding_claude_config_id,
     coding_agent_server_id: mon.coding_agent_server_id,
+    effort: mon.effort || '',
+    coding_effort: mon.coding_effort || '',
     recurrence: mon.recurrence,
     recur_time: mon.recur_time || '09:00',
     recur_days: mon.recur_days,

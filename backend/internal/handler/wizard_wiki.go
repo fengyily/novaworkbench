@@ -124,6 +124,10 @@ type wikiRunParams struct {
 	// CLI instructions always survive even if the role persona is empty.
 	SystemPrompt   string
 	Model          string
+	// Effort is the reasoning-effort tier (claude CLI --effort) for this
+	// wiki run. Resolved by the handler and carried so the local and remote
+	// branches emit the SAME tier.
+	Effort         string
 	ClaudeConfigID string
 	ReadKnowledge  bool
 	// AgentServerID — agent_servers.id picked in the wiki toolbar's
@@ -157,6 +161,9 @@ func (h *WizardHandler) GenerateWikiDoc(w http.ResponseWriter, r *http.Request) 
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
 		ClaudeConfigID string `json:"claude_config_id"`
+		// Effort — the reasoning-effort tier (claude CLI --effort) the user
+		// picked for this wiki run. Empty = use the stage default.
+		Effort string `json:"effort"`
 		AgentServerID string `json:"agent_server_id"`
 		ReadKnowledge bool   `json:"read_knowledge"`
 		// SyncMode — "" (origin clone/push, the legacy default) or "local"
@@ -167,6 +174,13 @@ func (h *WizardHandler) GenerateWikiDoc(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	p, job, af := h.prepareWikiDoc(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode)
+	// The user's explicit reasoning-effort pick wins over the stage default
+	// prepareWikiDoc resolved. Overwritten here (not threaded through the
+	// prepare signature) so its callers stay untouched — same pattern as the
+	// architect stage's Continue flag.
+	if af == nil && p != nil {
+		p.Effort = resolveEffort(h.llm, body.Effort, llm.StageOther)
+	}
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -294,6 +308,7 @@ func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, model
 		Prompt:         "",
 		SystemPrompt:   systemPrompt,
 		Model:          model,
+		Effort:         resolveEffort(h.llm, "", llm.StageOther),
 		ClaudeConfigID: claudeConfigID,
 		ReadKnowledge:  readKnowledge,
 		AgentServerID:  agentServerID,
@@ -312,11 +327,15 @@ func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, model
 // agentServerID / syncMode come off the scheduled_tasks row; empty
 // agentServerID means local execution and empty syncMode means "keep the
 // requirement's persisted value" (same convention as the HTTP body).
-func (h *WizardHandler) RunScheduledWiki(requirementID, model string, readKnowledge bool, agentServerID, syncMode string, cb *runCallbacks) (string, error) {
+func (h *WizardHandler) RunScheduledWiki(requirementID, model string, readKnowledge bool, agentServerID, syncMode string, effort string, cb *runCallbacks) (string, error) {
 	p, job, af := h.prepareWikiDoc(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode)
 	if af != nil {
 		return "", af
 	}
+	// The tier picked when the schedule was created wins over the stage
+	// default prepareWikiDoc resolved — same "overwrite after prepare"
+	// pattern as the architect design path.
+	p.Effort = resolveEffort(h.llm, effort, llm.StageOther)
 	go h.execWikiDoc(p, job, cb)
 	return job.ID, nil
 }
@@ -494,6 +513,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 			WorkDir:         workDir,
 			SystemPrompt:    p.SystemPrompt,
 			Model:           cliModelArg(model),
+			Effort:          p.Effort,
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       sessionArg,
 			Resume:          p.ResumeSID != "",

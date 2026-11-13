@@ -18,14 +18,16 @@
 // row automatically once a branch is picked, so the only button left is the
 // one the user actually came for.
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { CodeReview, PR, PRListResponse } from '../../api/client';
 import AttachmentPanel from '../../components/AttachmentPanel';
 import { BranchPicker } from '../../components/BranchPicker';
+import EffortBar, { type EffortTier } from '../../components/EffortBar';
 import ModelSelect from '../../components/ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../../components/ExecEnvSelect';
 import { IconPlug } from '../../components/icons';
+import { useEffortDefaults } from '../../hooks/useEffortDefaults';
 import { fmtDate } from '../../utils/intl';
 
 export type Mode = 'pr' | 'branch';
@@ -39,6 +41,18 @@ export interface RunBindingsProps {
   onModelChange: (model: string) => void;
   onConfigChange: (configId: string) => void;
   onAgentServerChange: (id: string) => void;
+  /**
+   * Fired when the user picks a reasoning-effort tier (claude CLI
+   * --effort) in the composer's effort bar.
+   *
+   * The parent owns the tier the same way it owns the model / config /
+   * agent-server picks: it keeps the value and forwards it into the
+   * review's create / update body (CodeReviewRunBinding.effort), so a
+   * re-run from history reproduces the same setup. Optional so the
+   * composer still renders (and stays usable) before the parent wires
+   * it up.
+   */
+  onEffortChange?: (tier: EffortTier) => void;
 }
 
 export interface BranchFormProps {
@@ -103,6 +117,23 @@ interface Props {
 export default function ReviewComposer(props: Props) {
   const { t } = useTranslation();
   const { mode, onModeChange, running, bindings, branchForm, defaultBranch, onClose, onEnsureDraft } = props;
+
+  // Reasoning-effort tier (claude CLI --effort) for this review.
+  //
+  // The hook loads the configured per-stage defaults asynchronously, so
+  // the picker's state stays `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage('other')` instead
+  // would freeze the shipped fallback on the first render and silently
+  // override a configured-but-different default.
+  //
+  // A review grades other people's work, so it follows the "other" stage
+  // default — the same bucket the backend's review runner resolves
+  // against when the row carries no tier.
+  const effortDefaults = useEffortDefaults();
+  const [reviewEffort, setReviewEffort] = useState<EffortTier | null>(null);
+  const reviewEffortValue = reviewEffort ?? effortDefaults.forStage('other');
 
   // On mount, give the parent a chance to provision the draft row. With no
   // branch picked yet this is a no-op (ensureDraft returns null), but it
@@ -251,6 +282,26 @@ export default function ReviewComposer(props: Props) {
                 ? t('projects.detail.reviewExecEnvRemoteHint')
                 : t('projects.detail.reviewExecEnvLocalHint')}
             </span>
+          </div>
+          {/* Reasoning-effort tier (claude CLI --effort) — the third
+              per-run knob, sitting next to the model and the execution
+              environment. The compact variant: the bar is narrow enough
+              to share the row with the two selects above. */}
+          <div className="cr-run-field">
+            <EffortBar
+              id="cr-review-effort"
+              size="sm"
+              label={t('components.effortBar.ariaLabel')}
+              value={reviewEffortValue}
+              onChange={(tier) => {
+                setReviewEffort(tier);
+                // Hand the pick to the parent, which keeps it with the
+                // other run bindings and forwards it into the review's
+                // create / update body.
+                bindings.onEffortChange?.(tier);
+              }}
+              disabled={!effortDefaults.enabled || running}
+            />
           </div>
         </div>
       </details>

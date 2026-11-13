@@ -29,6 +29,8 @@ import {
 } from '../api/client';
 import { ApiError } from '../api/client';
 import ModelSelect from './ModelSelect';
+import EffortBar, { type EffortTier } from './EffortBar';
+import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
 import { IconArrowRight, IconArchitect, IconBook, IconPin, IconRocket, IconSave } from './icons';
@@ -98,6 +100,19 @@ export function DesignCodingImmediateModal({
       : '';
   });
   const [readKnowledge, setReadKnowledge] = useState(false);
+  // Reasoning-effort tiers (claude CLI --effort). The hook loads the
+  // configured per-stage defaults asynchronously, so the picker state is
+  // `null` until the user actually picks a tier:
+  //   null            → follow the configured stage default
+  //   a concrete tier → the user picked it, and it wins
+  // Seeding the state with `effortDefaults.forStage(...)` instead would
+  // freeze the shipped fallback on the first render and silently
+  // override a configured-but-different default.
+  const effortDefaults = useEffortDefaults();
+  const [designEffort, setDesignEffort] = useState<EffortTier | null>(null);
+  const designEffortValue = designEffort ?? effortDefaults.forStage('design');
+  const [codingEffort, setCodingEffort] = useState<EffortTier | null>(null);
+  const codingEffortValue = codingEffort ?? effortDefaults.forStage('coding');
   // Designer-context toggle for the design stage: whether the architect
   // role prompt rides along with the plan-mode run.
   // Default true (checked) = historical behaviour; false = only the
@@ -169,6 +184,12 @@ export function DesignCodingImmediateModal({
         coding_model: codingModel || undefined,
         coding_claude_config_id: codingConfigId || undefined,
         coding_agent_server_id: codingAgentServerId || undefined,
+        // Reasoning-effort tiers for the two stages (claude CLI --effort).
+        // Always sent concretely: the value already resolves to the
+        // configured stage default when the user hasn't picked one, and the
+        // backend drops it wholesale when the effort master switch is off.
+        design_effort: designEffortValue,
+        coding_effort: codingEffortValue,
         branch_name: noBranch ? '' : branchName,
         base_branch: baseBranch,
         // v0.6.x no-branch:仅作用于 coding 阶段(后端 wizard_coding.go prologue
@@ -340,6 +361,19 @@ export function DesignCodingImmediateModal({
               </small>
             </div>
 
+            {/* Reasoning-effort picker for the design stage — sits right
+                below the model picker, the other per-stage knob that
+                decides how the architect run thinks. */}
+            <div className="modal-field">
+              <EffortBar
+                id="immediate-design-effort"
+                label={t('components.effortBar.ariaLabel')}
+                value={designEffortValue}
+                onChange={setDesignEffort}
+                disabled={!effortDefaults.enabled || submitting}
+              />
+            </div>
+
             {/* Read-knowledge toggle — same card styling as the
                 developer preflight modal. Knowledge pre-read runs once
                 before the design stage so the architect persona has the
@@ -447,6 +481,18 @@ export function DesignCodingImmediateModal({
               <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
                 {t('schedules.modal.modelHint')}
               </small>
+            </div>
+
+            {/* Reasoning-effort picker for the coding stage — mirrors the
+                design-stage picker above. */}
+            <div className="modal-field">
+              <EffortBar
+                id="immediate-coding-effort"
+                label={t('components.effortBar.ariaLabel')}
+                value={codingEffortValue}
+                onChange={setCodingEffort}
+                disabled={!effortDefaults.enabled || submitting}
+              />
             </div>
 
             <div className="modal-field">

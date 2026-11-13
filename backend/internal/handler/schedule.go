@@ -60,6 +60,11 @@ type createScheduleReq struct {
 	SplitTasks          bool   `json:"split_tasks"`
 	CodingModel         string `json:"coding_model"`
 	CodingAgentServerID string `json:"coding_agent_server_id"`
+	// Effort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) the scheduled run should use. Empty = follow the
+	// configured stage default at dispatch time.
+	Effort              string `json:"effort"`
+	CodingEffort        string `json:"coding_effort"`
 	// SyncMode — code-transport mode for Agent-server runs. "" (default)
 	// = origin clone/push; "local" = git bundle over SFTP. Only honored
 	// when AgentServerID or CodingAgentServerID is non-empty. Persisted on
@@ -190,6 +195,8 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SplitTasks:          body.SplitTasks,
 		CodingModel:         body.CodingModel,
 		CodingAgentServerID: body.CodingAgentServerID,
+		Effort:              body.Effort,
+		CodingEffort:        body.CodingEffort,
 		SyncMode:            model.NormalizeSyncMode(body.SyncMode),
 		Recurrence:          recurrence,
 		RecurTime:           body.RecurTime,

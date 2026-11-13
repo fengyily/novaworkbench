@@ -32,6 +32,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -69,6 +70,11 @@ type designCodingImmediateReq struct {
 	CodingModel         string `json:"coding_model"`
 	CodingConfigID      string `json:"coding_claude_config_id"`
 	CodingAgentServerID string `json:"coding_agent_server_id"`
+	// DesignEffort / CodingEffort — the reasoning-effort tier (claude CLI
+	// --effort) for each stage. Empty = follow the configured stage
+	// default at dispatch time.
+	DesignEffort        string `json:"design_effort"`
+	CodingEffort        string `json:"coding_effort"`
 	BranchName          string `json:"branch_name"`
 	BaseBranch          string `json:"base_branch"`
 	SplitTasks          bool   `json:"split_tasks"`
@@ -198,6 +204,11 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	if af != nil {
 		return "", af
 	}
+	// The tier the user picked for the design stage wins over the stage
+	// default prepareArchitectDesign resolved. Overwritten here (not
+	// threaded through the prepare signature) so the prepare function's
+	// test call sites stay untouched.
+	p.Effort = resolveEffort(h.llm, body.DesignEffort, llm.StageDesign)
 	cb := h.immediateDesignCallback(reqID, *body)
 	go h.execArchitectDesign(p, job, cb)
 	return job.ID, nil
@@ -349,6 +360,7 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				BranchName:       resolveImmediateBranch(body.BranchName, reqID, req.Kind),
 				BaseBranch:       body.BaseBranch,
 				Model:            body.CodingModel,
+				Effort:           body.CodingEffort,
 				ClaudeConfigID:   body.CodingConfigID,
 				ReadKnowledge:    body.ReadKnowledge,
 				AgentServerID:    body.CodingAgentServerID,

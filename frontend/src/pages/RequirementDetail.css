@@ -407,6 +407,41 @@
   background: var(--color-border);
   margin: 0 2px;
 }
+/* Reasoning-effort cluster — the third peer of the design toolbar's three
+   concerns (model / effort / execution environment).
+   Mirrors .design-env-cluster's shape exactly (inline-flex row, 6px gap,
+   same border + radius + background) so the toolbar reads as three evenly
+   weighted clusters rather than two bordered ones and one loose pill.
+   The bar itself lives in its OWN cluster because the model card is an
+   inline-flex + white-space:nowrap row — a ~200px effort bar dropped
+   inside it would push both selects out of view. */
+.design-effort-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+}
+.design-effort-cluster-caption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+/* The effort bar's one-line tier explanation is a form-context affordance
+   sized for a full-width settings row. Inside the toolbar cluster and the
+   compact preflight field card it would stretch the row to several hundred
+   pixels, so it is dropped there — the caption, the five segments and each
+   segment's own tooltip still carry the meaning, and the settings page
+   shows the full sentence. */
+.design-effort-cluster .effort-bar-desc,
+.preflight-field-card--exec .effort-bar-desc {
+  display: none;
+}
 /* Sub-cluster that toggles ON only when an Agent server is picked.
    Renders as a small bordered chip so the SyncMode picker visibly attaches
    to the Agent Server picker instead of appearing as a free-floating <select>. */

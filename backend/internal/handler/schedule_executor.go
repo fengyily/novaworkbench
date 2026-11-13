@@ -59,7 +59,7 @@ func (e *ScheduledExecutor) RunScheduledDesign(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", err
 	}
-	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, p.BaseBranch, e.callbackFor(schedID))
+	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, p.BaseBranch, p.Effort, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
 	}
@@ -100,7 +100,7 @@ func (e *ScheduledExecutor) RunScheduledWiki(ctx context.Context, p scheduler.Wi
 	if err != nil {
 		return "", err
 	}
-	_, err = e.h.RunScheduledWiki(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, e.callbackFor(schedID))
+	_, err = e.h.RunScheduledWiki(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, p.Effort, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +331,7 @@ func (e *ScheduledExecutor) RunScheduledDesignAndCoding(ctx context.Context, p s
 	//    pre-gate and now). Pass the user-picked model + agent server
 	//    through the design-stage fields of the merged task; ReadKnowledge
 	//    is shared between the two stages per the merge-modal UI.
-	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, p.SyncMode, p.BaseBranch, e.chainedDesignCallback(p.RequirementID, schedID, p))
+	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, p.SyncMode, p.BaseBranch, p.Effort, e.chainedDesignCallback(p.RequirementID, schedID, p))
 	if err != nil {
 		// Synchronous failure (the prepare step rejected, no goroutine was
 		// spawned). Mark the row failed immediately.
@@ -411,6 +411,9 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 				// coding schedule carries the user's choice through both
 				// stages.
 				SyncMode: p.SyncMode,
+				// The reasoning-effort tier picked when the schedule was
+				// created, for the developer stage.
+				Effort: p.CodingEffort,
 			}
 			codingJobID, cerr := e.h.RunScheduledCoding(cp, e.chainedCodingCallback(schedID))
 			if cerr != nil {

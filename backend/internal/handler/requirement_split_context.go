@@ -38,6 +38,12 @@ type splitRuntime struct {
 	// ContextBlock — 已渲染的「## 需求上下文」块。本机 CLI 路径与 HTTP
 	// 降级通道共用同一块。
 	ContextBlock string
+	// Effort — 本轮拆分的推理档位（claude CLI --effort）。拆分属于「方案
+	// 设计」阶段，默认 high。放在 runtime 里而不是给
+	// runLocalSplitTasks / runRemoteSplitTasks 各加一个位置参数，是因为
+	// 这两个函数以及它们的注入式替身（h.splitExec）已经有一长串参数，
+	// 再加一个只会让调用点更难读。
+	Effort string
 }
 
 // buildSplitContext 装配拆分这一轮的上下文块与授权。

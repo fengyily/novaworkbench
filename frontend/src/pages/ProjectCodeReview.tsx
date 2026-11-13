@@ -103,6 +103,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [runModel, setRunModel] = useState('');
   const [runConfigId, setRunConfigId] = useState('');
   const [agentServerId, setAgentServerId] = useState('');
+  // Reasoning-effort tier (claude CLI --effort) picked in the composer's
+  // advanced section. Empty = the configured 「其他任务」 stage default.
+  const [runEffort, setRunEffort] = useState('');
   const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
 
   // ── Branch mode ──────────────────────────────────────────────────────────
@@ -285,7 +288,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     model: runModel,
     claude_config_id: runConfigId,
     agent_server_id: agentServerId,
-  }), [runModel, runConfigId, agentServerId]);
+    // Empty string means "no explicit tier" — the backend then falls back
+    // to the configured stage default. Sending the key with an empty value
+    // and omitting it are equivalent there.
+    ...(runEffort ? { effort: runEffort } : {}),
+  }), [runModel, runConfigId, agentServerId, runEffort]);
 
   const resetPanel = () => {
     setReviewLines([]);
@@ -520,6 +527,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       setRunModel(full.model);
       setRunConfigId(full.claude_config_id);
       setAgentServerId(full.agent_server_id);
+      // The reasoning-effort tier the last run used, so 重跑 reproduces the
+      // same depth. The backend stamps the EFFECTIVE tier onto the row.
+      setRunEffort(full.effort || '');
       if (full.review_type === 'branch') {
         setMode('branch');
         setSession(full);
@@ -789,6 +799,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
             onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
             onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
+            onEffortChange: (tier) => { setRunEffort(tier); if (session) void saveDraftField({ effort: tier }); },
           }}
           prData={prData}
           prsLoading={prsLoading}
