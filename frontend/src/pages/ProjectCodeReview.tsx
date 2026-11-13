@@ -489,6 +489,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setRunModel('');
     setRunConfigId('');
     setAgentServerId('');
+    // The reasoning-effort tier is a per-run pick like the model / config
+    // / environment above, so a new session must not inherit the previous
+    // review's tier — and the composer reads the tier from here, so
+    // leaving it behind would show a tier that does not belong to the
+    // new review.
+    setRunEffort('');
     setBranchesError('');
     resetPanel();
   };
@@ -801,6 +807,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             configId: runConfigId,
             agentServerId,
             servers: agentServers,
+            // The tier the parent holds — the same value that goes into
+            // the create / update body. The composer renders it instead of
+            // keeping a local copy, so the bar can never show a different
+            // tier than the one the run uses (a re-run from history
+            // restores a non-default tier here).
+            effort: runEffort,
             onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
             onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
             onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },

@@ -18,7 +18,7 @@
 // row automatically once a branch is picked, so the only button left is the
 // one the user actually came for.
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { CodeReview, PR, PRListResponse } from '../../api/client';
 import AttachmentPanel from '../../components/AttachmentPanel';
@@ -28,6 +28,7 @@ import ModelSelect from '../../components/ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../../components/ExecEnvSelect';
 import { IconPlug } from '../../components/icons';
 import { useEffortDefaults } from '../../hooks/useEffortDefaults';
+import { normalizeEffortTier } from '../../utils/effort';
 import { fmtDate } from '../../utils/intl';
 
 export type Mode = 'pr' | 'branch';
@@ -42,17 +43,27 @@ export interface RunBindingsProps {
   onConfigChange: (configId: string) => void;
   onAgentServerChange: (id: string) => void;
   /**
+   * The reasoning-effort tier (claude CLI --effort) the parent currently
+   * holds — '' / undefined when the user hasn't picked one.
+   *
+   * The composer renders this value, exactly like it renders `model` and
+   * `agentServerId`. It deliberately keeps NO local copy: the parent is
+   * the single owner of the tier (it restores it from the session row on
+   * a re-run from history, and forwards it into the review's create /
+   * update body), so a local copy would let the bar show one tier while
+   * the run uses another.
+   */
+  effort?: string;
+  /**
    * Fired when the user picks a reasoning-effort tier (claude CLI
    * --effort) in the composer's effort bar.
    *
-   * The parent owns the tier the same way it owns the model / config /
-   * agent-server picks: it keeps the value and forwards it into the
-   * review's create / update body (CodeReviewRunBinding.effort), so a
-   * re-run from history reproduces the same setup. Optional so the
-   * composer still renders (and stays usable) before the parent wires
-   * it up.
+   * REQUIRED, because this callback is the ONLY way the tier changes:
+   * the composer has no local state for it (see `effort` above). An
+   * unwired callback would leave the bar inert — the user clicks a tier
+   * and nothing happens, with no error to explain why.
    */
-  onEffortChange?: (tier: EffortTier) => void;
+  onEffortChange: (tier: EffortTier) => void;
 }
 
 export interface BranchFormProps {
@@ -120,20 +131,24 @@ export default function ReviewComposer(props: Props) {
 
   // Reasoning-effort tier (claude CLI --effort) for this review.
   //
-  // The hook loads the configured per-stage defaults asynchronously, so
-  // the picker's state stays `null` until the user actually picks a tier:
-  //   null            → follow the configured stage default
-  //   a concrete tier → the user picked it, and it wins
-  // Seeding the state with `effortDefaults.forStage('other')` instead
-  // would freeze the shipped fallback on the first render and silently
-  // override a configured-but-different default.
+  // The tier is READ from the parent, never held locally: the parent
+  // owns it (it restores the tier a previous run used when the user
+  // re-runs a review from history, and forwards the tier into the
+  // review's create / update body). A local copy would let the bar show
+  // one tier while the run uses another — which is exactly what happened
+  // before this was a binding: re-running a review that had used `max`
+  // showed the "other" stage default (`high`) on the bar while the run
+  // used `max`.
   //
-  // A review grades other people's work, so it follows the "other" stage
-  // default — the same bucket the backend's review runner resolves
-  // against when the row carries no tier.
+  // With no explicit pick the bar shows the configured stage default
+  // (a review grades other people's work, so it follows the "other"
+  // bucket — the same one the backend resolves against when the row
+  // carries no tier). The DISPLAYED default is not sent as a pick: the
+  // backend owns the "configured stage default" layer of the resolution
+  // chain, and a frontend guess must not outrank it (see effortPick).
   const effortDefaults = useEffortDefaults();
-  const [reviewEffort, setReviewEffort] = useState<EffortTier | null>(null);
-  const reviewEffortValue = reviewEffort ?? effortDefaults.forStage('other');
+  const reviewEffortValue = (normalizeEffortTier(bindings.effort)
+    || effortDefaults.forStage('other')) as EffortTier;
 
   // On mount, give the parent a chance to provision the draft row. With no
   // branch picked yet this is a no-op (ensureDraft returns null), but it
@@ -294,11 +309,12 @@ export default function ReviewComposer(props: Props) {
               label={t('components.effortBar.ariaLabel')}
               value={reviewEffortValue}
               onChange={(tier) => {
-                setReviewEffort(tier);
                 // Hand the pick to the parent, which keeps it with the
                 // other run bindings and forwards it into the review's
-                // create / update body.
-                bindings.onEffortChange?.(tier);
+                // create / update body. The parent then feeds the value
+                // back down through `bindings.effort`, so the bar and the
+                // run can never disagree.
+                bindings.onEffortChange(tier);
               }}
               disabled={!effortDefaults.enabled || running}
             />
