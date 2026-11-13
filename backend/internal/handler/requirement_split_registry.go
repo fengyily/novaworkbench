@@ -43,6 +43,9 @@ type splitRun struct {
 	Error string
 	// Candidates — AI 产出的候选子需求（成功时非空）。
 	Candidates []prompt.SplitTask
+	// References — AI 以架构师视角判断的「互相参考」建议（成功时可能为空：
+	// 模型判断确实没有互相引用的子需求对）。
+	References []prompt.SplitReference
 	// Model — 这一轮实际生效的模型（persona 默认值或用户覆盖值）。
 	Model string
 	// AgentServerID — 空 = 本机执行；非空 = 跑在那台 Agent Server 上。
@@ -113,7 +116,8 @@ func (r *splitRuns) start(jobID, reqID, model, agentServerID string) *splitRun {
 //
 // 调用约定：必须在 job.Finish **之前**调用 —— store.Job.Finish 会关闭所有订阅者
 // channel，订阅者醒来时读到的必须是已填好的状态。
-func (r *splitRuns) finish(jobID string, status store.JobStatus, errMsg string, candidates []prompt.SplitTask) {
+func (r *splitRuns) finish(jobID string, status store.JobStatus, errMsg string,
+	candidates []prompt.SplitTask, references []prompt.SplitReference) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	run := r.byJob[jobID]
@@ -127,6 +131,12 @@ func (r *splitRuns) finish(jobID string, status store.JobStatus, errMsg string, 
 	} else {
 		run.Candidates = make([]prompt.SplitTask, len(candidates))
 		copy(run.Candidates, candidates)
+	}
+	if references == nil {
+		run.References = nil
+	} else {
+		run.References = make([]prompt.SplitReference, len(references))
+		copy(run.References, references)
 	}
 	run.FinishedAt = time.Now()
 }
@@ -152,6 +162,10 @@ func (r *splitRuns) get(jobID string) *splitRun {
 	if run.Candidates != nil {
 		out.Candidates = make([]prompt.SplitTask, len(run.Candidates))
 		copy(out.Candidates, run.Candidates)
+	}
+	if run.References != nil {
+		out.References = make([]prompt.SplitReference, len(run.References))
+		copy(out.References, run.References)
 	}
 	return &out
 }
@@ -187,6 +201,7 @@ func (r *splitRuns) consumeLatest(reqID string) {
 	if run := r.byJob[jobID]; run != nil {
 		run.Consumed = true
 		run.Candidates = nil
+		run.References = nil
 	}
 }
 

@@ -245,6 +245,55 @@
   gap: 4px 12px;
 }
 
+/* ── 互相参考 ──
+   The AI's judgement is rendered as a list of rows (pair + reason) rather
+   than as bare checkboxes in an N×N matrix — the reason is what makes the
+   suggestion reviewable, and a matrix of 55 boxes is not. */
+.req-split-refs-ai {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-subtle, rgba(148, 163, 184, 0.08));
+}
+.req-split-refs-ai-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: 4px;
+}
+.req-split-ref-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.req-split-ref-row input {
+  flex: none;
+}
+.req-split-ref-pair {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.req-split-ref-reason {
+  color: var(--color-text-muted, #64748b);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.req-split-refs-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary, #4f46e5);
+  font-size: 11px;
+  cursor: pointer;
+}
+.req-split-refs-toggle:hover {
+  text-decoration: underline;
+}
+
 /* ── Config stage ──
    The block that holds the model picker and the execution-environment
    picker. It is shown BEFORE the AI split starts, so the user picks the

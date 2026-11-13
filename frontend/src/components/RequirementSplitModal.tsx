@@ -28,6 +28,7 @@ import { useTranslation } from 'react-i18next';
 import {
   ApiError,
   requirementsApi,
+  type SplitReference,
   type SplitRunState,
   type SplitTaskCandidate,
 } from '../api/client';
@@ -112,6 +113,21 @@ interface Row {
   dependsOn: number[];
 }
 
+/**
+ * One "互相参考" pair as the modal holds it.
+ *
+ * `a` / `b` are 1-based ordinals into the CURRENT candidate list. The
+ * model's judgement is kept separately from the user's selection so the UI
+ * can show "AI 建议" (with the reason) next to the checkbox — the user can
+ * disagree with one pair without losing the rest of the judgement.
+ */
+interface RefPair {
+  a: number;
+  b: number;
+  /** The model's justification — empty when the model gave none. */
+  reason: string;
+}
+
 /** The backend's candidate shape (the `result.tasks` payload on the SSE frame). */
 interface RawCandidate {
   title?: string;
@@ -166,6 +182,82 @@ function extractCandidates(result: unknown): RawCandidate[] {
   return [];
 }
 
+/**
+ * Pulls the model's "互相参考" suggestions out of a terminal frame's
+ * `result`.
+ *
+ * Same tolerance as extractCandidates: the field is optional (a backend that
+ * does not produce references yet must not break the modal), and the pairs
+ * may live next to the candidates or on their own.
+ */
+function extractReferences(result: unknown): SplitReference[] {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+  const obj = result as Record<string, unknown>;
+  if (!Array.isArray(obj.references)) return [];
+  return (obj.references as SplitReference[]).filter(
+    (r) => r && Number.isFinite(r.from) && Number.isFinite(r.to) && r.from !== r.to,
+  );
+}
+
+/** Normalizes a pair into ascending order — the reference is undirected. */
+function normPair(a: number, b: number): [number, number] {
+  return a < b ? [a, b] : [b, a];
+}
+
+/** True when the pair (a,b) is currently selected. */
+function pairSelected(refs: [number, number][], a: number, b: number): boolean {
+  const [x, y] = normPair(a, b);
+  return refs.some((p) => p[0] === x && p[1] === y);
+}
+
+/**
+ * Rewrites the reference pairs after the candidate list was reordered or a
+ * candidate was deleted.
+ *
+ * Ordinals are POSITIONAL, so deleting candidate 3 shifts every pair that
+ * pointed at candidates 4+ down by one, and a pair that pointed at the
+ * deleted candidate itself is dropped (the map simply has no entry for it).
+ *
+ * The old implementation threw the references away on every edit, which
+ * silently discarded the model's architectural judgement — the whole point
+ * of asking for it.
+ */
+function remapPairs(
+  refs: [number, number][],
+  oldToNew: Map<number, number>,
+): [number, number][] {
+  const out: [number, number][] = [];
+  const seen = new Set<string>();
+  for (const [a, b] of refs) {
+    const na = oldToNew.get(a);
+    const nb = oldToNew.get(b);
+    if (na === undefined || nb === undefined) continue;
+    const [x, y] = normPair(na, nb);
+    const key = `${x}-${y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push([x, y]);
+  }
+  return out;
+}
+
+/** The same remapping for the model's suggestions (they carry a reason). */
+function remapRefPairs(refs: RefPair[], oldToNew: Map<number, number>): RefPair[] {
+  const out: RefPair[] = [];
+  const seen = new Set<string>();
+  for (const r of refs) {
+    const na = oldToNew.get(r.a);
+    const nb = oldToNew.get(r.b);
+    if (na === undefined || nb === undefined) continue;
+    const [x, y] = normPair(na, nb);
+    const key = `${x}-${y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ a: x, b: y, reason: r.reason });
+  }
+  return out;
+}
+
 export function RequirementSplitModal({
   open,
   onClose,
@@ -202,6 +294,12 @@ export function RequirementSplitModal({
   const [confirmElapsed, setConfirmElapsed] = useState(0);
   /** Candidate pairs the user ticked for mutual reference: [a, b] ordinals. */
   const [references, setReferences] = useState<[number, number][]>([]);
+  /** The model's own "互相参考" judgement (with reasons) — rendered as the
+   *  recommended list; the user may disagree with a pair. */
+  const [aiRefs, setAiRefs] = useState<RefPair[]>([]);
+  /** Whether the full N×N matrix is expanded (it is long — 11 candidates
+   *  make 55 pairs — so it stays hidden until asked for). */
+  const [refsExpanded, setRefsExpanded] = useState(false);
   /** The branch the master's own dev branch is created from. */
   const [sourceBranch, setSourceBranch] = useState<string>(baseBranch || '');
   /** The model this split run uses (empty = the architect persona default). */
@@ -262,6 +360,8 @@ export function RequirementSplitModal({
     setStage('config');
     setError('');
     setReferences([]);
+    setAiRefs([]);
+    setRefsExpanded(false);
     setConfirmElapsed(0);
     setStreamLines([]);
     setRunState(null);
@@ -364,6 +464,18 @@ export function RequirementSplitModal({
             const next = tasks.map(toRow).sort((a, b) => a.order - b.order);
             const ordered = next.map((r, i) => ({ ...r, order: i + 1 }));
             setRows(ordered);
+            // The model's "互相参考" judgement comes with the candidates: the
+            // user cannot work this layer out on their own, so the model
+            // proposes the pairs (with a reason) and the user confirms.
+            const refs = extractReferences(data?.result);
+            const pairs = refs
+              .filter((r) => r.from >= 1 && r.to >= 1 && r.from <= ordered.length && r.to <= ordered.length)
+              .map((r) => {
+                const [a, b] = normPair(r.from, r.to);
+                return { a, b, reason: (r.reason || '').trim() };
+              });
+            setAiRefs(pairs);
+            setReferences(pairs.map((p) => [p.a, p.b] as [number, number]));
             // Keep the status strip in sync — it counted the candidates from
             // the state payload, which was still the "running" snapshot.
             setRunState((prev) =>
@@ -385,6 +497,7 @@ export function RequirementSplitModal({
                       order: r.order,
                       depends_on: r.dependsOn,
                     })),
+                    references: pairs.map((p) => ({ from: p.a, to: p.b, reason: p.reason })),
                   }
                 : prev,
             );
@@ -451,7 +564,18 @@ export function RequirementSplitModal({
       }
       if (st.status === 'done' && st.candidates && st.candidates.length > 0) {
         const next = st.candidates.map(toRow).sort((a, b) => a.order - b.order);
-        setRows(next.map((r, i) => ({ ...r, order: i + 1 })));
+        const ordered = next.map((r, i) => ({ ...r, order: i + 1 }));
+        setRows(ordered);
+        // The restored run carries the model's reference judgement too —
+        // closing and reopening the modal must not lose it.
+        const pairs = (st.references || [])
+          .filter((r) => r.from >= 1 && r.to >= 1 && r.from <= ordered.length && r.to <= ordered.length)
+          .map((r) => {
+            const [a, b] = normPair(r.from, r.to);
+            return { a, b, reason: (r.reason || '').trim() };
+          });
+        setAiRefs(pairs);
+        setReferences(pairs.map((p) => [p.a, p.b] as [number, number]));
         setStage('review'); // show the previous candidates straight away
         setError('');
         setRestored(true);
@@ -536,6 +660,7 @@ export function RequirementSplitModal({
     setStreamLines([]);
     setError('');
     setReferences([]);
+    setAiRefs([]);
     setStage('running');
     setRestored(false); // this one is a fresh run
     setReconnecting(false);
@@ -579,42 +704,46 @@ export function RequirementSplitModal({
   };
 
   const remove = (index: number) => {
-    setRows((prev) => {
-      const next = prev.filter((_, i) => i !== index);
-      // Re-number and drop the dangling dependency ordinals — the ordinals
-      // are positional, so removing a row shifts everything below it.
-      const remap = new Map<number, number>();
-      next.forEach((r, i) => remap.set(r.order, i + 1));
-      return next.map((r, i) => ({
+    const next = rows.filter((_, i) => i !== index);
+    // Re-number and drop the dangling dependency ordinals — the ordinals
+    // are positional, so removing a row shifts everything below it.
+    const remap = new Map<number, number>();
+    next.forEach((r, i) => remap.set(r.order, i + 1));
+    setRows(
+      next.map((r, i) => ({
         ...r,
         order: i + 1,
         dependsOn: r.dependsOn
           .map((d) => remap.get(d))
           .filter((d): d is number => d !== undefined && d < i + 1),
-      }));
-    });
-    setReferences([]);
+      })),
+    );
+    // The references follow the renumbering instead of being thrown away —
+    // the model's judgement is worth keeping across an edit.
+    setReferences((prev) => remapPairs(prev, remap));
+    setAiRefs((prev) => remapRefPairs(prev, remap));
   };
 
   const move = (index: number, delta: number) => {
-    setRows((prev) => {
-      const target = index + delta;
-      if (target < 0 || target >= prev.length) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(index, 1);
-      next.splice(target, 0, moved);
-      // Ordinals are positional — renumber and fix the edges.
-      const remap = new Map<number, number>();
-      next.forEach((r, i) => remap.set(r.order, i + 1));
-      return next.map((r, i) => ({
+    const target = index + delta;
+    if (target < 0 || target >= rows.length) return;
+    const next = [...rows];
+    const [moved] = next.splice(index, 1);
+    next.splice(target, 0, moved);
+    // Ordinals are positional — renumber and fix the edges.
+    const remap = new Map<number, number>();
+    next.forEach((r, i) => remap.set(r.order, i + 1));
+    setRows(
+      next.map((r, i) => ({
         ...r,
         order: i + 1,
         dependsOn: r.dependsOn
           .map((d) => remap.get(d))
           .filter((d): d is number => d !== undefined && d < i + 1),
-      }));
-    });
-    setReferences([]);
+      })),
+    );
+    setReferences((prev) => remapPairs(prev, remap));
+    setAiRefs((prev) => remapRefPairs(prev, remap));
   };
 
   const toggleDependency = (index: number, dep: number) => {
@@ -995,21 +1124,65 @@ export function RequirementSplitModal({
                 <div className="req-split-refs">
                   <div className="req-split-refs-title">{t('requirements.split.referencesTitle')}</div>
                   <div className="req-split-refs-hint">{t('requirements.split.referencesHint')}</div>
-                  <div className="req-split-refs-grid">
-                    {referencePairs.map(([a, b]) => {
-                      const on = references.some((p) => p[0] === a && p[1] === b);
-                      return (
-                        <label key={`${a}-${b}`} className="req-split-check">
+
+                  {/* ── AI 建议 ──
+                      The model judged this layer (architect view): it picked
+                      the pairs AND said why. The user confirms or disagrees
+                      with one pair at a time instead of having to derive the
+                      whole matrix from scratch. */}
+                  {aiRefs.length > 0 && (
+                    <div className="req-split-refs-ai">
+                      <div className="req-split-refs-ai-title">
+                        {t('requirements.split.referencesAiTitle')}
+                      </div>
+                      {aiRefs.map((r) => (
+                        <label key={`ai-${r.a}-${r.b}`} className="req-split-ref-row">
                           <input
                             type="checkbox"
-                            checked={on}
-                            onChange={() => toggleReference(a, b)}
+                            checked={pairSelected(references, r.a, r.b)}
+                            onChange={() => toggleReference(r.a, r.b)}
                           />
-                          {a}↔{b}
+                          <span className="req-split-ref-pair">
+                            {r.a}↔{r.b}
+                          </span>
+                          <span className="req-split-ref-reason">
+                            {r.reason || t('requirements.split.referencesNoReason')}
+                          </span>
                         </label>
-                      );
-                    })}
-                  </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── 全部组合 ──
+                      The full matrix is long (11 candidates → 55 pairs), so
+                      it stays collapsed until asked for. */}
+                  <button
+                    type="button"
+                    className="req-split-refs-toggle"
+                    onClick={() => setRefsExpanded((v) => !v)}
+                    aria-expanded={refsExpanded}
+                  >
+                    {refsExpanded
+                      ? t('requirements.split.referencesCollapse')
+                      : t('requirements.split.referencesExpand')}
+                  </button>
+                  {refsExpanded && (
+                    <div className="req-split-refs-grid">
+                      {referencePairs.map(([a, b]) => {
+                        const on = pairSelected(references, a, b);
+                        return (
+                          <label key={`${a}-${b}`} className="req-split-check">
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              onChange={() => toggleReference(a, b)}
+                            />
+                            {a}↔{b}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 

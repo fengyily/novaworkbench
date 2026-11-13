@@ -74,8 +74,11 @@ type splitExecTarget struct {
 // 生产为 nil → execSplitTasks 走默认实现（本地 claude CLI / 远端 nova-agent-worker）。
 // 测试注入假实现来断言「用户选的执行环境有没有被真正用上」—— WizardHandler.llm
 // 是具体类型 *llm.Gateway、SSH 也是具体类型 *gossh.Client，没有别的替身方式。
+//
+// 返回 (候选, 互相参考建议, 错误原因)：三者至多其一非空 —— 失败时错误原因非空，
+// 成功时候选非空、参考建议可能为空（模型判断确实没有互相引用的子需求对）。
 type splitExecFunc func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string)
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string)
 
 // ConfirmSplitReq — POST /api/requirements/{id}/split/confirm 的请求体。
 type ConfirmSplitReq struct {
@@ -259,7 +262,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[split] %s: panic: %v", reqRow.ID, r)
-			st.runs.finish(job.ID, store.JobError, "拆分过程异常终止", nil)
+			st.runs.finish(job.ID, store.JobError, "拆分过程异常终止", nil, nil)
 			job.Append(store.LogLine{Type: "error", Content: "拆分过程异常终止"})
 			job.Finish(1, store.JobError)
 		}
@@ -288,7 +291,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在分析方案并拆分任务…"})
 
-	tasks, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, usage)
+	tasks, refs, errMsg := h.execSplitTasks(job, reqRow, body, promptText, systemPrompt, modelName, configID, usage)
 	if errMsg != "" {
 		h.finishSplitError(job, st, errMsg)
 		return
@@ -305,7 +308,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 
 	// 登记终态必须在 job.Finish 之前 —— store.Job.Finish 会关闭所有订阅者
 	// channel，订阅者醒来时读到的必须是已填好的状态。
-	st.runs.finish(job.ID, store.JobDone, "", tasks)
+	st.runs.finish(job.ID, store.JobDone, "", tasks, refs)
 	job.Append(store.LogLine{Type: "message", Content: prompt.SplitSummary(tasks)})
 	job.Finish(0, store.JobDone)
 }
@@ -317,7 +320,7 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 // The injectable h.splitExec short-circuits the whole thing — production
 // leaves it nil and the default local / remote implementations run.
 func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement, body SplitReq,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	target := splitExecTarget{AgentServerID: strings.TrimSpace(body.AgentServerID)}
 	target.Remote = target.AgentServerID != ""
 	if h.splitExec != nil {
@@ -338,7 +341,7 @@ func (h *WizardHandler) execSplitTasks(job *store.Job, reqRow *model.Requirement
 // the HTTP channel from here, which is why the remote path has no such
 // fallback (see requirement_split_remote.go).
 func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Requirement,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	workDir := h.splitWorkDir(reqRow)
 
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
@@ -359,23 +362,23 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 	if strings.TrimSpace(jsonPart) == "" {
 		jsonPart = out.planContent
 	}
-	tasks := prompt.NormalizeSplitTasks(jsonPart)
+	parsed := prompt.NormalizeSplitOutput(jsonPart)
 
-	if len(tasks) == 0 {
+	if len(parsed.Tasks) == 0 {
 		// CLI path produced nothing usable — fall back to the direct HTTP
 		// channel before giving up.
 		job.Append(store.LogLine{Type: "phase", Content: "⚠️ 本地 CLI 未产出可解析的拆分结果，改用直接 LLM 通道重试…"})
 		raw, ferr := h.llm.ExtractSubRequirementsFromDesign(reqRow.DesignDocs, out.errMsg)
 		if ferr != nil {
-			return nil, "拆分失败: " + ferr.Error()
+			return nil, nil, "拆分失败: " + ferr.Error()
 		}
-		tasks = prompt.NormalizeSplitTasks(raw)
-		if len(tasks) == 0 {
-			return nil, "未能从技术方案中解析出候选子需求，请调整方案后重试"
+		parsed = prompt.NormalizeSplitOutput(raw)
+		if len(parsed.Tasks) == 0 {
+			return nil, nil, "未能从技术方案中解析出候选子需求，请调整方案后重试"
 		}
 	}
 
-	return tasks, ""
+	return parsed.Tasks, parsed.References, ""
 }
 
 // finishSplitError reports a failed split on the job stream.
@@ -384,7 +387,7 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 // can serve it after the modal is reopened) and as an "error" log line (so it
 // shows up in the live stream).
 func (h *WizardHandler) finishSplitError(job *store.Job, st *splitState, msg string) {
-	st.runs.finish(job.ID, store.JobError, msg, nil)
+	st.runs.finish(job.ID, store.JobError, msg, nil, nil)
 	job.Append(store.LogLine{Type: "error", Content: msg})
 	job.Finish(1, store.JobError)
 }
@@ -443,17 +446,25 @@ func (h *WizardHandler) StreamSplitJob(w http.ResponseWriter, r *http.Request) {
 		var errMsg string
 		if run := st.runs.get(jobID); run != nil {
 			errMsg = run.Error
-			// 终帧的 result 统一是对象 {"tasks":[...]}。
+			// 终帧的 result 统一是对象 {"tasks":[...], "references":[...]}。
 			//
 			// 旧实现把候选裸数组塞进 result，而前端读的是 result.tasks ——
 			// 两者永远对不上，拆分在 UI 上一直是坏的（每次都报"结果已失效"）。
 			// 对象形态可扩展（将来加 model / exec_env 不破坏前端），前端
 			// 同时兼容裸数组 / {tasks} / {candidates} 三种形态。
+			//
+			// references 是模型以架构师视角判断的「互相参考」建议（批次内
+			// 序号对 + 判断理由）。这一层人眼很难自己判断，所以由模型给结论，
+			// 用户只需要确认或微调。
 			tasks := run.Candidates
 			if tasks == nil {
 				tasks = []prompt.SplitTask{} // tasks 永远是数组，不是 null
 			}
-			result = map[string]any{"tasks": tasks}
+			refs := run.References
+			if refs == nil {
+				refs = []prompt.SplitReference{}
+			}
+			result = map[string]any{"tasks": tasks, "references": refs}
 		}
 		doneData, _ := json.Marshal(map[string]interface{}{
 			"type":        "job_done",
@@ -492,6 +503,7 @@ func (h *WizardHandler) GetSplitState(w http.ResponseWriter, r *http.Request) {
 			"running":         false,
 			"error_message":   "",
 			"candidates":      []prompt.SplitTask{},
+			"references":      []prompt.SplitReference{},
 			"model":           "",
 			"exec_env":        "",
 			"agent_server_id": "",
@@ -519,6 +531,7 @@ func (h *WizardHandler) GetSplitState(w http.ResponseWriter, r *http.Request) {
 		"running":         run.Status == store.JobRunning,
 		"error_message":   run.Error,
 		"candidates":      splitCandidatesOrEmpty(run.Candidates), // 归一为 []，不吐 null
+		"references":      splitReferencesOrEmpty(run.References), // 归一为 []，不吐 null
 		"model":           run.Model,
 		"exec_env":        execEnv, // local | agent-server
 		"agent_server_id": run.AgentServerID,
@@ -534,6 +547,15 @@ func splitCandidatesOrEmpty(c []prompt.SplitTask) []prompt.SplitTask {
 		return []prompt.SplitTask{}
 	}
 	return c
+}
+
+// splitReferencesOrEmpty normalizes a nil reference slice into an empty one —
+// same rule as the candidate list: the wire format always carries an array.
+func splitReferencesOrEmpty(r []prompt.SplitReference) []prompt.SplitReference {
+	if r == nil {
+		return []prompt.SplitReference{}
+	}
+	return r
 }
 
 // ── POST /api/requirements/{id}/split/confirm ─────────────────────────────

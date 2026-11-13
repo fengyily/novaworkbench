@@ -45,15 +45,15 @@ import (
 //     precisely the model can cite file paths.
 
 // runRemoteSplitTasks runs the split on an Agent Server and returns the parsed
-// candidate list. It returns either the candidates or a user-facing error
-// message, never both.
+// candidate list plus the model's "互相参考" suggestions. It returns either
+// the candidates or a user-facing error message, never both.
 func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requirement, agentServerID,
-	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+	promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	if h.agentSvrSvc == nil {
-		return nil, "Agent 服务器服务未初始化，无法在远端执行拆分。可切回本地执行后重新生成。"
+		return nil, nil, "Agent 服务器服务未初始化，无法在远端执行拆分。可切回本地执行后重新生成。"
 	}
 	if h.projectSvc == nil {
-		return nil, "项目服务未初始化，无法在远端执行拆分。可切回本地执行后重新生成。"
+		return nil, nil, "项目服务未初始化，无法在远端执行拆分。可切回本地执行后重新生成。"
 	}
 
 	// Rolling ctx: the idle window resets on every NDJSON line from the
@@ -66,13 +66,13 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 
 	srv, plain, err := h.agentSvrSvc.GetWithCredential(agentServerID)
 	if err != nil {
-		return nil, "无法读取 Agent 服务器凭据: " + err.Error()
+		return nil, nil, "无法读取 Agent 服务器凭据: " + err.Error()
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
 
 	client, err := gossh.Dial(runCtx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
 	if err != nil {
-		return nil, "SSH 连接失败: " + err.Error()
+		return nil, nil, "SSH 连接失败: " + err.Error()
 	}
 	defer client.Close()
 
@@ -81,7 +81,7 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 	// `git clone` fail with exit 128.
 	originURL, err := h.projectSvc.OriginURL(reqRow.ProjectID)
 	if err != nil || originURL == "" {
-		return nil, "项目未配置 git 远程仓库，无法在 Agent 服务器执行拆分。请先在项目设置中配置 origin，或切回本地执行。"
+		return nil, nil, "项目未配置 git 远程仓库，无法在 Agent 服务器执行拆分。请先在项目设置中配置 origin，或切回本地执行。"
 	}
 
 	worktreeRoot := agentWorktreeRootFor(srv)
@@ -92,14 +92,14 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 	// guard the wizard paths use, so a read-only root fails with guidance
 	// instead of `git clone` EACCES.
 	if werr := ensureRemoteWorkRoot(runCtx, client, worktreeRoot, job, false); werr != nil {
-		return nil, werr.Error()
+		return nil, nil, werr.Error()
 	}
 
 	job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码..."})
 	if !client.Exists(baseRepo) {
 		job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
 		if exit, _ := client.Exec(runCtx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: job}, nil); exit != 0 {
-			return nil, fmt.Sprintf("git clone 失败（exit=%s），请检查 origin 凭据，或切回本地执行后重新生成", fmtInt(exit))
+			return nil, nil, fmt.Sprintf("git clone 失败（exit=%s），请检查 origin 凭据，或切回本地执行后重新生成", fmtInt(exit))
 		}
 	}
 	// The scratch clone is long-lived, so its origin still carries whichever
@@ -131,7 +131,7 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行拆分（nova-agent-worker）..."})
 	out, errMsg := runRemoteWorkerStreamWith(h.llm, runCtx, client, srv, job, opts, configID, "requirement-split", usage, hb)
 	if errMsg != "" {
-		return nil, errMsg
+		return nil, nil, errMsg
 	}
 
 	// finalResult is the authoritative output; streamText is the fallback for
@@ -142,13 +142,13 @@ func (h *WizardHandler) runRemoteSplitTasks(job *store.Job, reqRow *model.Requir
 		raw = out.streamText
 	}
 	if strings.TrimSpace(raw) == "" {
-		return nil, "Agent 服务器未返回任何拆分内容。可切回本地执行后重新生成。"
+		return nil, nil, "Agent 服务器未返回任何拆分内容。可切回本地执行后重新生成。"
 	}
 
 	jsonPart, _ := extractTrailingJSON(raw)
-	tasks := prompt.NormalizeSplitTasks(jsonPart)
-	if len(tasks) == 0 {
-		return nil, "Agent 服务器未返回可解析的候选子需求。可切回本地执行后重新生成。"
+	parsed := prompt.NormalizeSplitOutput(jsonPart)
+	if len(parsed.Tasks) == 0 {
+		return nil, nil, "Agent 服务器未返回可解析的候选子需求。可切回本地执行后重新生成。"
 	}
-	return tasks, ""
+	return parsed.Tasks, parsed.References, ""
 }

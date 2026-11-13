@@ -35,7 +35,7 @@ func TestSplitRuns_RegistryLifecycle(t *testing.T) {
 		t.Errorf("candidates = %v, want nil", got.Candidates)
 	}
 
-	runs.finish("job_1", store.JobDone, "", []prompt.SplitTask{{Title: "A", Order: 1}})
+	runs.finish("job_1", store.JobDone, "", []prompt.SplitTask{{Title: "A", Order: 1}}, nil)
 	got = runs.get("job_1")
 	if got == nil || got.Status != store.JobDone {
 		t.Fatalf("run = %+v, want status done", got)
@@ -65,7 +65,7 @@ func TestSplitRuns_RegistryLifecycle(t *testing.T) {
 func TestSplitRuns_ConsumeLatest(t *testing.T) {
 	runs := newSplitRuns(4)
 	runs.start("job_1", "req_a", "", "")
-	runs.finish("job_1", store.JobDone, "", []prompt.SplitTask{{Title: "A", Order: 1}})
+	runs.finish("job_1", store.JobDone, "", []prompt.SplitTask{{Title: "A", Order: 1}}, nil)
 
 	if runs.latestFor("req_a") == nil {
 		t.Fatal("latestFor(req_a) = nil, want the run")
@@ -87,9 +87,9 @@ func TestSplitRuns_EvictOldestSkipsRunningRuns(t *testing.T) {
 
 	runs.start("job_running", "req_a", "", "")
 	runs.start("job_done1", "req_b", "", "")
-	runs.finish("job_done1", store.JobDone, "", nil)
+	runs.finish("job_done1", store.JobDone, "", nil, nil)
 	runs.start("job_done2", "req_c", "", "")
-	runs.finish("job_done2", store.JobDone, "", nil)
+	runs.finish("job_done2", store.JobDone, "", nil, nil)
 
 	if runs.get("job_running") == nil {
 		t.Error("the running run was evicted — it must never be")
@@ -152,9 +152,9 @@ func TestGetSplitState_RunningThenDone(t *testing.T) {
 
 	release := make(chan struct{})
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		<-release
-		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")
@@ -227,11 +227,11 @@ func TestStreamSplitJob_TerminalFrameCarriesTasks(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		return []prompt.SplitTask{
 			{Title: "子需求 A", Order: 1},
 			{Title: "子需求 B", Order: 2, DependsOn: []int{1}},
-		}, ""
+		}, nil, ""
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")
@@ -272,8 +272,8 @@ func TestStreamSplitJob_TerminalFrameCarriesErrorMessage(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
-		return nil, "远端失败"
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		return nil, nil, "远端失败"
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")
@@ -304,8 +304,8 @@ func TestConfirmSplit_ConsumesTheRun(t *testing.T) {
 	h, _, _ := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
 
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
-		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")
@@ -348,9 +348,9 @@ func TestSplit_ConcurrentRefusalKeepsTheRunningRun(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	h.splitExec = func(job *store.Job, reqRow *model.Requirement, target splitExecTarget,
-		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, string) {
+		promptText, systemPrompt, modelName, configID string, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 		<-release
-		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, ""
+		return []prompt.SplitTask{{Title: "子需求 A", Order: 1}}, nil, ""
 	}
 
 	status, jobID := splitStartJob(t, h, "req_m", "{}")

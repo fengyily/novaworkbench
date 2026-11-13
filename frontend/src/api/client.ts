@@ -1508,6 +1508,17 @@ export interface SplitTaskCandidate {
   depends_on: number[];
 }
 
+// 一对「互相参考」的子需求 —— 由模型以架构师视角判断，用户只需要确认或微调。
+//
+// from / to 是**批次内序号**（1 起算，与候选列表的顺序一致），不是数据库 id。
+// 互相引用是无向的：后端已把 from / to 归一成 from < to。
+export interface SplitReference {
+  from: number;
+  to: number;
+  /** 模型给出的判断依据（一句话）。可能为空。 */
+  reason?: string;
+}
+
 // 一次拆分运行的登记状态 —— 与后端 GET /api/requirements/{id}/split/state
 // 的响应一一对应。
 //
@@ -1524,6 +1535,8 @@ export interface SplitRunState {
   error_message?: string;
   /** 候选列表；后端保证是数组（不会吐 null）。 */
   candidates: SplitTaskCandidate[];
+  /** 模型以架构师视角判断的「互相参考」建议；后端保证是数组（不会吐 null）。 */
+  references?: SplitReference[];
   /** 实际生效的模型（persona 默认值或用户覆盖值）。 */
   model?: string;
   /** local | agent-server */

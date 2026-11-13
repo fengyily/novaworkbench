@@ -42,6 +42,9 @@ const SplitJSONContract = `你正在把一份技术方案拆分成若干个可�
       "order": 1,
       "depends_on": []
     }
+  ],
+  "references": [
+    { "from": 1, "to": 2, "reason": "2 的上报格式由 1 定义，两者必须保持一致" }
   ]
 }
 ` + "```" + `
@@ -66,8 +69,23 @@ const SplitJSONContract = `你正在把一份技术方案拆分成若干个可�
    共享同一条基线，合并顺序由依赖关系决定，不由编译依赖决定。
 8. **depends_on 只能引用同一批次内 order 更小的任务序号**（1 起算）。序号
    表示「本子需求依赖谁先完成」，只能向后指，不得成环。
-9. **JSON 块必须是整个回复的最后一段**。正文里不要出现其它 json 围栏块，否则
-   解析会取到错误的那一段。`
+9. **references 由你以架构师视角判断**（这是本次拆分的核心判断项，务必认真对待）：
+   - **互相参考 ≠ 前置依赖**。depends_on 是执行顺序闸门（后者没做完，前者不能
+     开始）；references 是**上下文共享**（两个子需求在方案阶段互相引用对方的
+     产出 / 接口约定 / 设计约束），它不阻塞任何流程。
+   - **只在确实共享上下文时才连**。典型场景：一方定义了另一方必须遵守的接口 /
+     数据结构 / 协议；两者必须对同一份设计保持一致；一方要消费另一方的产出。
+     如果两个子需求只是「都属于同一个大需求」，那是**不连**的理由，不是连的理由。
+   - **宁可少连，不要两两相连**。漏连的代价只是少一点上下文；连多了会让每个
+     子需求的上下文被无关内容淹没，反而稀释了关键信息。
+   - from / to 都是同一批次内的 order 序号（1 起算），表示「这两个子需求需要互相
+     引用」；from 可以大于 to，含义相同（互相引用是无向的）。
+   - **reason 必填**，用一句话说明为什么这两个子需求需要互相引用。用户会在确认
+     界面上看到它，并据此判断你的判断是否正确 —— 写「无理由」「相关」这种废话
+     等于没判断。
+   - 如果确实没有任何一对需要互相引用，references 给空数组 []。
+10. **JSON 块必须是整个回复的最后一段**。正文里不要出现其它 json 围栏块，否则
+    解析会取到错误的那一段。`
 
 // splitContractTail is the closing instruction that repeats the "JSON last"
 // rule right before the model starts writing — models weight the last
@@ -88,6 +106,27 @@ type SplitTask struct {
 	DependsOn   []int    `json:"depends_on"`
 }
 
+// SplitReference — 一对「互相参考」的子需求。
+//
+// From / To 是**批次内序号**（1-based，与 SplitTask.Order 同一坐标系），不是
+// 数据库 id。互相引用是**无向**的：归一化后 From < To。
+//
+// Reason 是模型给出的判断依据（一句话）。用户在人眼难以判断这一层，所以由
+// 架构师视角的模型给出结论 + 理由，用户只需要确认或微调。
+type SplitReference struct {
+	From   int    `json:"from"`
+	To     int    `json:"to"`
+	Reason string `json:"reason"`
+}
+
+// SplitOutput — 一次拆分的完整产出：候选列表 + 互相参考建议。
+type SplitOutput struct {
+	// Tasks — 候选子需求（已归一化）。
+	Tasks []SplitTask
+	// References — 互相参考建议（已归一化，无向去重）。
+	References []SplitReference
+}
+
 // 拆分产物的归一化上限。
 const (
 	// splitMaxTasks — 单次拆分最多保留多少条候选。契约里写死 2–12，超出截断
@@ -96,6 +135,11 @@ const (
 	// splitTitleMaxRunes — 子需求标题的 rune 上限。标题进列表行 / 树形节点，
 	// 太长会把行撑开。
 	splitTitleMaxRunes = 40
+	// splitMaxReferences — 单次拆分最多保留多少对「互相参考」。
+	//
+	// 12 个候选共有 66 对组合，全连等于没有引用（每个子需求的上下文都会被
+	// 无关内容淹没）。契约要求模型「宁可少连」，这里再兜一道上限。
+	splitMaxReferences = 20
 )
 
 // splitFenceRe — 剥掉模型可能带上的 ```json / ``` 围栏。
@@ -171,7 +215,19 @@ func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildre
 //     carries something the user can edit
 //   - the result is sorted by order and capped at splitMaxTasks
 func NormalizeSplitTasks(raw string) []SplitTask {
-	out := []SplitTask{}
+	return NormalizeSplitOutput(raw).Tasks
+}
+
+// NormalizeSplitOutput parses the model's raw output into the full split
+// product: the candidate list AND the "互相参考" suggestions.
+//
+// It is the entry point the handlers use — the references are part of the
+// model's architectural judgement, so they must travel with the candidates
+// instead of being re-derived (or, worse, asked of the user).
+//
+// Never returns nil slices: an unparseable payload yields empty slices.
+func NormalizeSplitOutput(raw string) SplitOutput {
+	out := SplitOutput{Tasks: []SplitTask{}, References: []SplitReference{}}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return out
@@ -183,7 +239,8 @@ func NormalizeSplitTasks(raw string) []SplitTask {
 	}
 
 	var envelope struct {
-		Tasks []SplitTask `json:"tasks"`
+		Tasks      []SplitTask      `json:"tasks"`
+		References []SplitReference `json:"references"`
 	}
 	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
 		return out
@@ -209,17 +266,62 @@ func NormalizeSplitTasks(raw string) []SplitTask {
 			task.Acceptance = []string{"（待补充验收标准）"}
 		}
 		task.DependsOn = normalizeDependsOn(task.DependsOn, task.Order)
-		out = append(out, task)
+		out.Tasks = append(out.Tasks, task)
 	}
 
 	// Stable sort by order.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].Order < out[j-1].Order; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
+	for i := 1; i < len(out.Tasks); i++ {
+		for j := i; j > 0 && out.Tasks[j].Order < out.Tasks[j-1].Order; j-- {
+			out.Tasks[j], out.Tasks[j-1] = out.Tasks[j-1], out.Tasks[j]
 		}
 	}
-	if len(out) > splitMaxTasks {
-		out = out[:splitMaxTasks]
+	if len(out.Tasks) > splitMaxTasks {
+		out.Tasks = out.Tasks[:splitMaxTasks]
+	}
+
+	out.References = normalizeSplitReferences(envelope.References, len(out.Tasks))
+	return out
+}
+
+// normalizeSplitReferences sanitizes the model's reference suggestions.
+//
+// Rules:
+//   - both ends must be valid ordinals into the (already normalized) task
+//     list; anything else is dropped
+//   - a self-reference is dropped
+//   - references are UNDIRECTED: (2,1) and (1,2) are the same pair, stored as
+//     (from < to) and de-duplicated (the first reason wins)
+//   - the count is capped at splitMaxReferences
+//
+// The ordinals are positions in the NORMALIZED task list (which is sorted by
+// order), so they line up with the candidate table the user sees.
+func normalizeSplitReferences(in []SplitReference, taskCount int) []SplitReference {
+	out := []SplitReference{}
+	seen := map[[2]int]struct{}{}
+	for _, ref := range in {
+		from, to := ref.From, ref.To
+		if from < 1 || to < 1 || from > taskCount || to > taskCount {
+			continue
+		}
+		if from == to {
+			continue
+		}
+		if from > to {
+			from, to = to, from
+		}
+		key := [2]int{from, to}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, SplitReference{
+			From:   from,
+			To:     to,
+			Reason: truncateRunes(strings.TrimSpace(ref.Reason), 200),
+		})
+		if len(out) >= splitMaxReferences {
+			break
+		}
 	}
 	return out
 }
