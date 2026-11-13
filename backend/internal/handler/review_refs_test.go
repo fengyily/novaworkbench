@@ -233,3 +233,67 @@ func TestResolveDiffRefs_FetchOKBranchMissing(t *testing.T) {
 		t.Fatalf("legacy message should be preserved on fetch-success path, got: %v", err)
 	}
 }
+
+// TestResolveDiffRefsPref_LocalHeadWins pins the requirement-level Review's
+// head preference.
+//
+// The requirement-level Review grades the requirement's OWN worktree, and
+// that tree's branch may carry commits the user never pushed. Resolving to
+// `origin/<branch>` there would silently review the PRE-PUSH code — the
+// reviewer would keep reporting findings the user already fixed, so the
+// 「修复 → 回归 Review」 loop would never converge.
+//
+// The project-level Review keeps the origin-first default: its head is the
+// PR's branch on the server.
+func TestResolveDiffRefsPref_LocalHeadWins(t *testing.T) {
+	work := newRefsFixture(t)
+	commitOnBranch(t, work, "feat/x", "x.txt")
+	gitIn(t, work, "push", "origin", "feat/x")
+	// One more commit, this time LOCAL ONLY.
+	gitIn(t, work, "checkout", "feat/x")
+	if err := os.WriteFile(filepath.Join(work, "y.txt"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, work, "add", "y.txt")
+	gitIn(t, work, "commit", "-m", "local only")
+
+	// Default (project-level Review): the pushed ref wins.
+	head, _, _, err := resolveDiffRefs(context.Background(), work, "feat/x", "main", nil)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if head != "origin/feat/x" {
+		t.Fatalf("default head = %q, want origin/feat/x", head)
+	}
+
+	// Requirement-level Review: the local branch wins, so the unpushed
+	// commit is inside the reviewed range.
+	head, base, _, err := resolveDiffRefsPref(context.Background(), work, "feat/x", "main", nil, true)
+	if err != nil {
+		t.Fatalf("resolve (local head): %v", err)
+	}
+	if head != "feat/x" {
+		t.Fatalf("local-first head = %q, want feat/x", head)
+	}
+	if base != "origin/main" {
+		t.Fatalf("base = %q, want origin/main (the base side keeps origin-first)", base)
+	}
+}
+
+// TestResolveDiffRefsPref_LocalHeadFallsBackToOrigin pins the fallback: a
+// branch that only exists on the server still resolves when the local copy
+// is preferred — otherwise a requirement developed elsewhere would break.
+func TestResolveDiffRefsPref_LocalHeadFallsBackToOrigin(t *testing.T) {
+	work := newRefsFixture(t)
+	commitOnBranch(t, work, "feat/remote", "c.txt")
+	gitIn(t, work, "push", "origin", "feat/remote")
+	gitIn(t, work, "branch", "-D", "feat/remote")
+
+	head, _, _, err := resolveDiffRefsPref(context.Background(), work, "feat/remote", "main", nil, true)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if head != "origin/feat/remote" {
+		t.Fatalf("head = %q, want origin/feat/remote", head)
+	}
+}

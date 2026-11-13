@@ -30,6 +30,27 @@ import (
 // Nothing here checks anything out. The repo may be mid-worktree or have a
 // dirty tree; reading two refs is safe either way.
 func resolveDiffRefs(ctx context.Context, repoDir, branch, base string, env []string) (headRef, baseRef, fetchWarning string, err error) {
+	return resolveDiffRefsPref(ctx, repoDir, branch, base, env, false)
+}
+
+// resolveDiffRefsPref is resolveDiffRefs with an explicit HEAD preference.
+//
+// preferLocalHead flips the head side to LOCAL-first: the local branch wins
+// over its `origin/<branch>` twin.
+//
+// WHY the flip exists: the project-level Review grades a PR, and both sides of
+// a PR live on the server — `origin/<x>` is the shared truth, so origin-first
+// is right there. The requirement-level Review is different: its scope is the
+// requirement's OWN worktree, i.e. the code the user has in front of them.
+// That tree's branch may carry commits that were never pushed, and diffing
+// against `origin/<branch>` would then silently review the PRE-PUSH code —
+// the reviewer would grade code the user already replaced, and the
+// 「修复 → 回归 Review」 loop would keep re-grading stale code.
+//
+// The base side keeps the origin-first default in both modes: the base
+// branch is only a comparison anchor, and the three-dot diff resolves it to
+// the merge base anyway.
+func resolveDiffRefsPref(ctx context.Context, repoDir, branch, base string, env []string, preferLocalHead bool) (headRef, baseRef, fetchWarning string, err error) {
 	if strings.TrimSpace(branch) == "" {
 		return "", "", "", fmt.Errorf("目标分支不能为空")
 	}
@@ -43,7 +64,7 @@ func resolveDiffRefs(ctx context.Context, repoDir, branch, base string, env []st
 		warning = fmt.Sprintf("⚠️ git fetch origin 失败 (exit=%d): %s", fetch.exitCode, fetch.stderr)
 	}
 
-	headRef, ok := pickRef(ctx, repoDir, branch, env)
+	headRef, ok := pickRefPref(ctx, repoDir, branch, env, preferLocalHead)
 	if !ok {
 		enrich := "在本地与 origin 上都不存在"
 		if !fetch.ok {
@@ -124,7 +145,24 @@ func exitCodeFromError(err error) int {
 // ("", false). A name the user already qualified with `origin/` is checked
 // verbatim first so pasting a remote ref works.
 func pickRef(ctx context.Context, repoDir, name string, env []string) (string, bool) {
+	return pickRefPref(ctx, repoDir, name, env, false)
+}
+
+// pickRefPref is pickRef with an explicit local-first switch.
+//
+// preferLocal=true checks the local `<name>` BEFORE `origin/<name>`, so a
+// branch that exists on both sides resolves to the local copy — the one the
+// working tree is checked out on. It is what the requirement-level Review
+// needs (see resolveDiffRefsPref); the project-level Review keeps the
+// origin-first default.
+//
+// A name the user already qualified with `origin/` / `refs/` is honoured
+// verbatim in both modes — an explicit remote ref is an explicit request.
+func pickRefPref(ctx context.Context, repoDir, name string, env []string, preferLocal bool) (string, bool) {
 	candidates := []string{"origin/" + name, name}
+	if preferLocal {
+		candidates = []string{name, "origin/" + name}
+	}
 	if strings.HasPrefix(name, "origin/") || strings.HasPrefix(name, "refs/") {
 		candidates = []string{name, strings.TrimPrefix(name, "origin/")}
 	}
