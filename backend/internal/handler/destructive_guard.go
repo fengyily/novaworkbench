@@ -3,6 +3,7 @@ package handler
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -64,8 +65,12 @@ func destructiveCommandReason(toolName, cmd, workDir string) string {
 // a dangerous step ("cd <wd> && rm -rf <wd>"), so segments are judged
 // individually.
 func destructiveInCommandString(cmd, workDir string) string {
+	// The temp-var set is computed once for the whole command: an assignment
+	// (`TMP=$(mktemp -d)`) usually sits in an EARLIER segment than the `rm`
+	// that consumes it, so per-segment analysis would never see it.
+	tempVars := mktempVars(cmd)
 	for _, seg := range splitShellSegments(cmd) {
-		if reason := destructiveInTokens(shellTokens(seg), workDir); reason != "" {
+		if reason := destructiveInTokens(shellTokens(seg), workDir, tempVars); reason != "" {
 			return reason
 		}
 	}
@@ -313,7 +318,14 @@ func canonicalizePath(p string) string {
 //
 // It fails closed — an operand that cannot be resolved statically counts as
 // targeting the work dir.
-func operandTargetsWorkDir(op, workDir string) bool {
+//
+// The ONE exception is an operand that provably points at a `mktemp -d`
+// scratch directory (see mktempVars): the shell created that directory
+// itself, under the system temp dir, so it cannot be the work dir. Without
+// this carve-out the guard vetoes the extremely common
+// `TMP=$(mktemp -d) … rm -rf "$TMP"` idiom, which cost a real sub-task its
+// run (job_0984023e, req_0ee0bfd8de6f5da6).
+func operandTargetsWorkDir(op, workDir string, tempVars map[string]bool) bool {
 	if op == "" {
 		// No operand at all: the operator acts on the cwd, which is the work dir.
 		return true
@@ -322,7 +334,36 @@ func operandTargetsWorkDir(op, workDir string) bool {
 	if inner, ok := quotedLiteral(op); ok {
 		content = inner
 	}
+	if isTempVarPath(content, tempVars) {
+		// A mktemp scratch dir (or a path inside one) — never the work dir.
+		return false
+	}
 	if hasUnresolvableMeta(content) {
+		// The operand has a tail that cannot be resolved statically. Judge it
+		// by its LITERAL PREFIX — the same reasoning the glob branch uses
+		// ("a glob with a literal prefix stays inside the work dir and is
+		// harmless").
+		//
+		// "/tmp/asanok$m" (a build under a temp path, one variant per loop
+		// iteration) has the literal prefix "/tmp/asanok": an absolute path
+		// that is neither the work dir nor inside it. The tail cannot turn
+		// that into the work dir by accident — that would take a deliberate
+		// ".." climb plus a path to the work dir spelled out in the
+		// variable.
+		//
+		// A prefix that resolves INSIDE the work dir (or to the work dir
+		// itself / one of its ancestors) stays blocked: "$FOO" could be
+		// "..", and a bare "$FOO" has no prefix at all, so it fails closed.
+		if prefix := literalPrefix(content); prefix != "" {
+			resolved, globbed := resolveOperand(prefix, workDir)
+			if !globbed {
+				switch classifyPath(resolved, workDir) {
+				case relSelf, relAncestor, relDescendant:
+					return true
+				}
+				return false
+			}
+		}
 		return true
 	}
 	resolved, globbed := resolveOperand(content, workDir)
@@ -339,8 +380,151 @@ func operandTargetsWorkDir(op, workDir string) bool {
 	return false
 }
 
+// mktempVars returns the shell variables the command assigns from
+// `mktemp -d` — a freshly created scratch directory under the system temp
+// dir (or $TMPDIR).
+//
+// A variable qualifies ONLY when its SOLE assignment in the whole command is
+// that mktemp call. If the same name is also assigned something else
+// (`TMP=$(mktemp -d); TMP="$WORKDIR"`), the later assignment wins in shell
+// semantics and the relaxation must not apply — so the variable is dropped.
+//
+// The set is also empty when the command sets TMPDIR: `mktemp -d` then
+// creates the directory inside that directory, and the caller may have
+// pointed TMPDIR at the work dir.
+//
+// Everything else keeps failing closed. `$PWD`, `$HOME` and any other
+// variable stay blocked, because their value is not knowable statically.
+func mktempVars(cmd string) map[string]bool {
+	if strings.Contains(cmd, "TMPDIR=") {
+		return nil
+	}
+	// Every NAME= assignment in the command, with the right-hand side.
+	assigns := assignRe.FindAllStringSubmatch(cmd, -1)
+	counts := map[string]int{}
+	mktemp := map[string]bool{}
+	for _, a := range assigns {
+		name, rhs := a[1], a[2]
+		counts[name]++
+		if isMktempDirCall(rhs) {
+			mktemp[name] = true
+		}
+	}
+	out := map[string]bool{}
+	for name := range mktemp {
+		if counts[name] == 1 {
+			out[name] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// assignRe matches a shell variable assignment at the start of a word: the
+// name, then the right-hand side up to the next shell metacharacter.
+//
+// The command-substitution alternative comes first so that "$(mktemp -d)" is
+// captured whole — the plain-word alternative would stop at the space.
+var assignRe = regexp.MustCompile(`(?:^|[\s;&|(\n])([A-Za-z_][A-Za-z0-9_]*)=(\$\([^)]*\)|"[^"]*"|'[^']*'|[^\s;&|)\n]*)`)
+
+// isMktempDirCall reports whether an assignment's right-hand side is a
+// `mktemp -d` (or `mktemp --directory`) invocation.
+func isMktempDirCall(rhs string) bool {
+	rhs = strings.TrimSpace(rhs)
+	if len(rhs) >= 2 {
+		q := rhs[0]
+		if (q == '"' || q == '\'') && rhs[len(rhs)-1] == q {
+			rhs = rhs[1 : len(rhs)-1]
+		}
+	}
+	if !strings.HasPrefix(rhs, "$(") || !strings.Contains(rhs, "mktemp") {
+		return false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(rhs, "$("), ")")
+	for _, f := range strings.Fields(inner) {
+		if f == "-d" || f == "--directory" {
+			return true
+		}
+	}
+	return false
+}
+
+// isTempVarPath reports whether the operand refers to a mktemp scratch
+// directory, or to a path inside one: "$TMP" or "$TMP/sub/dir" where $TMP is
+// one of the command's mktemp variables.
+//
+// A ".." segment disqualifies the operand — "$TMP/../.." escapes the scratch
+// directory and could land anywhere, so it must keep failing closed.
+func isTempVarPath(content string, tempVars map[string]bool) bool {
+	if len(tempVars) == 0 || !strings.HasPrefix(content, "$") {
+		return false
+	}
+	rest := content[1:]
+	var name, suffix string
+	if strings.HasPrefix(rest, "{") {
+		// "${VAR}" form. The closing brace may already be gone: shellTokens
+		// trims grouping punctuation off token edges, which turns "${TMP}"
+		// into "${TMP". Scan an identifier and treat the rest as the suffix.
+		rest = rest[1:]
+		i := 0
+		for i < len(rest) && isIdentChar(rest[i]) {
+			i++
+		}
+		name = rest[:i]
+		suffix = strings.TrimPrefix(rest[i:], "}")
+	} else {
+		i := 0
+		for i < len(rest) && isIdentChar(rest[i]) {
+			i++
+		}
+		name, suffix = rest[:i], rest[i:]
+	}
+	if !tempVars[name] {
+		return false
+	}
+	if suffix == "" {
+		return true
+	}
+	if !strings.HasPrefix(suffix, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(suffix, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// isIdentChar reports whether c may appear in a shell variable name.
+func isIdentChar(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// literalPrefix returns the leading part of a path operand that can be
+// resolved without evaluating any shell expansion — everything before the
+// first character that could carry one.
+//
+// "/tmp/asanok$m"      → "/tmp/asanok"
+// "build/$FOO/bar"     → "build/"
+// "$FOO"               → ""   (nothing resolvable — the caller fails closed)
+// "build/*"            → ""   (a glob is not a literal prefix)
+func literalPrefix(op string) string {
+	for i := 0; i < len(op); i++ {
+		c := op[i]
+		if c == '$' || c == '`' || c == '~' || c == '!' || c == '<' || c == '>' ||
+			c == '&' || c == ';' || c == '(' || c == ')' || c == '{' || c == '}' ||
+			c == '\'' || c == '"' || c == '*' || c == '?' || c == ' ' || c == '\t' {
+			return op[:i]
+		}
+	}
+	return op
+}
+
 // destructiveInTokens scans the tokens of one command segment.
-func destructiveInTokens(toks []string, workDir string) string {
+func destructiveInTokens(toks []string, workDir string, tempVars map[string]bool) string {
 	// A shell invoked with -c runs a nested command; analyze it too, but only
 	// there — scanning every quoted string would veto harmless commit
 	// messages that merely mention "rm -rf .".
@@ -386,7 +570,7 @@ func destructiveInTokens(toks []string, workDir string) string {
 			case "worktree":
 				if sub+1 < len(toks) && toks[sub+1] == "remove" {
 					op := firstPathOperand(toks, sub+2)
-					if op == "" || operandTargetsWorkDir(op, workDir) {
+					if op == "" || operandTargetsWorkDir(op, workDir, tempVars) {
 						return msgWorktreeRm
 					}
 				}
@@ -397,13 +581,13 @@ func destructiveInTokens(toks []string, workDir string) string {
 				continue
 			}
 			for _, op := range operands {
-				if operandTargetsWorkDir(op, workDir) {
+				if operandTargetsWorkDir(op, workDir, tempVars) {
 					return msgRmWorkDir
 				}
 			}
 		case "mv":
 			for _, op := range collectPathOperands(toks, i+1) {
-				if operandTargetsWorkDir(op, workDir) {
+				if operandTargetsWorkDir(op, workDir, tempVars) {
 					return msgMvWorkDir
 				}
 			}
