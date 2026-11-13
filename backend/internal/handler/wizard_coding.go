@@ -1556,7 +1556,20 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if secretVals := secretsForAdjustRedaction(h.projectSvc, h.platformSvc, reqRow); secretVals != nil {
 		job.SetSecrets(secretVals)
 	}
-	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+	// Activity-based timeout. The old call went through llm.GenerateCode's
+	// legacy path, which installed a hard 30-minute WALL-CLOCK deadline:
+	// a run that kept streaming tool calls was killed mid-flight at exactly
+	// 30 minutes even though it was making progress (job_8c64ea6b /
+	// job_9db58f29, 2026-11-13 — both died at 耗时=30m0.04s with a
+	// tool_call on the same millisecond).
+	//
+	// The stage ctx's idle deadline slides forward on every stdout event, so
+	// "still producing output" is what keeps the run alive; the absolute cap
+	// only bounds a run that never finishes. The heartbeat channel is fed
+	// from runClaudeStream's beat(), which is wired up below.
+	stage := newStageRun("start-coding")
+	defer stage.cancel()
+	cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
@@ -1570,11 +1583,6 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		ExtraEnv:       codingExtraEnv,
 		AddDirs:        addDirs,
 	})
-	// Release the 30-minute context timer the moment runClaudeStream
-	// finishes (cmd.Wait returns) — the goroutine may then stay alive
-	// for tryAutoOrchestrate + log emission, but the claude subprocess
-	// itself is already done.
-	defer cancel()
 	codingProjectID := ""
 	if reqRow != nil {
 		codingProjectID = reqRow.ProjectID
@@ -1665,7 +1673,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
-	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
 	// No-branch mode promises "develop directly on <base>". The agent does not
 	// always honour that: on 2026-10-24 it created `fix/<reqID>`, pushed it,
@@ -2163,7 +2171,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req) != nil {
 			job.SetSecrets(secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req))
 		}
-		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+		// Activity-based timeout (see wizard_stage_timeout.go): the old
+		// GenerateCode call installed a hard 30-minute wall-clock deadline
+		// that killed an actively-streaming run at exactly 30 minutes.
+		stage := newStageRun("adjust-coding")
+		defer stage.cancel()
+		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 			Prompt:         adjustPrompt,
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
@@ -2176,9 +2189,8 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			ExtraEnv:       adjustCredEnv,
 			AddDirs:        h.grantDirsFor(body.RequirementID, ""),
 		})
-		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
 		// or too old). Surface a clear error rather than silently starting a
@@ -2499,7 +2511,10 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		if secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req) != nil {
 			job.SetSecrets(secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req))
 		}
-		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+		// Activity-based timeout (see wizard_stage_timeout.go).
+		stage := newStageRun("continue-coding")
+		defer stage.cancel()
+		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
@@ -2512,9 +2527,8 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			ExtraEnv:       continueCredEnv,
 			AddDirs:        h.grantDirsFor(req.ID, ""),
 		})
-		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
+		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
 		// Stale --resume: the coding session file is gone. Surface a clear error
 		// rather than silently starting fresh — the user can still 重新开发

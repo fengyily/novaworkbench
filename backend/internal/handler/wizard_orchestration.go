@@ -185,7 +185,11 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		prompt += llm.DecomposeSkillPropagation(reOrchSkills)
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
-		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+		// Activity-based timeout (see wizard_stage_timeout.go): the old
+		// GenerateCode call installed a flat 30-minute wall-clock deadline.
+		stage := newStageRun("re-orchestrate")
+		defer stage.cancel()
+		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
@@ -195,9 +199,8 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			SessionID:      sessionID,
 			Resume:         resume,
 		})
-		defer cancel()
 		usage := h.usageCtxForConfig("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage, nil, nil, 0)
+		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage, nil, stage.hb, 0, withCtx(stage.ctx))
 
 		switch {
 		case out.staleSession:
@@ -1393,7 +1396,10 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	if secretVals := secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req); secretVals != nil {
 		job.SetSecrets(secretVals)
 	}
-	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+	// Activity-based timeout (see wizard_stage_timeout.go).
+	stage := newStageRun("orchestrate-child")
+	defer stage.cancel()
+	cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 		Prompt:         executorPrompt,
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   execSystemPrompt,
@@ -1407,11 +1413,10 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		ExtraEnv:       credEnv,
 	})
 	if cmd == nil {
-		earlyExitReason = "GenerateCode 返回空 cmd"
-		log.Printf("[orchestrate] child %s GenerateCode returned nil cmd", st.ID)
+		earlyExitReason = "StreamCmd 返回空 cmd"
+		log.Printf("[orchestrate] child %s StreamCmd returned nil cmd", st.ID)
 		return
 	}
-	defer cancel()
 
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + st.Title})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(st.Prompt, 240)})
@@ -1445,7 +1450,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			usage:         childUsage,
 		})
 	} else {
-		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 	}
 
 	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
@@ -1731,7 +1736,10 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
 	job.SetModel(batch.Model)
 
-	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+	// Activity-based timeout (see wizard_stage_timeout.go).
+	stage := newStageRun("orchestrate-summary")
+	defer stage.cancel()
+	cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 		Prompt:         summaryB.String(),
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   "", // resumed session already has developer persona
@@ -1742,10 +1750,9 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		Resume:         true,
 		Fork:           false,
 	})
-	defer cancel()
 
 	summaryUsage := h.usageCtxForConfig("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary", batch.ClaudeConfigID)
-	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage, nil, nil, 0)
+	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage, nil, stage.hb, 0, withCtx(stage.ctx))
 
 	// Stale-session recovery：会话文件可能已被清理/失效。镜像 re-orchestrate
 	// 的 134-142：清空 OrchestratorSessionID、铸新 SID、用 Resume=false 再来一次。
@@ -1759,7 +1766,9 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		if uerr := h.batchSvc.UpdateOrchestratorSession(batchID, freshSID); uerr != nil {
 			log.Printf("[orchestrate] summary %s persist fresh sid: %v", batchID, uerr)
 		}
-		cmd2, cancel2, _ := h.llm.GenerateCode(llm.StreamOpts{
+		stage2 := newStageRun("orchestrate-summary-retry")
+		defer stage2.cancel()
+		cmd2 := h.llm.StreamCmd(stage2.ctx, llm.StreamOpts{
 			Prompt:         summaryB.String(),
 			WorkDir:        batch.WorkDir,
 			SystemPrompt:   "",
@@ -1771,8 +1780,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 			Fork:           false,
 		})
 		if cmd2 != nil {
-			defer cancel2()
-			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage, nil, nil, 0)
+			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage, nil, stage2.hb, 0, withCtx(stage2.ctx))
 		}
 	}
 

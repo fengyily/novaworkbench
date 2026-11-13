@@ -1399,7 +1399,19 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns).
 		job.Append(store.LogLine{Type: "phase", Content: localPhase})
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		// Activity-based timeout (see wizard_stage_timeout.go). This path
+		// used context.Background(), i.e. NO deadline at all — the run was
+		// bounded only by the 10-minute stall watchdog, so a design that
+		// kept producing output could never be reaped. It now gets the
+		// shared stage policy: an idle window that slides on every stdout
+		// event, plus a generous absolute cap.
+		//
+		// The ctx must NOT be r.Context(): the HTTP request has already
+		// returned, so r.Context() is cancelled the moment the handler
+		// returns.
+		stage := newStageRun("architect-design")
+		defer stage.cancel()
+		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   p.SystemPrompt,
@@ -1416,9 +1428,10 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,
-			nil,
+			stage.hb,
 			0,
-			withStallTimeout(architectStallTimeout))
+			withStallTimeout(architectStallTimeout),
+			withCtx(stage.ctx))
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)

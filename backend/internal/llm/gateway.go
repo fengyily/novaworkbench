@@ -1442,7 +1442,11 @@ func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc, 
 	// opts.HardTimeout controls behavior depending on IdleTimeout:
 	//   - IdleTimeout <= 0 (legacy fixed-deadline path): HardTimeout is the
 	//     minimum ctx duration, floored to 30m. 0 means "use g.timeout
-	//     (default 120s) floored to 30m" — the legacy behavior.
+	//     (default 120s) floored to 30m" — the legacy behavior. This path
+	//     is a WALL-CLOCK deadline: it kills a run that is still actively
+	//     producing output, which is why the local wizard stages no longer
+	//     use it (they build their own stage ctx instead — see
+	//     handler/wizard_stage_timeout.go).
 	//   - IdleTimeout > 0 (rolling idle path): HardTimeout is the absolute
 	//     wall-clock cap, still floored to 30m to prevent caller typos.
 	//     HardTimeout=0 means "no wall-clock cap; rely on IdleTimeout alone",
@@ -1520,6 +1524,12 @@ func rollingCtx(scope string, idleTimeout time.Duration) (context.Context, conte
 			case <-timer.C:
 				log.Printf("[%s] idle %v with no stdout event; cancelling ctx", scope, idleTimeout)
 				cancel()
+				return
+			case <-parent.Done():
+				// The caller cancelled the run (it finished, or the job was
+				// stopped). Stop watching — the channel is owned by the
+				// caller and may outlive this run, so we must not rely on
+				// it being closed.
 				return
 			}
 		}

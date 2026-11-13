@@ -80,6 +80,11 @@ const (
 	killReasonTeardown = "teardown"
 	// killReasonHardTimeout means the sub-task's absolute wall-clock cap fired.
 	killReasonHardTimeout = "hard-timeout"
+	// killReasonIdleTimeout means the stage's activity-based idle window
+	// fired: the run produced no stdout event for the whole window and the
+	// stage ctx was cancelled. Distinct from killReasonWatchdog (the
+	// handler's stall watchdog) because the two have different windows.
+	killReasonIdleTimeout = "idle-timeout"
 )
 
 const (
@@ -108,6 +113,12 @@ type claudeStreamCfg struct {
 	// killReason, when non-nil, is the recorder runClaudeStream must use so
 	// an externally performed kill is attributed to its real cause.
 	killReason *claudeKillReason
+	// ctx, when non-nil, is the context the subprocess was started with. It
+	// lets runClaudeStream tell "OUR deadline fired" apart from "the CLI
+	// crashed on its own": a ctx cancelled by a deadline produces a SIGKILL
+	// that looks exactly like an external kill, and without this the run
+	// was reported as 终止原因=none — i.e. nobody was blamed for it.
+	ctx context.Context
 }
 
 // withStallTimeout overrides the per-stream stall (silence) window.
@@ -122,6 +133,12 @@ func withStallTimeout(d ...time.Duration) claudeStreamOpt {
 // overwritten by runClaudeStream's later teardown kill.
 func withKillReason(k *claudeKillReason) claudeStreamOpt {
 	return func(c *claudeStreamCfg) { c.killReason = k }
+}
+
+// withCtx records the context the subprocess runs under, so a deadline-driven
+// kill is attributed to that deadline instead of to the CLI.
+func withCtx(ctx context.Context) claudeStreamOpt {
+	return func(c *claudeStreamCfg) { c.ctx = ctx }
 }
 
 // claudeKillReason records which code path terminated the claude subprocess.
@@ -199,6 +216,13 @@ func stallErrorMessage(wasStalled bool, stallTimeout time.Duration, exitErr erro
 // the job log / sub-task artifact, where the user has to read it in a card.
 //
 // Field order is fixed so the line is greppable and diffable across runs.
+//
+// "事件数" is the TOTAL number of NDJSON events the CLI emitted, and
+// "stream事件数" is the stream_event subset of it. They used to be the same
+// field (the stream_event count under an "event count" label), which was
+// another small lie: a run that produced four events and one stream_event
+// reported "事件数=1". Both counters are now reported separately, matching
+// the vocabulary the remote path already uses in its EOF summary.
 func terminationDiagnostics(o claudeStreamOutcome, exitCode int, stderrTrim string) string {
 	stderrPart := "(空)"
 	if s := strings.TrimSpace(stderrTrim); s != "" {
@@ -209,8 +233,8 @@ func terminationDiagnostics(o claudeStreamOutcome, exitCode int, stderrTrim stri
 		reasonPart = "none"
 	}
 	return fmt.Sprintf(
-		"诊断：耗时=%s 事件数=%d 最后事件类型=%s stdout结束=%s stderr=%s 退出码=%d 终止原因=%s",
-		o.elapsed.Round(time.Millisecond), o.streamEventCount, emptyAsDash(o.lastEventType),
+		"诊断：耗时=%s 事件数=%d stream事件数=%d 最后事件类型=%s stdout结束=%s stderr=%s 退出码=%d 终止原因=%s",
+		o.elapsed.Round(time.Millisecond), o.eventCount, o.streamEventCount, emptyAsDash(o.lastEventType),
 		emptyAsDash(o.stdoutEnded), stderrPart, exitCode, reasonPart,
 	)
 }
@@ -1120,31 +1144,39 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// a real subprocess.
 	stallTimeout := resolveStallTimeout(cfg.stallTimeoutOverride)
 	log.Printf("[%s] stall watchdog window=%v", scope, stallTimeout)
-	var heartbeats chan struct{}
-	var ownHeartbeats bool
-	if externalHeartbeats != nil {
-		// Caller (typically sub_task_runner via llm.GenerateCode's rolling ctx)
-		// owns the heartbeat channel; we only drive beats into it and close it
-		// explicitly below so the watcher's select{ok} branch fires.
-		heartbeats = externalHeartbeats
-	} else {
-		// Legacy / standalone path: allocate locally and close on the way out
-		// so the watcher goroutine exits cleanly.
-		heartbeats = make(chan struct{}, 1)
-		ownHeartbeats = true
-	}
+	// TWO INDEPENDENT heartbeat channels.
+	//
+	// They used to be the same channel, and that was a real bug: the channel
+	// has capacity 1 and `beat` is a non-blocking single send, so every beat
+	// was delivered to EXACTLY ONE of the two consumers — this watchdog and
+	// the caller's rolling idle timer (llm.GenerateCode's rolling ctx, or the
+	// local stage's idle timer). Their clocks therefore drifted apart: the
+	// idle timer could expire while the stream was still producing output,
+	// killing a perfectly healthy run and reporting "流静默". Splitting them
+	// removes the contention: each consumer now sees every beat.
+	watchdogBeats := make(chan struct{}, 1)
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
-		runStallWatchdog(scope, stallTimeout, heartbeats, func() {
+		runStallWatchdog(scope, stallTimeout, watchdogBeats, func() {
 			killReason.set(killReasonWatchdog)
 			killProcessGroup(cmd)
 		}, stalledFlag)
 	}()
+	// beat pushes a heartbeat into BOTH consumers. Both sends are
+	// non-blocking: a channel that already holds an unconsumed beat means
+	// that consumer is already "recently alive", so dropping the duplicate
+	// loses nothing.
 	beat := func() {
 		select {
-		case heartbeats <- struct{}{}:
+		case watchdogBeats <- struct{}{}:
 		default:
+		}
+		if externalHeartbeats != nil {
+			select {
+			case externalHeartbeats <- struct{}{}:
+			default:
+			}
 		}
 	}
 
@@ -1186,6 +1218,16 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			continue
 		}
 		evtType, _ := evt["type"].(string)
+		// Event accounting. The remote parser has always counted these; the
+		// local path never did, which made the post-mortem diagnostic line
+		// ("事件数=0 最后事件类型=-") a permanent lie AND disabled the local
+		// idle-timeout attribution below (its condition is
+		// `streamEventCount > 0`, which could never hold locally).
+		out.eventCount++
+		out.lastEventType = evtType
+		if evtType == "stream_event" {
+			out.streamEventCount++
+		}
 		switch evtType {
 		case "system":
 			sub, _ := evt["subtype"].(string)
@@ -1504,16 +1546,15 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	}
 
 	// Stop the stall watchdog before tearing the process group down.
-	if ownHeartbeats {
-		close(heartbeats)
-	}
+	close(watchdogBeats)
 	<-watchdogDone
-	// If the caller passed in an external heartbeats channel (rolling ctx
-	// from llm.GenerateCode), close it now so the watcher's select{ok}
-	// branch fires and the goroutine exits cleanly.
-	if externalHeartbeats != nil {
-		close(externalHeartbeats)
-	}
+	// The external heartbeat channel is NOT closed here. runClaudeStream
+	// does not own it — the caller does — and a caller may legitimately
+	// reuse it across several runs (the stage Q&A path retries a stale
+	// session in the same job). Closing it here would panic on the second
+	// run's first beat. The channel's consumer stops on ctx cancellation
+	// instead (see llm.rollingCtx / newStageRun, which both select on
+	// ctx.Done()).
 
 	// Two different teardown shapes, on purpose:
 	//
@@ -1574,32 +1615,65 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		// dedicated banner instead of blaming the CLI for our SIGTERM.
 		if out.finalResult == "" && out.errMsg == "" {
 			wasStalled := out.stalledByWatchdog.Load()
-			// Idle-timeout heuristic: the rolling ctx in llm.GenerateCode
-			// propagates cancel via exec.CommandContext → SIGKILL → exit code
-			// 137 (128+SIGKILL). If we never tripped the stall watchdog but
-			// the kernel signaled SIGKILL and there was genuine stream
-			// activity before the silence, surface the "idle 超时" message
-			// instead of "异常退出" so the UI's banner / error_kind branch
-			// can pick a dedicated diagnostic.
+			// Did OUR deadline fire? The stage ctx is cancelled either by the
+			// activity-based idle window (errStageIdle) or by the absolute
+			// cap (DeadlineExceeded). Both arrive as a SIGKILL that is
+			// indistinguishable from an external kill — so without asking
+			// the ctx, a run we terminated ourselves was reported as
+			// 终止原因=none, i.e. nobody was accountable for it.
 			//
-			// The killReason check matters: when *we* killed the child (hard
-			// timeout → ctx cancel → SIGKILL), the SIGKILL is our own doing,
-			// not evidence of stream idleness.
-			idleHit := false
-			if !wasStalled && out.killReason == "" && out.streamEventCount > 0 {
-				if exitErr, ok := waitErr.(*exec.ExitError); ok {
-					if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-						if ws.Signaled() && ws.Signal() == syscall.SIGKILL {
-							idleHit = true
+			// This is what made the 30-minute wall invisible: the message
+			// said "Claude 异常退出" and blamed the CLI for a run that was
+			// actively streaming output at the moment it died.
+			ctxIdle := false
+			ctxDeadline := false
+			if cfg.ctx != nil && cfg.ctx.Err() != nil {
+				switch {
+				case errors.Is(context.Cause(cfg.ctx), errStageIdle):
+					ctxIdle = true
+				case errors.Is(cfg.ctx.Err(), context.DeadlineExceeded):
+					ctxDeadline = true
+				}
+			}
+			switch {
+			case ctxIdle:
+				killReason.set(killReasonIdleTimeout)
+				out.killReason = killReason.get()
+				out.IdleTimeoutHit = true
+				out.errMsg = fmt.Sprintf("本地 Claude 连续 %v 没有输出，触发 idle 超时被中止（收到 %d 个事件，最后事件类型=%q）；不是 Claude 崩溃。",
+					stageIdleTimeout(), out.eventCount, emptyAsDash(out.lastEventType))
+			case ctxDeadline:
+				killReason.set(killReasonHardTimeout)
+				out.killReason = killReason.get()
+				out.errMsg = fmt.Sprintf("本地 Claude 达到总时长上限（%v）被中止；不是 Claude 崩溃。", stageMaxTotalTimeout())
+			default:
+				// Idle-timeout heuristic: the rolling ctx in llm.GenerateCode
+				// propagates cancel via exec.CommandContext → SIGKILL → exit code
+				// 137 (128+SIGKILL). If we never tripped the stall watchdog but
+				// the kernel signaled SIGKILL and there was genuine stream
+				// activity before the silence, surface the "idle 超时" message
+				// instead of "异常退出" so the UI's banner / error_kind branch
+				// can pick a dedicated diagnostic.
+				//
+				// The killReason check matters: when *we* killed the child (hard
+				// timeout → ctx cancel → SIGKILL), the SIGKILL is our own doing,
+				// not evidence of stream idleness.
+				idleHit := false
+				if !wasStalled && out.killReason == "" && out.eventCount > 0 {
+					if exitErr, ok := waitErr.(*exec.ExitError); ok {
+						if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+							if ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+								idleHit = true
+							}
 						}
 					}
 				}
-			}
-			if idleHit {
-				out.IdleTimeoutHit = true
-				out.errMsg = fmt.Sprintf("本地 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时；最后事件类型=%q", out.streamEventCount, out.lastEventType)
-			} else {
-				out.errMsg = terminationMessage(out, stallTimeout, waitErr, stderrTrim)
+				if idleHit {
+					out.IdleTimeoutHit = true
+					out.errMsg = fmt.Sprintf("本地 Claude 在收到 %d 个事件后连续静默，触发 idle 超时；最后事件类型=%q", out.eventCount, emptyAsDash(out.lastEventType))
+				} else {
+					out.errMsg = terminationMessage(out, stallTimeout, waitErr, stderrTrim)
+				}
 			}
 		}
 	}

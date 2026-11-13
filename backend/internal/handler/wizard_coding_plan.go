@@ -191,13 +191,18 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 		sessionArg = in.newCodingSID
 	}
 
-	// GenerateCode is used (not StreamCmd) purely for its timeout: it floors
-	// the context deadline at 30 minutes, which is exactly the coding-stage
-	// budget this phase is supposed to share. PermissionMode:"plan" is what
-	// turns it into a read-only plan run — StreamOpts already carries the
-	// field through to --permission-mode plan, and the persona switches to
-	// --append-system-prompt automatically (llm.Gateway.streamArgs).
-	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
+	// Activity-based timeout (see wizard_stage_timeout.go). The old call went
+	// through llm.GenerateCode purely for its timeout — a flat 30-minute
+	// wall-clock deadline that killed a plan-mode turn that was still
+	// exploring the repo.
+	//
+	// PermissionMode:"plan" is what turns it into a read-only plan run —
+	// StreamOpts already carries the field through to --permission-mode plan,
+	// and the persona switches to --append-system-prompt automatically
+	// (llm.Gateway.streamArgs).
+	stage := newStageRun("coding-plan")
+	defer stage.cancel()
+	cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        in.workDir,
 		SystemPrompt:   in.systemPrompt,
@@ -214,7 +219,6 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 		// stalling on a path outside the working directory.
 		AddDirs: h.grantDirsFor(reqID, ""),
 	})
-	defer cancel()
 
 	projectID := ""
 	if in.reqRow != nil {
@@ -224,7 +228,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 	// codingStallTimeout (20m) rather than architectStallTimeout (10m): the
 	// planner may sit silent while Explore sub-agents work, and this phase
 	// shares the coding stage's budget by design.
-	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, nil, 0, withStallTimeout(codingStallTimeout))
+	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
 	// Correct the session id only if the CLI reported one different from what
 	// we pre-minted (safety net for --session-id override semantics changing).

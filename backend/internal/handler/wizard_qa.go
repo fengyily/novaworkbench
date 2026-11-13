@@ -57,10 +57,11 @@ var qaChatDisallowedTools = []string{"Write", "Edit"}
 // the same 10 minutes the architect stage uses.
 const qaStallTimeout = 10 * time.Minute
 
-// qaHardTimeout is the absolute cap on one Q&A run. It is a backstop under the
-// stall watchdog (which only fires when the stream goes quiet — a chatty but
-// endless run would otherwise never trip it).
-const qaHardTimeout = 30 * time.Minute
+// The absolute cap on one Q&A run now lives in the shared stage policy
+// (see wizard_stage_timeout.go): an activity-based idle window plus a
+// generous absolute ceiling. It used to be a flat 30-minute WALL-CLOCK
+// deadline (qaHardTimeout), which killed a Q&A turn that was still
+// streaming its answer — the same defect that hit 开发实现.
 
 // qaSessionMode is how a Q&A turn gets its context.
 const (
@@ -382,8 +383,18 @@ func (h *WizardHandler) repairOrphanedTurns(requirementID, stage string) {
 // runStageQA drives one Q&A turn end to end. Every exit path goes through
 // finishQATurn, so a crashed run never leaves a row stuck in `running`.
 func (h *WizardHandler) runStageQA(job *store.Job, turn *model.RequirementQATurn, reqRow *model.Requirement, req AskStageQAReq, plan qaSessionPlan, roleKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), qaHardTimeout)
-	defer cancel()
+	// Activity-based timeout instead of the old 30-minute WALL-CLOCK
+	// deadline (qaHardTimeout). A Q&A turn that keeps streaming its answer
+	// was killed at exactly 30 minutes even while it was producing output —
+	// the same defect that hit 开发实现 (job_8c64ea6b / job_9db58f29).
+	//
+	// The idle deadline below slides forward on every stdout event, so a
+	// live answer survives; the absolute cap only bounds a turn that never
+	// finishes. The stall watchdog (qaStallTimeout) still catches a stream
+	// that goes quiet.
+	stage := newStageRun("qa-chat")
+	defer stage.cancel()
+	ctx := stage.ctx
 
 	systemPrompt, modelName, claudeConfigID := h.roleConfig(roleKey)
 	if req.Model != "" {
@@ -448,7 +459,7 @@ func (h *WizardHandler) runStageQA(job *store.Job, turn *model.RequirementQATurn
 	// is still `running`, so the status filter already excludes it.
 	history := h.qaHistory(req.RequirementID, req.Stage, turn.ID)
 
-	res := h.runQATurn(ctx, job, workDir, systemPrompt, modelName, claudeConfigID, reqRow, req, plan, history, usage)
+	res := h.runQATurn(ctx, stage.hb, job, workDir, systemPrompt, modelName, claudeConfigID, reqRow, req, plan, history, usage)
 	h.finishQATurn(job, turn, modelName, res.answer, res.errMsg, res.resumed, res.sessionID, res.sourceSessionID)
 }
 
@@ -485,6 +496,7 @@ type qaTurnResult struct {
 // shallower answer costs far less than a hard error.
 func (h *WizardHandler) runQATurn(
 	ctx context.Context,
+	hb chan struct{},
 	job *store.Job,
 	workDir, systemPrompt, modelName, claudeConfigID string,
 	reqRow *model.Requirement,
@@ -537,7 +549,7 @@ func (h *WizardHandler) runQATurn(
 			opts.SessionID = p.NewSessionID
 		}
 		cmd := h.llm.StreamCmd(ctx, opts)
-		return runClaudeStream(sink, cmd, "qa-chat", usage, nil, nil, 0, withStallTimeout(qaStallTimeout))
+		return runClaudeStream(sink, cmd, "qa-chat", usage, nil, hb, 0, withStallTimeout(qaStallTimeout), withCtx(ctx))
 	}
 
 	out := run(plan)
