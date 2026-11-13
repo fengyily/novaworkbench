@@ -44,6 +44,7 @@ const (
 	msgRmWorkDir    = "禁止删除工作目录或其父目录。"
 	msgMvWorkDir    = "禁止移动/重命名工作目录。"
 	msgShellWrapper = "禁止在 shell 子命令中删除/重置工作目录。"
+	msgFindDelete   = "禁止用 find -delete 清空工作目录。"
 )
 
 // destructiveCommandReason inspects a Bash command string and reports why it
@@ -64,15 +65,41 @@ func destructiveCommandReason(toolName, cmd, workDir string) string {
 // operators and checks every segment. A composite command may mix a safe and
 // a dangerous step ("cd <wd> && rm -rf <wd>"), so segments are judged
 // individually.
+//
+// The segments are walked in ORDER, because shell semantics are sequential:
+// a variable assigned in an earlier statement holds that value in a later
+// one, and a `cd` earlier in the command changes what a relative path later
+// in it refers to. The state accumulated along the way is what lets the
+// guard resolve `TREE=/tmp/scratch` + `rm -rf "$TREE"` without guessing.
 func destructiveInCommandString(cmd, workDir string) string {
 	// The temp-var set is computed once for the whole command: an assignment
 	// (`TMP=$(mktemp -d)`) usually sits in an EARLIER segment than the `rm`
 	// that consumes it, so per-segment analysis would never see it.
 	tempVars := mktempVars(cmd)
+	// A command substitution runs a nested command, exactly like `sh -c`:
+	// `$(rm -rf <workdir>)` deletes the work dir just as surely as the
+	// spelled-out form does. The segment splitter keeps the substitution
+	// inside one segment, so the guard only ever saw the OUTER command and
+	// the substitution was a blind spot — the same class of hole the
+	// `sh -c` / `eval` branches already cover.
+	//
+	// The body is a whole command string, so it is analysed recursively
+	// under the same fail-closed rules.
+	for _, inner := range commandSubstitutions(cmd) {
+		if reason := destructiveInCommandString(inner, workDir); reason != "" {
+			return msgShellWrapper
+		}
+	}
+	st := newGuardState(workDir, tempVars)
 	for _, seg := range splitShellSegments(cmd) {
-		if reason := destructiveInTokens(shellTokens(seg), workDir, tempVars); reason != "" {
+		// The state reflects the shell BEFORE this statement runs, which is
+		// what decides how this statement's own arguments expand. Only
+		// afterwards are this statement's assignments folded in.
+		if reason := destructiveInTokensState(shellTokens(seg), workDir, tempVars, st); reason != "" {
 			return reason
 		}
+		st.assignSegment(seg)
+		st.noteCds(seg)
 	}
 	return ""
 }
@@ -312,7 +339,7 @@ func canonicalizePath(p string) string {
 	}
 }
 
-// operandTargetsWorkDir is the shared verdict for every path-explicit
+// operandTargetsWorkDirState is the shared verdict for every path-explicit
 // operator: does this operand point at the work dir itself or at one of its
 // ancestors?
 //
@@ -325,7 +352,16 @@ func canonicalizePath(p string) string {
 // this carve-out the guard vetoes the extremely common
 // `TMP=$(mktemp -d) … rm -rf "$TMP"` idiom, which cost a real sub-task its
 // run (job_0984023e, req_0ee0bfd8de6f5da6).
-func operandTargetsWorkDir(op, workDir string, tempVars map[string]bool) bool {
+//
+// A SECOND exception resolves a plain literal assignment (see
+// destructive_guard_vars.go): `TREE=/tmp/scratch` makes `rm -rf "$TREE"` a
+// deletable path we can judge exactly like any other operand. The resolved
+// path is JUDGED, not trusted — a variable bound to the work dir is still
+// vetoed.
+//
+// st is nil only for callers that have no accumulated state; then the
+// whole-command mktemp scan is used as a fallback.
+func operandTargetsWorkDirState(op, workDir string, tempVars map[string]bool, st *guardState) bool {
 	if op == "" {
 		// No operand at all: the operator acts on the cwd, which is the work dir.
 		return true
@@ -334,9 +370,46 @@ func operandTargetsWorkDir(op, workDir string, tempVars map[string]bool) bool {
 	if inner, ok := quotedLiteral(op); ok {
 		content = inner
 	}
-	if isTempVarPath(content, tempVars) {
-		// A mktemp scratch dir (or a path inside one) — never the work dir.
-		return false
+	// The base that relative operands resolve against. It is the work dir
+	// until a `cd` moves it; when a `cd` moved it somewhere we cannot pin
+	// down, relative operands fail closed (base is empty).
+	base := workDir
+	if st != nil {
+		base = st.resolveBase()
+	}
+	// A variable reference is resolved through the ORDERED state: the binding
+	// in effect at this point in the command is the one the shell would use.
+	// A variable assigned LATER in the command has no binding yet, so the
+	// operand stays unresolvable and fails closed.
+	//
+	// This is why the mktemp carve-out cannot rely on a whole-command scan
+	// alone: `rm -rf "$TMP"` BEFORE `TMP=$(mktemp -d)` deletes the OLD
+	// value of $TMP, not a scratch dir. The scan vouches that TMP is a
+	// mktemp variable SOMEWHERE in the command; the order decides whether it
+	// is in effect yet.
+	if name, suffix, ok := varRef(content); ok {
+		if b, known := st.vars[name]; known {
+			switch b.kind {
+			case varTempDir:
+				if suffixIsInert(suffix) {
+					// A mktemp scratch dir (or a path inside one) —
+					// never the work dir.
+					return false
+				}
+			case varLiteral:
+				if suffixIsInert(suffix) {
+					resolved, globbed := resolveOperand(b.path+suffix, base)
+					if !globbed {
+						switch classifyPath(resolved, workDir) {
+						case relSelf, relAncestor:
+							return true
+						}
+						return false
+					}
+					return canonicalizePath(resolved) == canonicalizePath(workDir)
+				}
+			}
+		}
 	}
 	if hasUnresolvableMeta(content) {
 		// The operand has a tail that cannot be resolved statically. Judge it
@@ -354,8 +427,8 @@ func operandTargetsWorkDir(op, workDir string, tempVars map[string]bool) bool {
 		// A prefix that resolves INSIDE the work dir (or to the work dir
 		// itself / one of its ancestors) stays blocked: "$FOO" could be
 		// "..", and a bare "$FOO" has no prefix at all, so it fails closed.
-		if prefix := literalPrefix(content); prefix != "" {
-			resolved, globbed := resolveOperand(prefix, workDir)
+		if prefix := literalPrefix(content); prefix != "" && base != "" {
+			resolved, globbed := resolveOperand(prefix, base)
 			if !globbed {
 				switch classifyPath(resolved, workDir) {
 				case relSelf, relAncestor, relDescendant:
@@ -366,7 +439,12 @@ func operandTargetsWorkDir(op, workDir string, tempVars map[string]bool) bool {
 		}
 		return true
 	}
-	resolved, globbed := resolveOperand(content, workDir)
+	if base == "" {
+		// The cwd moved somewhere we cannot pin down, so a relative operand
+		// could be anything. Fail closed.
+		return true
+	}
+	resolved, globbed := resolveOperand(content, base)
 	if globbed {
 		// A bare glob ("*", "*.log") may match the work dir's own entries.
 		// A glob with a literal prefix ("build/*") stays inside the work dir
@@ -451,52 +529,6 @@ func isMktempDirCall(rhs string) bool {
 	return false
 }
 
-// isTempVarPath reports whether the operand refers to a mktemp scratch
-// directory, or to a path inside one: "$TMP" or "$TMP/sub/dir" where $TMP is
-// one of the command's mktemp variables.
-//
-// A ".." segment disqualifies the operand — "$TMP/../.." escapes the scratch
-// directory and could land anywhere, so it must keep failing closed.
-func isTempVarPath(content string, tempVars map[string]bool) bool {
-	if len(tempVars) == 0 || !strings.HasPrefix(content, "$") {
-		return false
-	}
-	rest := content[1:]
-	var name, suffix string
-	if strings.HasPrefix(rest, "{") {
-		// "${VAR}" form. The closing brace may already be gone: shellTokens
-		// trims grouping punctuation off token edges, which turns "${TMP}"
-		// into "${TMP". Scan an identifier and treat the rest as the suffix.
-		rest = rest[1:]
-		i := 0
-		for i < len(rest) && isIdentChar(rest[i]) {
-			i++
-		}
-		name = rest[:i]
-		suffix = strings.TrimPrefix(rest[i:], "}")
-	} else {
-		i := 0
-		for i < len(rest) && isIdentChar(rest[i]) {
-			i++
-		}
-		name, suffix = rest[:i], rest[i:]
-	}
-	if !tempVars[name] {
-		return false
-	}
-	if suffix == "" {
-		return true
-	}
-	if !strings.HasPrefix(suffix, "/") {
-		return false
-	}
-	for _, seg := range strings.Split(suffix, "/") {
-		if seg == ".." {
-			return false
-		}
-	}
-	return true
-}
 
 // isIdentChar reports whether c may appear in a shell variable name.
 func isIdentChar(c byte) bool {
@@ -523,8 +555,10 @@ func literalPrefix(op string) string {
 	return op
 }
 
-// destructiveInTokens scans the tokens of one command segment.
-func destructiveInTokens(toks []string, workDir string, tempVars map[string]bool) string {
+// destructiveInTokensState scans the tokens of one command segment, with the
+// accumulated shell state, so operands that reference a resolved variable
+// are judged against the value they will actually hold.
+func destructiveInTokensState(toks []string, workDir string, tempVars map[string]bool, st *guardState) string {
 	// A shell invoked with -c runs a nested command; analyze it too, but only
 	// there — scanning every quoted string would veto harmless commit
 	// messages that merely mention "rm -rf .".
@@ -548,8 +582,8 @@ func destructiveInTokens(toks []string, workDir string, tempVars map[string]bool
 	}
 
 	for i := 0; i < len(toks); i++ {
-		switch toks[i] {
-		case "git":
+		switch {
+		case toks[i] == "git":
 			sub := gitSubcommandIndex(toks, i)
 			if sub >= len(toks) {
 				continue
@@ -570,26 +604,45 @@ func destructiveInTokens(toks []string, workDir string, tempVars map[string]bool
 			case "worktree":
 				if sub+1 < len(toks) && toks[sub+1] == "remove" {
 					op := firstPathOperand(toks, sub+2)
-					if op == "" || operandTargetsWorkDir(op, workDir, tempVars) {
+					if op == "" || operandTargetsWorkDirState(op, workDir, tempVars, st) {
 						return msgWorktreeRm
 					}
 				}
 			}
-		case "rm":
+		// The operator is matched by its BASE NAME, so `/bin/rm` is `rm`.
+		// Without that, an absolute path to the binary walked straight past
+		// the guard — the same deletion, one spelling away.
+		case isDestructiveBinary(toks[i], "rm"):
 			opts, operands := collectRmOptions(toks, i+1)
 			if !opts.destructive() {
 				continue
 			}
 			for _, op := range operands {
-				if operandTargetsWorkDir(op, workDir, tempVars) {
+				if operandTargetsWorkDirState(op, workDir, tempVars, st) {
 					return msgRmWorkDir
 				}
 			}
-		case "mv":
+		case isDestructiveBinary(toks[i], "mv"):
 			for _, op := range collectPathOperands(toks, i+1) {
-				if operandTargetsWorkDir(op, workDir, tempVars) {
+				if operandTargetsWorkDirState(op, workDir, tempVars, st) {
 					return msgMvWorkDir
 				}
+			}
+		case isDestructiveBinary(toks[i], "find"):
+			// `find . -delete` empties the current directory — the same
+			// effect as the `rm -rf .` this guard already vetoes. A find
+			// that selects by name or path deletes only the matches, which
+			// is ordinary cleanup and stays allowed.
+			deleting, restricted, root := findIsTreeDeleting(toks[i+1:])
+			if !deleting || restricted {
+				continue
+			}
+			if root == "" {
+				// No root: find starts at the cwd, which is the work dir.
+				return msgFindDelete
+			}
+			if operandTargetsWorkDirState(root, workDir, tempVars, st) {
+				return msgFindDelete
 			}
 		}
 	}
@@ -652,14 +705,22 @@ type rmOptions struct {
 	longRecursive bool
 }
 
-// destructive reports whether the rm invocation can delete a directory tree
-// without asking for confirmation.
+// destructive reports whether the rm invocation can delete a directory tree.
 //
-// `rm -r` alone stays allowed (it has always been allowed); `--recursive`
-// counts as destructive on its own because the previous implementation
-// vetoed `rm --recursive` outright and that coverage must not be lost.
+// RECURSION is the criterion, not the force flag. `rm -r <dir>` deletes the
+// directory tree just as surely as `rm -rf <dir>` does: in a non-interactive
+// shell there is no prompt to answer, so the force flag changes only whether
+// read-only files inside are skipped, not whether the tree goes away.
+//
+// The old test required a force flag, which left `rm -r <workdir>` — and
+// `rm -r .` — unguarded while `rm --recursive <workdir>` was vetoed. That
+// asymmetry was an artefact of the flag parsing, not a policy.
+//
+// Whether the OPERAND is the work dir is decided separately (by
+// operandTargetsWorkDir), so ordinary cleanup keeps working: `rm -r build/`
+// stays allowed because a descendant of the work dir is harmless.
 func (o rmOptions) destructive() bool {
-	return o.recursive && (o.force || o.longRecursive)
+	return o.recursive
 }
 
 // collectRmOptions parses the options and operands of an `rm` invocation.
