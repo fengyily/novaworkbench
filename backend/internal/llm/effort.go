@@ -213,22 +213,39 @@ func (g *Gateway) ResolveEffort(pick, stage string) string {
 // CLAUDE_BIN env var differs per test / per agent host).
 var effortSupportCache sync.Map // map[string]bool
 
-// effortHelpProbe runs `claude --help` and reports whether the output
-// mentions --effort. The second return value is the probe's own error (nil
-// when the probe ran to completion).
+// effortHelpProbe runs `claude --help` and reports two things:
+//
+//	supported — the output mentions --effort, so the flag exists.
+//	usable    — the probe produced output we could read at all.
+//
+// THE EXIT CODE IS NOT EVIDENCE. A claude build may exit non-zero on
+// --help while still printing its usage text (a wrapper that forwards only
+// -p, a shim that prints to stderr and exits 1), and that text is exactly
+// what tells us whether the flag exists. So the decision is made on the
+// CONTENT; the exit code only matters for one case — no output at all,
+// which means we could not probe the binary.
+//
+// usable=false means the binary could not be run (missing, not
+// executable, spawn error, or --help exceeding the 10s timeout). The
+// caller then treats the flag as unsupported — see cliSupportsEffort for
+// why that is the safe direction.
 //
 // It is a package-level var rather than an inline call so the unit tests can
-// substitute a fake and pin BOTH branches of the degradation policy — the
-// "old CLI doesn't know the flag" case and the "probe itself failed" case —
+// substitute a fake and pin every branch of the degradation policy — the
+// "old CLI doesn't know the flag" case, the "build exits non-zero but still
+// prints usage" case, and the "probe could not read the binary" case —
 // without needing an actual claude binary that lacks the flag.
-var effortHelpProbe = func(bin string) (bool, error) {
+var effortHelpProbe = func(bin string) (supported bool, usable bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "--help").CombinedOutput()
-	if err != nil {
-		return false, err
+	if err != nil && len(out) == 0 {
+		// Nothing to read: the binary could not be probed at all.
+		return false, false
 	}
-	return strings.Contains(string(out), "--effort"), nil
+	// We have output. Read it as the authoritative answer about which
+	// flags exist, whatever the exit code was.
+	return strings.Contains(string(out), "--effort"), true
 }
 
 // cliSupportsEffort reports whether the resolved claude CLI accepts the
@@ -238,15 +255,31 @@ var effortHelpProbe = func(bin string) (bool, error) {
 // binary aborts the whole run with "error: unknown option '--effort'" — the
 // entire coding job dies because of a reasoning-depth knob. So we ask the
 // binary once (claude --help) and simply don't emit the flag when it isn't
-// there. The probe result is cached per binary path for the process lifetime.
+// there. The probe result is cached per binary path for the process
+// lifetime; the key is the RESOLVED path (llm.New follows the npm shim's
+// symlinks to the versioned file), so a CLI upgrade lands on a new key and
+// is probed again.
 //
-// Failure policy: if the probe itself fails (binary missing, --help times
-// out), we FAIL OPEN — assume the flag is supported. Rationale: a probe
-// failure almost always means the CLI is unusable anyway, and the run will
-// fail with a far more accurate error ("claude: command not found") than a
-// silently dropped feature would suggest. The user-facing escape hatch for
-// "my CLI/gateway doesn't like --effort" is the effort.enabled master switch
-// in the settings page.
+// Failure policy: a probe we could not read is treated as "the flag is not
+// supported" — the flag is dropped, never emitted on a guess.
+//
+// The asymmetry is what decides this. Emitting --effort to a CLI that
+// doesn't know it LOSES THE RUN (the whole point of the probe). Not
+// emitting it to a CLI that does know it merely leaves the tier at the
+// CLI's own default, which is exactly what the feature looked like before
+// it existed. So every kind of uncertainty has to resolve to "don't
+// emit".
+//
+// A probe failure says nothing about whether the binary is old: it can be a
+// slow machine (the 10s timeout), a wrapper that only forwards -p, or a
+// build that exits non-zero without printing usage. Treating those as
+// "supported" is what would kill the run — the very outcome the probe
+// exists to prevent.
+//
+// The negative answer IS cached, so a broken probe environment costs one
+// timeout instead of one per run. The escape hatch for "my CLI/gateway
+// doesn't like --effort" is the effort.enabled master switch in the
+// settings page.
 func (g *Gateway) cliSupportsEffort() bool {
 	if g == nil {
 		return false
@@ -255,10 +288,12 @@ func (g *Gateway) cliSupportsEffort() bool {
 	if v, ok := effortSupportCache.Load(bin); ok {
 		return v.(bool)
 	}
-	supported, err := effortHelpProbe(bin)
-	if err != nil {
-		// Probe failed → fail open (see docstring).
-		supported = true
+	supported, usable := effortHelpProbe(bin)
+	if !usable {
+		// We could not read the binary → assume the worst and drop the
+		// flag (see the failure policy above).
+		effortSupportCache.Store(bin, false)
+		return false
 	}
 	effortSupportCache.Store(bin, supported)
 	return supported

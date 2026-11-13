@@ -26,10 +26,30 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 process.env.NOVA_AGENT_WORKER_NO_LISTEN = '1';
 
-const { buildRunRequest, buildClaudeArgs, normalizeEffort } = await import('./server.mjs');
+const { buildRunRequest, buildClaudeArgs, normalizeEffort, cliSupportsEffort } =
+  await import('./server.mjs');
+
+/**
+ * Writes a fake claude binary and returns its path.
+ *
+ * The probe decides on the CONTENT of `--help`, not on the exit code: a
+ * build may print its usage and still exit non-zero. These fakes cover
+ * that shape, plus the "no output at all" shape that must be reported as
+ * unreadable.
+ */
+function fakeClaude(name, body) {
+  const dir = mkdtempSync(join(tmpdir(), 'nova-effort-probe-'));
+  const path = join(dir, name);
+  writeFileSync(path, body);
+  chmodSync(path, 0o755);
+  return path;
+}
 
 /** The minimal body buildRunRequest accepts. */
 function baseBody(extra = {}) {
@@ -108,4 +128,50 @@ test('buildClaudeArgs leaves an old body byte-identical', () => {
   const withoutEffort = buildClaudeArgs(buildRunRequest(baseBody()), '');
   const withEmptyEffort = buildClaudeArgs(buildRunRequest(baseBody({ effort: '' })), '');
   assert.deepEqual(withoutEffort, withEmptyEffort);
+});
+
+// ── the capability probe ───────────────────────────────────────────────────
+//
+// The probe exists to avoid handing `--effort` to a CLI that does not know
+// it (such a CLI aborts the whole run). So the decision has to be made on
+// the CONTENT of `--help` — never on the exit code, and never on a guess.
+
+test('cliSupportsEffort reads the flag out of the help text', () => {
+  const bin = fakeClaude('modern', "#!/bin/sh\necho '  --effort <level>  Effort level'\n");
+  assert.equal(cliSupportsEffort(bin, process.env), true);
+});
+
+test('cliSupportsEffort trusts the help text even on a non-zero exit', () => {
+  // The build prints its usage and exits 1 — the usage text is the
+  // evidence, the exit code is noise.
+  const bin = fakeClaude('modern-exit1', "#!/bin/sh\necho '  --effort <level>  Effort level'\nexit 1\n");
+  assert.equal(cliSupportsEffort(bin, process.env), true);
+});
+
+test('cliSupportsEffort reports no support when the flag is absent', () => {
+  const bin = fakeClaude('legacy', "#!/bin/sh\necho '  --model <model>  Model'\n");
+  assert.equal(cliSupportsEffort(bin, process.env), false);
+});
+
+test('cliSupportsEffort reports no support when the flag is absent and the exit is non-zero', () => {
+  const bin = fakeClaude('legacy-exit1', "#!/bin/sh\necho 'some other output'\nexit 3\n");
+  assert.equal(cliSupportsEffort(bin, process.env), false);
+});
+
+test('cliSupportsEffort refuses to guess when the binary cannot be read', () => {
+  // No output at all → we could not probe the binary. Emitting --effort on
+  // that guess is exactly the "unknown option '--effort'" run-killer the
+  // probe exists to prevent, so the flag is dropped.
+  const bin = fakeClaude('silent', "#!/bin/sh\nexit 1\n");
+  assert.equal(cliSupportsEffort(bin, process.env), false);
+});
+
+test('cliSupportsEffort refuses to guess when the binary is missing', () => {
+  const bin = fakeClaude('gone', "#!/bin/sh\nexit 0\n");
+  assert.equal(cliSupportsEffort(bin + '.missing', process.env), false);
+});
+
+test('cliSupportsEffort never emits for an empty command', () => {
+  assert.equal(cliSupportsEffort('', process.env), false);
+  assert.equal(cliSupportsEffort(null, process.env), false);
 });

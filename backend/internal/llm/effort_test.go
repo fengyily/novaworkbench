@@ -1,7 +1,8 @@
 package llm
 
 import (
-	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -174,14 +175,15 @@ func TestStreamArgsEffort(t *testing.T) {
 	// withProbe swaps the --help probe for the duration of one test and
 	// points the gateway at a unique (fake) binary path so the per-path
 	// support cache can't leak between cases.
-	withProbe := func(t *testing.T, supported bool, probeErr error) *Gateway {
+	//
+	// usable=false stands for "the probe could not read the binary at
+	// all" — the missing binary, a --help that exceeded the timeout, a
+	// build that died before printing anything.
+	withProbe := func(t *testing.T, supported, usable bool) *Gateway {
 		t.Helper()
 		orig := effortHelpProbe
-		effortHelpProbe = func(bin string) (bool, error) {
-			if probeErr != nil {
-				return false, probeErr
-			}
-			return supported, nil
+		effortHelpProbe = func(bin string) (bool, bool) {
+			return supported, usable
 		}
 		t.Cleanup(func() { effortHelpProbe = orig })
 		g := &Gateway{binPath: "/nonexistent/claude-" + t.Name()}
@@ -189,7 +191,7 @@ func TestStreamArgsEffort(t *testing.T) {
 	}
 
 	t.Run("valid tier is emitted", func(t *testing.T) {
-		g := withProbe(t, true, nil)
+		g := withProbe(t, true, true)
 		args := g.BuildStreamArgs(StreamOpts{Prompt: "p", Effort: EffortHigh})
 		i := indexOfArg(args, "--effort")
 		if i == -1 {
@@ -201,7 +203,7 @@ func TestStreamArgsEffort(t *testing.T) {
 	})
 
 	t.Run("lands before --add-dir", func(t *testing.T) {
-		g := withProbe(t, true, nil)
+		g := withProbe(t, true, true)
 		args := g.BuildStreamArgs(StreamOpts{
 			Prompt:  "p",
 			Effort:  EffortMedium,
@@ -223,7 +225,7 @@ func TestStreamArgsEffort(t *testing.T) {
 	})
 
 	t.Run("invalid tier is dropped", func(t *testing.T) {
-		g := withProbe(t, true, nil)
+		g := withProbe(t, true, true)
 		args := g.BuildStreamArgs(StreamOpts{Prompt: "p", Effort: "ultra"})
 		if indexOfArg(args, "--effort") != -1 {
 			t.Fatalf("args = %v, want no --effort for an invalid tier", args)
@@ -231,26 +233,29 @@ func TestStreamArgsEffort(t *testing.T) {
 	})
 
 	t.Run("dropped when the CLI doesn't know the flag", func(t *testing.T) {
-		g := withProbe(t, false, nil)
+		g := withProbe(t, false, true)
 		args := g.BuildStreamArgs(StreamOpts{Prompt: "p", Effort: EffortHigh})
 		if indexOfArg(args, "--effort") != -1 {
 			t.Fatalf("args = %v, want no --effort when the CLI lacks the flag", args)
 		}
 	})
 
-	t.Run("probe failure fails open", func(t *testing.T) {
-		// A probe failure almost always means the CLI is unusable anyway;
-		// dropping the flag silently would hide the real problem, so we
-		// emit it and let the run fail with the CLI's own error.
-		g := withProbe(t, false, errors.New("probe exploded"))
+	t.Run("probe failure drops the flag instead of guessing", func(t *testing.T) {
+		// A probe that could not read the binary says NOTHING about
+		// whether the binary is old — it can be a slow machine, a wrapper
+		// that only forwards -p, or a build that exits non-zero without
+		// printing usage. Emitting --effort on that guess is exactly the
+		// "unknown option '--effort'" run-killer the probe exists to
+		// prevent, so the flag is dropped.
+		g := withProbe(t, false, false)
 		args := g.BuildStreamArgs(StreamOpts{Prompt: "p", Effort: EffortHigh})
-		if indexOfArg(args, "--effort") == -1 {
-			t.Fatalf("args = %v, want --effort (fail open on probe failure)", args)
+		if indexOfArg(args, "--effort") != -1 {
+			t.Fatalf("args = %v, want no --effort when the probe could not read the binary", args)
 		}
 	})
 
 	t.Run("no tier means no flag", func(t *testing.T) {
-		g := withProbe(t, true, nil)
+		g := withProbe(t, true, true)
 		args := g.BuildStreamArgs(StreamOpts{Prompt: "p"})
 		if indexOfArg(args, "--effort") != -1 {
 			t.Fatalf("args = %v, want no --effort", args)
@@ -265,8 +270,8 @@ func TestStreamArgsEffort(t *testing.T) {
 // result must not be shared across them.
 func TestEffortSupportCacheIsPerBinary(t *testing.T) {
 	orig := effortHelpProbe
-	effortHelpProbe = func(bin string) (bool, error) {
-		return strings.Contains(bin, "modern"), nil
+	effortHelpProbe = func(bin string) (bool, bool) {
+		return strings.Contains(bin, "modern"), true
 	}
 	t.Cleanup(func() { effortHelpProbe = orig })
 
@@ -278,4 +283,101 @@ func TestEffortSupportCacheIsPerBinary(t *testing.T) {
 	if legacy.cliSupportsEffort() {
 		t.Fatal("legacy binary should report no support")
 	}
+}
+
+// TestEffortHelpProbeReadsTheContent pins how the probe decides.
+//
+// The exit code is NOT evidence: a claude build may exit non-zero on
+// --help while still printing its usage text, and that text is what tells
+// us whether --effort exists. A probe that produced no output at all is
+// a different case — we could not read the binary — and is reported as
+// unusable so the caller can drop the flag instead of guessing.
+//
+// The fake binaries are real executables, so this exercises the actual
+// exec path (exit status, stdout/stderr capture) rather than a stub.
+func TestEffortHelpProbeReadsTheContent(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available")
+	}
+	dir := t.TempDir()
+
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+
+	t.Run("flag present, exit 0", func(t *testing.T) {
+		bin := write("ok-exit0", "#!/bin/sh\necho '  --effort <level>  Effort level'\n")
+		supported, usable := effortHelpProbe(bin)
+		if !usable {
+			t.Fatal("usable = false, want true (the probe read the binary)")
+		}
+		if !supported {
+			t.Fatal("supported = false, want true")
+		}
+	})
+
+	t.Run("flag present, non-zero exit", func(t *testing.T) {
+		// The build prints its usage and exits 1. The usage text is the
+		// evidence; the exit code is noise.
+		bin := write("ok-exit1", "#!/bin/sh\necho '  --effort <level>  Effort level'\nexit 1\n")
+		supported, usable := effortHelpProbe(bin)
+		if !usable {
+			t.Fatal("usable = false, want true (the probe read the binary)")
+		}
+		if !supported {
+			t.Fatal("supported = false, want true (the usage text mentions --effort)")
+		}
+	})
+
+	t.Run("flag absent", func(t *testing.T) {
+		bin := write("no-flag", "#!/bin/sh\necho '  --model <model>  Model'\n")
+		supported, usable := effortHelpProbe(bin)
+		if !usable {
+			t.Fatal("usable = false, want true (the probe read the binary)")
+		}
+		if supported {
+			t.Fatal("supported = true, want false")
+		}
+	})
+
+	t.Run("flag absent, non-zero exit", func(t *testing.T) {
+		// The dangerous shape: a build that exits non-zero and prints
+		// something that is NOT usage text. Content is authoritative →
+		// no --effort.
+		bin := write("no-flag-exit1", "#!/bin/sh\necho 'some other output'\nexit 3\n")
+		supported, usable := effortHelpProbe(bin)
+		if !usable {
+			t.Fatal("usable = false, want true (the probe read the binary)")
+		}
+		if supported {
+			t.Fatal("supported = true, want false")
+		}
+	})
+
+	t.Run("no output at all is unusable", func(t *testing.T) {
+		// Nothing to read: the binary could not be probed. The caller
+		// must drop the flag rather than guess.
+		bin := write("silent", "#!/bin/sh\nexit 1\n")
+		supported, usable := effortHelpProbe(bin)
+		if usable {
+			t.Fatal("usable = true, want false")
+		}
+		if supported {
+			t.Fatal("supported = true, want false")
+		}
+	})
+
+	t.Run("missing binary is unusable", func(t *testing.T) {
+		supported, usable := effortHelpProbe(filepath.Join(dir, "does-not-exist"))
+		if usable {
+			t.Fatal("usable = true, want false")
+		}
+		if supported {
+			t.Fatal("supported = true, want false")
+		}
+	})
 }

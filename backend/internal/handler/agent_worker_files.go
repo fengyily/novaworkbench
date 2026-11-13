@@ -52,7 +52,14 @@ package handler
 // drop the field, so a remote run would silently lose its tier (and an
 // agent host whose claude predates the flag would abort on an unknown
 // option), hence the bump.
-const agentWorkerVersion = "0.4.5"
+// 0.4.6: the worker's --effort capability probe no longer fails open. A
+// probe it could not read used to be treated as "the flag is supported",
+// which handed --effort to a CLI that might not know it and aborted the
+// run with "unknown option". The probe now decides on the CONTENT of
+// --help (the exit code is not evidence) and drops the flag whenever the
+// binary could not be read, matching the backend. Older workers keep the
+// risky behaviour, hence the bump.
+const agentWorkerVersion = "0.4.6"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -118,7 +125,7 @@ const agentWorkerServerMJS = `// nova-agent-worker — HTTP/NDJSON bridge betwee
 //      error into a coarse errorCategory the Go side maps to a user-facing
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
 // pathSep ('/') splits a filesystem path into segments; pathDelim (':')
 // splits $PATH into directories. Mixing them up silently corrupts PATH —
@@ -272,29 +279,56 @@ const effortSupportCache = new Map();
 // --effort. An older build aborts the whole run with "unknown option", so
 // the flag is dropped instead of killing the job.
 //
-// Failure policy: FAIL OPEN (assume supported) when the probe itself fails.
-// A probe failure almost always means the CLI is unusable anyway, and the
-// run then fails with a far more accurate error than a silently dropped
-// feature would suggest. The user-facing escape hatch is the effort.enabled
-// master switch in NovaWorkbench's settings page.
+// Failure policy: a probe we could not read is treated as "the flag is not
+// supported" — the flag is dropped, never emitted on a guess.
+//
+// The asymmetry is what decides this. Emitting --effort to a CLI that
+// doesn't know it LOSES THE RUN (the whole point of the probe). Not
+// emitting it to a CLI that does know it merely leaves the tier at the
+// CLI's own default, which is exactly what the feature looked like before
+// it existed. So every kind of uncertainty has to resolve to "don't emit".
+//
+// A probe failure says nothing about whether the binary is old: it can be a
+// slow machine (the 10s timeout), a wrapper that only forwards -p, or a
+// build that exits non-zero without printing usage. Treating those as
+// "supported" is what would kill the run — the very outcome the probe
+// exists to prevent.
+//
+// The negative answer IS cached, so a broken probe environment costs one
+// timeout instead of one per run. The user-facing escape hatch is the
+// effort.enabled master switch in NovaWorkbench's settings page.
 function cliSupportsEffort(cmd, env) {
-  if (!cmd) return true;
+  if (!cmd) return false;
   const key = String(cmd);
   if (effortSupportCache.has(key)) {
     return effortSupportCache.get(key);
   }
-  let supported = true;
+  let supported = false;
+  let usable = false;
   try {
-    const out = execFileSync(cmd, ['--help'], {
+    // spawnSync (not execFileSync) so a non-zero exit does not throw: the
+    // usage text is what tells us whether the flag exists, and some builds
+    // exit non-zero on --help while still printing it. The exit code is
+    // NOT evidence either way — only the content is.
+    const res = spawnSync(cmd, ['--help'], {
       encoding: 'utf8',
       timeout: 10000,
       env: env || process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    supported = String(out).includes('--effort');
+    const out = (res.stdout || '') + (res.stderr || '');
+    if (out.trim() !== '') {
+      usable = true;
+      supported = out.includes('--effort');
+    }
   } catch (e) {
-    // Probe failed → fail open (see above).
-    supported = true;
+    // Could not spawn the binary at all → not usable.
+    usable = false;
+  }
+  if (!usable) {
+    // We could not read the binary → assume the worst and drop the flag
+    // (see the failure policy above).
+    effortSupportCache.set(key, false);
+    return false;
   }
   effortSupportCache.set(key, supported);
   return supported;
@@ -1492,6 +1526,7 @@ export {
   buildRunRequest,
   buildClaudeArgs,
   normalizeEffort,
+  cliSupportsEffort,
 };
 `
 
