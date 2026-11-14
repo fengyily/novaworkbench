@@ -512,6 +512,15 @@ export const components = {
     button: 'Scroll to bottom',
     newMessages: '↓ {{count}} new messages',
   },
+  // Auto-scroll toggle in the sticky control bar of the SSE stream panels
+  // (design / wiki / coding). Mirrors the zh locale above.
+  autoScroll: {
+    label: 'Auto-scroll',
+    enable: 'Enable auto-scroll',
+    disable: 'Pause auto-scroll',
+    on: 'On',
+    off: 'Off',
+  },
 
   // RichDescriptionEditor — Markdown editor with image paste support.
   // Mirrors the zh locale above; assertSameKeys in i18n/index.ts will

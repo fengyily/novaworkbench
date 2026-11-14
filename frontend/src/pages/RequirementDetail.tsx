@@ -99,6 +99,8 @@ import '../styles/markdown-prose.css';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { StreamPanelBar } from '../components/StreamPanelBar';
+import { useStickToBottom } from '../utils/useStickToBottom';
 import { Breadcrumb } from '../components/Breadcrumb';
 
 // WikiData holds the parsed shape of a wiki-kind requirement's Markdown
@@ -1060,7 +1062,6 @@ export default function RequirementDetail() {
   const [codingCompressing, setCodingCompressing] = useState(false);
   const [codingCompressedAt, setCodingCompressedAt] = useState<string | null>(null);
   const [codingSummaryModal, setCodingSummaryModal] = useState<string | null>(null);
-  const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
   // One-shot guard for the creation-intent flows (autoStartDesign /
@@ -1393,7 +1394,6 @@ export default function RequirementDetail() {
   // hides behind the "Thinking process" toggle and the user has no idea the
   // run failed.
   const [designError, setDesignError] = useState(false);
-  const designRef = useRef<HTMLDivElement>(null);
   const designEsRef = useRef<EventStream | null>(null);
 
   // Collapsible "Thinking process" toggle for the architect design stream.
@@ -1411,8 +1411,19 @@ export default function RequirementDetail() {
   const [wikiLines, setWikiLines] = useState<LogLine[]>([]);
   const [wikiGenerating, setWikiGenerating] = useState(false);
   const [wikiError, setWikiError] = useState(false);
-  const wikiRef = useRef<HTMLDivElement>(null);
   const wikiEsRef = useRef<EventStream | null>(null);
+
+  // Conditional auto-scroll for the three SSE stream panels (design / wiki /
+  // coding). Each panel used to be force-scrolled to the bottom on every new
+  // line, which yanked the viewport away whenever the user scrolled up to
+  // read earlier output. useStickToBottom follows only while the viewport is
+  // at the bottom, pauses when the user scrolls up (surfacing a "↓ N new
+  // messages" jump button), and can be frozen outright from the panel's
+  // sticky control bar. Declared here (after the line states) so the deps
+  // arrays can reference them.
+  const designStick = useStickToBottom<HTMLDivElement>({ deps: [designLines] });
+  const wikiStick = useStickToBottom<HTMLDivElement>({ deps: [wikiLines] });
+  const codingStick = useStickToBottom<HTMLDivElement>({ deps: [codingLines] });
 
   // Collapsible design-doc state. Long design documents default to collapsed
   // (truncated with a fade-mask + "Expand full text" button); short ones
@@ -2627,13 +2638,11 @@ export default function RequirementDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, req?.design_job_id]);
 
-  useEffect(() => {
-    if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
-  }, [designLines]);
-
-  useEffect(() => {
-    if (wikiRef.current) wikiRef.current.scrollTop = wikiRef.current.scrollHeight;
-  }, [wikiLines]);
+  // NOTE: the design / wiki / coding panels no longer force-scroll to the
+  // bottom on every new line — that yanked the viewport away while the user
+  // was reading earlier output. The panels now use useStickToBottom
+  // (designStick / wikiStick / codingStick), which follows only while the
+  // viewport is at the bottom and can be frozen from the panel's control bar.
 
   // ── Developer phase: job streaming ────────────────────────────────────────
   // streamJob subscribes to a wizard job's SSE stream and appends events to
@@ -3271,10 +3280,6 @@ export default function RequirementDetail() {
       if (mergeEsRef.current) mergeEsRef.current.close();
     };
   }, []);
-
-  useEffect(() => {
-    if (codingRef.current) codingRef.current.scrollTop = codingRef.current.scrollHeight;
-  }, [codingLines]);
 
   // Load merge state when entering the developer/done stage (the merge step
   // only makes sense once coding has produced a dev branch to merge from).
@@ -5589,13 +5594,19 @@ export default function RequirementDetail() {
 
           {designPanelOpen && (
             <div
-              className={`coding-panel ${designFs.isFullscreen ? 'is-fullscreen' : ''}`}
-              ref={designRef}
+              className={`coding-panel has-stream-bar ${designFs.isFullscreen ? 'is-fullscreen' : ''}`}
+              ref={designStick.ref}
               style={designFs.isFullscreen ? undefined : { marginBottom: 16 }}
             >
               {designFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
               )}
+              <StreamPanelBar
+                autoScroll={designStick.autoScroll}
+                onToggleAutoScroll={designStick.toggleAutoScroll}
+                pendingCount={designStick.pendingCount}
+                onJumpToBottom={() => designStick.scrollToBottom('auto')}
+              />
               {/* Live context-usage bar for the plan-mode design run. Design is
                   a one-shot plan-mode product (no multi-turn conversation to
                   compress), so compressible=false hides the compress button and only
@@ -6077,13 +6088,19 @@ export default function RequirementDetail() {
                 designPanelOpen behaviour). */}
             {wikiPanelOpen && (
               <div
-                className={`coding-panel ${wikiFs.isFullscreen ? 'is-fullscreen' : ''}`}
-                ref={wikiRef}
+                className={`coding-panel has-stream-bar ${wikiFs.isFullscreen ? 'is-fullscreen' : ''}`}
+                ref={wikiStick.ref}
                 style={wikiFs.isFullscreen ? undefined : { marginBottom: 16 }}
               >
                 {wikiFs.isFullscreen && (
                   <FullscreenButton isFullscreen onClick={wikiFs.exit} variant="floating" />
                 )}
+                <StreamPanelBar
+                  autoScroll={wikiStick.autoScroll}
+                  onToggleAutoScroll={wikiStick.toggleAutoScroll}
+                  pendingCount={wikiStick.pendingCount}
+                  onJumpToBottom={() => wikiStick.scrollToBottom('auto')}
+                />
                 {/* Optional knowledge pre-read display (the wiki generator
                     reuses the same `knowledge` SSE event the design stage
                     emits). Renders above the log lines so the user can see
@@ -6238,7 +6255,19 @@ export default function RequirementDetail() {
           merge-PR / sub-task / commit-push-PR CTAs for kind=wiki. */}
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && reqKind !== 'wiki' && (
         <div className="detail-section">
-          <div className="section-header"><h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3></div>
+          <div className="section-header">
+            <h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3>
+            {/* Fullscreen entry for the developer-stage SSE stream. The
+                fullscreen state (codingFs) and the `.is-fullscreen` class on
+                the panel were already wired up — only the entry button was
+                missing. Same pattern as the design / wiki panels: the button
+                is rendered exactly when the stream panel is rendered. */}
+            <div className="design-toolbar-actions">
+              {(codingLines.length > 0 || coding || !!req.coding_phase) && (
+                <FullscreenButton isFullscreen={codingFs.isFullscreen} onClick={codingFs.toggle} />
+              )}
+            </div>
+          </div>
 
           {/* 前置依赖 —— 只在子需求有依赖边时出现。未完成的前置会把下面的
               「开始开发」按钮置灰（后端的 coding 闸门同样会拒绝）。 */}
@@ -6540,10 +6569,16 @@ export default function RequirementDetail() {
               `coding` and `codingLines` are still empty — which used to render
               a blank page under a requirement that was very much busy. */}
           {(codingLines.length > 0 || coding || !!req.coding_phase) && (
-            <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingRef}>
+            <div className={`coding-panel has-stream-bar ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingStick.ref}>
               {codingFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
               )}
+              <StreamPanelBar
+                autoScroll={codingStick.autoScroll}
+                onToggleAutoScroll={codingStick.toggleAutoScroll}
+                pendingCount={codingStick.pendingCount}
+                onJumpToBottom={() => codingStick.scrollToBottom('auto')}
+              />
               {/* Live context-usage bar + compress-context entry point for the
                   coding stage. Multi-turn (--resume coding_session_id), so
                   compressible is true — the button hands off to
@@ -6779,6 +6814,11 @@ export default function RequirementDetail() {
                   <div className="merge-actions stack-mobile">
                     <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
                     <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
+                    {/* Fullscreen entry for the merge log panel — the fullscreen
+                        state existed but had no way in. */}
+                    {mergeLines.length > 0 && (
+                      <FullscreenButton isFullscreen={mergeFs.isFullscreen} onClick={mergeFs.toggle} />
+                    )}
                   </div>
                 )}
 
