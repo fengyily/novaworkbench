@@ -105,6 +105,12 @@
   font-size: 11px;
   color: var(--color-text-muted, #64748b);
 }
+.req-child-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
 .req-child-meta-dep {
   color: var(--color-primary, #4f46e5);
 }

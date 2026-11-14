@@ -332,6 +332,12 @@ export const requirements = {
     intentGenerateDesign: 'Generate design',
     deleteWithName: 'Delete the requirement "{{title}}"? This cannot be undone.',
     designKnowledgeHint: 'Before starting the design, you can optionally read knowledge entries relevant to this requirement.',
+    // 「生成技术方案」 preflight modal (draft / analyzing entry point).
+    designPreflightEyebrow: 'Pre-flight · Design',
+    designPreflightSubtitle: 'Pick the model, execution environment and reasoning tier before generating the technical plan.',
+    designPreflightFlightAria: 'Design configuration summary',
+    designPreflightDesignSection: 'Design · Technical plan',
+    designPreflightConfirm: 'Generate plan',
     btnConfirm: 'Confirm',
     btnCancel: 'Cancel',
     preflightEyebrow: 'Pre-flight',

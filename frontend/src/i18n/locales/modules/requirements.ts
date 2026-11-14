@@ -339,6 +339,12 @@ export const requirements = {
     intentGenerateDesign: '生成技术方案',
     deleteWithName: '确认删除需求「{{title}}」？此操作不可恢复。',
     designKnowledgeHint: '开始方案设计前，可选择先读取项目知识库中与需求相关的知识。',
+    // 「生成技术方案」 preflight 弹窗（draft / analyzing 入口）。
+    designPreflightEyebrow: 'Pre-flight · 方案设计',
+    designPreflightSubtitle: '确认模型、执行环境与推理档位后启动方案设计。',
+    designPreflightFlightAria: '方案设计配置摘要',
+    designPreflightDesignSection: 'Design · 方案设计',
+    designPreflightConfirm: '开始生成方案',
     btnConfirm: '确认',
     btnCancel: '取消',
     preflightEyebrow: 'Pre-flight',
