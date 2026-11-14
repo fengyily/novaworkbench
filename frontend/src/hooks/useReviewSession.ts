@@ -51,6 +51,9 @@ export interface UseReviewSessionResult {
   askFollowup: (question: string) => Promise<void>;
   regenerate: () => Promise<void>;
   rerun: (opts?: RerunOpts) => Promise<void>;
+  /** Re-read the stored report's contract block and refill the grading. */
+  reparse: () => Promise<void>;
+  reparsing: boolean;
   setActiveRevisionNo: (n: number | null) => void;
   restoreRevision: (n: number) => Promise<void>;
   reload: () => Promise<void>;
@@ -78,6 +81,8 @@ export function useReviewSession(
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [liveLines, setLiveLines] = useState<StreamLine[]>([]);
   const [running, setRunning] = useState(false);
+  // True while a 「重新解析结构化结果」 round-trip is in flight.
+  const [reparsing, setReparsing] = useState(false);
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
 
@@ -295,6 +300,25 @@ export function useReviewSession(
     }
   }, [fail]);
 
+  // reparse re-reads the trailing JSON contract out of the stored report
+  // and back-fills the structured columns. It runs NO model: the report the
+  // user read is the report they keep. It is the recovery path for a report
+  // whose contract block was mis-parsed — the prose is intact, but the
+  // grading (and therefore the fix sub-tasks) is missing.
+  const reparse = useCallback(async () => {
+    const rid = reviewIdRef.current;
+    if (!rid || reparsing) return;
+    setReparsing(true);
+    try {
+      await codeReviewsApi.reparse(rid);
+      refreshAfterRun(rid);
+    } catch (err: unknown) {
+      fail(err);
+    } finally {
+      setReparsing(false);
+    }
+  }, [reparsing, refreshAfterRun, fail]);
+
   const reload = useCallback(async () => {
     const rid = reviewIdRef.current;
     if (!rid) return;
@@ -327,6 +351,8 @@ export function useReviewSession(
     askFollowup,
     regenerate,
     rerun,
+    reparse,
+    reparsing,
     setActiveRevisionNo,
     restoreRevision,
     reload,

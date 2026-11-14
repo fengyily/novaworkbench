@@ -622,6 +622,10 @@ func main() {
 	// same job channel; the version it replaces is frozen first, so the
 	// revision routes below can always get it back.
 	mux.HandleFunc("POST /api/reviews/{rid}/regenerate", reviewH.RegenerateReview)
+	// 重新解析结构化结果: re-read the trailing JSON contract out of an
+	// ALREADY-FINISHED report and back-fill the structured columns. It runs
+	// no model — the report the user read is the report they keep.
+	mux.HandleFunc("POST /api/reviews/{rid}/reparse", reviewH.ReparseReview)
 	mux.HandleFunc("GET /api/reviews/{rid}/revisions", reviewH.ListRevisions)
 	mux.HandleFunc("GET /api/reviews/{rid}/revisions/{n}", reviewH.GetRevision)
 	mux.HandleFunc("POST /api/reviews/{rid}/revisions/{n}/restore", reviewH.RestoreRevision)

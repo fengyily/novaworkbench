@@ -283,6 +283,115 @@ func TestParseFindings_SurvivesBrokenGoalChecks(t *testing.T) {
 	}
 }
 
+// The reverse isolation: a `findings` section the model got wrong must not
+// take the evidence table down with it. Before the tolerant decode both
+// sections were decoded from the same blob, so ONE bad field in ONE finding
+// cost the report its grading AND its evidence table — and, with it, the
+// user's ability to generate fix sub-tasks.
+func TestParseGoalChecks_SurvivesBrokenFindings(t *testing.T) {
+	raw := `{"goal_met":"partial","goal_checks":[{"criterion":"分页生效","status":"yes","evidence":"api.go:42"}],"findings":"忘了写成数组"}`
+
+	if got := parseGoalChecks(raw); got == "" {
+		t.Error("parseGoalChecks should still produce the evidence table when findings is broken")
+	}
+	if _, _, ok := parseFindings(raw); ok {
+		t.Error("parseFindings should report not-ok for a non-array findings section")
+	}
+}
+
+// The production incident: the model wrote `"line": 664` where the contract
+// asked for a string. A strict decode turned that one type mismatch into an
+// UnmarshalTypeError for the WHOLE contract — costing 11 findings their
+// grading and 9 goal_checks their evidence table.
+func TestParseFindings_NormalisesFieldTypes(t *testing.T) {
+	raw := `{"goal_met":"partial",
+	  "goal_checks":[{"criterion":"分页生效","status":"yes","evidence":"api.go:42"}],
+	  "findings":[
+	    {"severity":"P0","file":"a.go","line":664,"title":"空指针","detail":"d","suggestion":"s"},
+	    {"severity":"P1","file":"b.go","line":"12-20","title":"竞态","detail":"d","suggestion":"s"}
+	  ]}`
+
+	findings, goalMet, ok := parseFindings(raw)
+	if !ok {
+		t.Fatal("a numeric line must not fail the whole contract")
+	}
+	if goalMet != "partial" {
+		t.Fatalf("goalMet = %q", goalMet)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("len(findings) = %d, want 2", len(findings))
+	}
+	if findings[0].Line != "664" {
+		t.Errorf("line = %q, want the numeric line rendered as \"664\"", findings[0].Line)
+	}
+	if findings[1].Line != "12-20" {
+		t.Errorf("line = %q, want \"12-20\"", findings[1].Line)
+	}
+	p0, p1, p3 := countBySeverity(findings)
+	if p0 != 1 || p1 != 1 || p3 != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want (1,1,0)", p0, p1, p3)
+	}
+	if parseGoalChecks(raw) == "" {
+		t.Error("goal_checks should survive alongside the findings")
+	}
+}
+
+// A missing `line` (or a null one) says "I don't know where" — it must not
+// fail the row, and it must not become the string "null".
+func TestParseFindings_MissingAndNullFields(t *testing.T) {
+	raw := `{"goal_met":"yes","findings":[
+	  {"severity":"P3","file":"a.go","title":"补注释"},
+	  {"severity":"P3","file":"b.go","line":null,"title":"改名","detail":null}
+	]}`
+
+	findings, _, ok := parseFindings(raw)
+	if !ok {
+		t.Fatal("missing fields must not fail the contract")
+	}
+	if len(findings) != 2 {
+		t.Fatalf("len(findings) = %d, want 2", len(findings))
+	}
+	for _, f := range findings {
+		if f.Line == "null" {
+			t.Errorf("a null line must render as empty, got %q", f.Line)
+		}
+	}
+}
+
+// A severity outside the three known buckets is still dropped, and the
+// verdict vocabulary is still a whitelist — the tolerant decode relaxes
+// TYPES, not meaning.
+func TestParseFindings_StillDropsUnknownSeverityAndVerdict(t *testing.T) {
+	raw := `{"goal_met":"maybe","findings":[
+	  {"severity":"P2","title":"ignored"},
+	  {"severity":1,"title":"also ignored"}
+	]}`
+
+	findings, goalMet, ok := parseFindings(raw)
+	if !ok {
+		t.Fatal("valid JSON should parse")
+	}
+	if goalMet != "" {
+		t.Errorf("goalMet = %q, want empty for an unknown verdict", goalMet)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings = %+v, want none (P2 and a numeric severity are not buckets)", findings)
+	}
+}
+
+// The persisted findings array is read back by the 「转修复子任务」 and
+// 「转 issue」 paths, so it has to survive the same type drift.
+func TestParseFindingsArray_NormalisesFieldTypes(t *testing.T) {
+	raw := `[{"severity":"P1","file":"a.go","line":42,"title":"t"}]`
+	findings, ok := parseFindingsArray(raw)
+	if !ok {
+		t.Fatal("parseFindingsArray should parse a numeric line")
+	}
+	if len(findings) != 1 || findings[0].Line != "42" {
+		t.Fatalf("findings = %+v", findings)
+	}
+}
+
 // A regeneration replaces a report the user already read, so its output has
 // to look like a report before it is allowed to land. The CLI exits 0 with
 // non-report text often enough that this is a real failure mode, not a

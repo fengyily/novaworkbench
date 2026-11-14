@@ -2199,6 +2199,17 @@
   color: var(--color-error, #DC2626);
 }
 
+/* The 「重新解析结构化结果」 recovery affordance, shown under the degraded
+   verdict banner: the report prose is readable but its grading is missing,
+   so the button sits right where the missing thing is announced. */
+.sub-review-reparse {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
 /* Severity ledger — a zero bucket stays grey so the eye lands only on what
    actually needs attention (same rule as the project-level Review view). */
 .sub-review-ledger {

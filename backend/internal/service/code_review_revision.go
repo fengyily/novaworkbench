@@ -201,6 +201,77 @@ func (s *CodeReviewRevisionService) RestoreAsCurrent(reviewID string, revNo int)
 	return err
 }
 
+// UpdateCurrent rewrites the FROZEN version the review currently serves.
+//
+// It exists for the 「重新解析结构化结果」 path: the report text did not
+// change — we simply read it wrong the first time — so the version history
+// must not grow a new entry. The existing version row is corrected IN PLACE
+// (same rev_no), which keeps the list of versions a record of what was
+// PRODUCED rather than of how many times we re-read it.
+//
+// The trigger and followup_count are left untouched: neither changed.
+//
+// The existence check is an explicit SELECT rather than a RowsAffected
+// count: on MySQL, RowsAffected is the number of CHANGED rows, so a
+// no-op UPDATE reports 0 and the code would wrongly fall through to the
+// INSERT — straight into the (review_id, rev_no) unique index.
+func (s *CodeReviewRevisionService) UpdateCurrent(rv *model.CodeReview) error {
+	if rv == nil {
+		return errors.New("review is required")
+	}
+	if strings.TrimSpace(rv.ResultMD) == "" {
+		return errors.New("review has no report to update")
+	}
+	revNo := rv.RevisionNo
+	if revNo <= 0 {
+		revNo = 1
+	}
+	now := time.Now().UTC()
+
+	var existing int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM code_review_revisions WHERE review_id = ? AND rev_no = ?`,
+		rv.ID, revNo).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		_, err := s.db.Exec(`UPDATE code_review_revisions
+			SET result_md = ?, findings_json = ?, p0_count = ?, p1_count = ?, p3_count = ?,
+			    goal_met = ?, goal_checks_json = ?
+			WHERE review_id = ? AND rev_no = ?`,
+			rv.ResultMD, rv.FindingsJSON, rv.P0Count, rv.P1Count, rv.P3Count,
+			rv.GoalMet, rv.GoalChecksJSON, rv.ID, revNo)
+		return err
+	}
+	// No frozen version at that number (a review that finished before this
+	// table existed). Freeze the corrected report there, so the history
+	// still holds the version the review serves.
+	rev := &model.CodeReviewRevision{
+		ID:             util.NewID("crr"),
+		ReviewID:       rv.ID,
+		RevNo:          revNo,
+		Trigger:        model.RevisionTriggerInitial,
+		ResultMD:       rv.ResultMD,
+		FindingsJSON:   rv.FindingsJSON,
+		P0Count:        rv.P0Count,
+		P1Count:        rv.P1Count,
+		P3Count:        rv.P3Count,
+		GoalMet:        rv.GoalMet,
+		GoalChecksJSON: rv.GoalChecksJSON,
+		FollowupCount:  0,
+		Model:          rv.Model,
+		CreatedAt:      now,
+	}
+	_, err := s.db.Exec(`INSERT INTO code_review_revisions (
+		id, review_id, rev_no, trigger_kind, result_md, findings_json,
+		p0_count, p1_count, p3_count, goal_met, goal_checks_json,
+		followup_count, model, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rev.ID, rev.ReviewID, rev.RevNo, rev.Trigger, rev.ResultMD, rev.FindingsJSON,
+		rev.P0Count, rev.P1Count, rev.P3Count, rev.GoalMet, rev.GoalChecksJSON,
+		rev.FollowupCount, rev.Model, rev.CreatedAt)
+	return err
+}
+
 // DeleteByReview drops a review's whole version history. Called by
 // CodeReviewService.Delete for the same reason the follow-up rows are dropped
 // explicitly there: SQLite never enables PRAGMA foreign_keys, so the DDL's

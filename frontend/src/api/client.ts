@@ -2638,6 +2638,20 @@ export const codeReviewsApi = {
   restoreRevision: (reviewId: string, revNo: number) =>
     api.post<CodeReview>(`/api/reviews/${reviewId}/revisions/${revNo}/restore`, {}),
 
+  // ── Re-parse the structured result ──────────────────────────────────────
+  // Re-reads the trailing JSON contract out of an ALREADY-FINISHED report
+  // and back-fills the structured columns (findings / counts / goal_met /
+  // goal_checks). No model runs: the report the user already read is the
+  // report they keep. It is the recovery path for a report whose contract
+  // block was mis-parsed (e.g. a numeric `line`), which otherwise leaves
+  // the prose intact but the grading — and therefore the fix sub-tasks —
+  // unusable.
+  reparse: (reviewId: string) =>
+    api.post<{ p0: number; p1: number; p3: number; goal_met: string; findings: number }>(
+      `/api/reviews/${reviewId}/reparse`,
+      {},
+    ),
+
   // ── 创建 issue 需求 ────────────────────────────────────────────────────
   // Turn a graded finding into a tracked issue-kind requirement. Single
   // finding_ref ("P0-1") for the per-card button; batch with severities

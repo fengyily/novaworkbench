@@ -2176,6 +2176,23 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const effortDefaults = useEffortDefaults();
   const [composerEffort, setComposerEffort] = useState<EffortTier | null>(null);
   const composerEffortValue = composerEffort ?? effortDefaults.forStage('coding');
+  // Reasoning-effort tier for the REVIEW composer — a SEPARATE pick from
+  // the ordinary sub-task one above, for two reasons:
+  //
+  //   1. The stages differ: an ordinary sub-task is implementation work
+  //      ('coding'), while a Review grades someone else's work and belongs
+  //      to the 'other' stage — the backend resolves it the same way
+  //      (llm.StageOther in handler/review_subtask.go).
+  //   2. composerEffort is ALSO the pick for every per-card action
+  //      (redo / continue / follow-up adjustment), and those are all coding
+  //      work. Sharing one state would make a Review's tier silently change
+  //      what a redo runs at.
+  //
+  // Like the coding one, the pick stays null until the user clicks, so an
+  // unpicked run leaves the field off the wire and the backend resolves
+  // the CONFIGURED stage default (see utils/effort.ts).
+  const [reviewEffort, setReviewEffort] = useState<EffortTier | null>(null);
+  const reviewEffortValue = reviewEffort ?? effortDefaults.forStage('other');
   // The AI persona the review runs under (roles.key). Default 'reviewer' —
   // the same default the project-level Review uses.
   const [reviewRoleKey, setReviewRoleKey] = useState(DEFAULT_REVIEW_ROLE_KEY);
@@ -2819,6 +2836,13 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           role_key: reviewRoleKey || DEFAULT_REVIEW_ROLE_KEY,
           ...(createModel ? { model: createModel } : {}),
           ...(createConfigId ? { claude_config_id: createConfigId } : {}),
+          // Reasoning-effort tier (claude CLI --effort). A Review grades
+          // other people's work → the 'other' stage default. Sent ONLY when
+          // the user actually picked one: an unpicked run leaves the field
+          // off so the backend resolves the configured stage default
+          // (llm.Gateway.ResolveEffort owns that layer) instead of taking
+          // the frontend's copy as an explicit pick.
+          ...effortPick(reviewEffort),
         });
         setReviewGoal('');
         setAppliedCandidates({});
@@ -2876,7 +2900,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, requirementId, loadList, t, reset]);
+  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, reviewEffort, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -3544,9 +3568,15 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             wrapper reuses .sub-session-mode for the vertical rhythm, the
             segments themselves come from the shared EffortBar.
 
-            ORDINARY sub-tasks only: a requirement-level Review picks its
-            tier on the Review card, not here — showing a second picker for
-            the same run would be two spellings of one choice. */}
+            ONE PICKER PER MODE, with independent state:
+              - ordinary sub-task → 'subtask-effort' / the 'coding' stage
+                default (implementation work);
+              - requirement-level Review → 'review-effort' / the 'other'
+                stage default (a Review grades someone else's work).
+            The two bars are MUTUALLY EXCLUSIVE (the composer shows one or
+            the other), and the ids differ because EffortBar's id doubles
+            as the radio group's `name` — two bars sharing one name would
+            cancel each other's selection. */}
         {composerMode === 'code' && (
         <div className="sub-session-mode">
           <EffortBar
@@ -3557,6 +3587,17 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             // The master switch (设置 → 推理档位) is off → the backend
             // sends no --effort at all, so an interactive-looking bar
             // would be a lie.
+            disabled={!effortDefaults.enabled || submitting || reSplitBusy}
+          />
+        </div>
+        )}
+        {composerMode === 'review' && (
+        <div className="sub-session-mode">
+          <EffortBar
+            id="review-effort"
+            label={t('components.effortBar.ariaLabel')}
+            value={reviewEffortValue}
+            onChange={setReviewEffort}
             disabled={!effortDefaults.enabled || submitting || reSplitBusy}
           />
         </div>

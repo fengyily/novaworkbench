@@ -224,6 +224,12 @@
   line-height: 1.6;
   color: var(--color-text-secondary);
 }
+/* The 「重新解析结构化结果」 recovery affordance on the degraded verdict:
+   the prose is readable but the grading is missing, so the button sits
+   right under the sentence that says so. */
+.cr-reparse {
+  margin-top: 8px;
+}
 .cr-verdict-meta {
   display: flex;
   align-items: center;

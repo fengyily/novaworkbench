@@ -257,6 +257,12 @@ export const components = {
     // Requirement-level Review round card (RequirementReviewCard).
     reviewBadge: 'Review · round {{round}}',
     reviewIdentityChipHint: 'The AI persona (roles.key) this Review ran under',
+    reviewEffortChipHint: 'The reasoning-effort tier (claude CLI --effort) this Review ran at',
+    // Re-parse the structured result: read the JSON contract back out of the
+    // stored report and refill the grading — no model run, no tokens.
+    reviewReparse: '🔁 Re-parse structured result',
+    reviewReparseBusy: 'Parsing…',
+    reviewReparseHint: 'Re-extract the grading and the findings list from the saved report (no model run, no tokens). It cannot recover a report whose contract block is missing.',
     reviewOpenFull: 'Open the full report',
     reviewFullReport: 'Full Review report',
     reviewVerdict_pass: '✅ Review passed',

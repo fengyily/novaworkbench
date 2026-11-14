@@ -1009,21 +1009,30 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 	if jsonPart == "" {
 		return out
 	}
-	findings, goalMet, ok := parseFindings(jsonPart)
-	if !ok {
+	// The three sections are decoded independently (see review_parse.go), so
+	// a broken goal_checks costs only the evidence table and a broken
+	// findings section costs only the grading.
+	sections := parseContractSections(jsonPart)
+	if !sections.FindingsOK {
+		// The findings section is not usable — there is no grading to
+		// persist. The evidence table and the verdict still are, so they
+		// are kept: the report body itself is untouched (the whole report,
+		// contract block included, is what the user reads).
+		out.GoalMet = sections.GoalMet
+		out.GoalChecksJSON = sections.GoalChecksJSON
 		return out
 	}
-	raw, err := json.Marshal(findings)
+	raw, err := json.Marshal(sections.Findings)
 	if err != nil {
 		return out
 	}
 	out.ResultMD = markdownPart
 	out.FindingsJSON = string(raw)
-	out.GoalMet = goalMet
+	out.GoalMet = sections.GoalMet
 	// Evidence for the 目标达成 verdict. Optional by contract and parsed on
 	// its own, so a malformed goal_checks costs only the evidence table.
-	out.GoalChecksJSON = parseGoalChecks(jsonPart)
-	out.P0, out.P1, out.P3 = countBySeverity(findings)
+	out.GoalChecksJSON = sections.GoalChecksJSON
+	out.P0, out.P1, out.P3 = countBySeverity(sections.Findings)
 	return out
 }
 

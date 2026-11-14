@@ -435,6 +435,11 @@ export const projects = {
     reviewVerdictHintPending: '这条 Review 还没有产出报告，点「开始 Review」即可运行。',
     reviewVerdictPlain: '未分级',
     reviewVerdictHintPlain: '模型未按分级契约输出，下方为完整报告原文。',
+    // 「重新解析结构化结果」：从已存报告正文里重抽 JSON 契约块并回填分级，
+    // 不重跑模型 —— 报告正文还是原来那份。
+    reviewReparse: '🔁 重新解析结构化结果',
+    reviewReparseBusy: '解析中…',
+    reviewReparseHint: '从已保存的报告正文重新提取分级与问题清单（不重跑模型，不消耗 token）。报告里若没有契约块则无法恢复。',
     reviewFullReport: '完整报告',
     // 「改动概览图」：把报告里的 Mermaid 图提到折叠的完整报告之上单独展示。
     reviewDiagrams: '改动概览图',

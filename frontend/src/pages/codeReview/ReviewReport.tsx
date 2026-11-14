@@ -85,6 +85,12 @@ interface Props {
   /** True while a batch creation round-trip is in flight. The button is
       disabled during this window so a second click can't mint duplicates. */
   bulkCreating: boolean;
+  /** Re-read the stored report's contract block and refill the grading.
+      Runs NO model — it is the recovery path for a report whose contract
+      block was mis-parsed (prose intact, grading missing). */
+  onReparse: () => void;
+  /** True while the re-parse round-trip is in flight. */
+  reparsing: boolean;
 }
 
 export default function ReviewReport({
@@ -93,6 +99,7 @@ export default function ReviewReport({
   onExportMd, onExportPdf, exportingPdf, onRegenerate, onRerun, onAskAbout,
   onCreateIssue, creatingIssues, createdIssues,
   onBulkCreateIssues, bulkCreating,
+  onReparse, reparsing,
 }: Props) {
   const { t } = useTranslation();
   const [exportOpen, setExportOpen] = useState(false);
@@ -249,6 +256,22 @@ export default function ReviewReport({
         <div className="cr-verdict-text">
           <h3 className="cr-verdict-title">{t(`projects.detail.reviewVerdict${verdictKey}`)}</h3>
           <p className="cr-verdict-sub">{t(`projects.detail.reviewVerdictHint${verdictKey}`)}</p>
+          {/* Recovery from the degraded path: the prose is readable but the
+              grading is missing, so the report cannot be actioned. Re-read
+              the contract block out of the report ALREADY on file — no
+              model runs, so the user keeps the report they read. */}
+          {verdict === 'plain' && (
+            <button
+              className="btn btn-sm cr-reparse"
+              onClick={onReparse}
+              disabled={busy || reparsing}
+              title={t('projects.detail.reviewReparseHint')}
+            >
+              {reparsing
+                ? t('projects.detail.reviewReparseBusy')
+                : t('projects.detail.reviewReparse')}
+            </button>
+          )}
         </div>
         <div className="cr-verdict-meta">
           <span className={`cr-goal cr-goal-${review.goal_met || 'unknown'}`}>

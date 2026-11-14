@@ -274,6 +274,12 @@ export const components = {
     // 需求级 Review 轮次卡片（RequirementReviewCard）。
     reviewBadge: 'Review · 第 {{round}} 轮',
     reviewIdentityChipHint: '本次 Review 使用的 AI 身份（roles.key）',
+    reviewEffortChipHint: '本次 Review 使用的推理档位（claude CLI --effort）',
+    // 重新解析结构化结果: 把已存报告正文里的 JSON 契约块重新读一遍，
+    // 回填分级 / 证据表 —— 不重跑模型，报告还是原来那份。
+    reviewReparse: '🔁 重新解析结构化结果',
+    reviewReparseBusy: '解析中…',
+    reviewReparseHint: '从已保存的报告正文重新提取分级与问题清单（不重跑模型，不消耗 token）。报告里若没有契约块则无法恢复。',
     reviewOpenFull: '打开完整报告',
     reviewFullReport: '完整 Review 报告',
     reviewVerdict_pass: '✅ Review 通过',
