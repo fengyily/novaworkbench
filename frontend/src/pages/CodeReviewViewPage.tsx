@@ -279,6 +279,8 @@ export default function CodeReviewViewPage() {
           createdIssues={createdIssues}
           onBulkCreateIssues={handleBulkCreateIssues}
           bulkCreating={bulkCreating}
+          onReparse={session.reparse}
+          reparsing={session.reparsing}
         />
         {review ? (
           <aside className="crv-chat-wrap">

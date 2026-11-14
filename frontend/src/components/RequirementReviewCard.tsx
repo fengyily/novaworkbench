@@ -63,7 +63,9 @@ export default function RequirementReviewCard({
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [fixBusy, setFixBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
+  const [reparseBusy, setReparseBusy] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [reparseError, setReparseError] = useState('');
 
   const load = useCallback(() => {
     let alive = true;
@@ -125,6 +127,32 @@ export default function RequirementReviewCard({
     }
   };
 
+  // Re-parse the stored report's contract block.
+  //
+  // WHY THIS EXISTS: the report prose and its structured half are decoded
+  // separately, and the structured half can fail to decode while the prose
+  // stays perfectly readable (a model writing `"line": 664` where the
+  // contract asked for a string used to cost the whole report its grading).
+  // The user is left with a readable report they cannot turn into fix
+  // sub-tasks — and re-running the Review to get the grading back means
+  // paying for (and receiving) a DIFFERENT report.
+  //
+  // So this re-reads the contract out of the report ALREADY on file. No
+  // model runs; the report the user read is the report they keep.
+  const onReparse = async () => {
+    setReparseBusy(true);
+    setReparseError('');
+    try {
+      await codeReviewsApi.reparse(reviewId);
+      await load();
+      onChanged?.();
+    } catch (e) {
+      setReparseError(String((e as Error)?.message || e));
+    } finally {
+      setReparseBusy(false);
+    }
+  };
+
   const onRecheck = async () => {
     setRecheckBusy(true);
     setActionError('');
@@ -150,6 +178,14 @@ export default function RequirementReviewCard({
             🎭 {review.role_key}
           </span>
         )}
+        {/* The reasoning tier this round actually ran at — the same
+            binding the model chip shows, so the reader can tell whether a
+            thin report came from a thin model or a thin tier. */}
+        {review?.effort && (
+          <span className="sub-review-chip" title={t('components.subTaskCard.reviewEffortChipHint')}>
+            🧠 {review.effort}
+          </span>
+        )}
         <span className="sub-review-spacer" />
         <a className="btn btn-sm" href={`/reviews/${reviewId}`}>
           {t('components.subTaskCard.reviewOpenFull')}
@@ -168,9 +204,29 @@ export default function RequirementReviewCard({
           </span>
         )}
         {verdict === 'plain' && (
-          <span className="sub-review-verdict-sub">
-            {t('components.subTaskCard.reviewVerdictPlainSub')}
-          </span>
+          <>
+            <span className="sub-review-verdict-sub">
+              {t('components.subTaskCard.reviewVerdictPlainSub')}
+            </span>
+            {/* Recovery: the report body may still carry the JSON contract
+                that carries the grading. Re-reading it costs nothing and
+                runs no model, so it is offered before the user resorts to
+                re-running the whole Review. */}
+            <div className="sub-review-reparse">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={onReparse}
+                disabled={reparseBusy}
+                title={t('components.subTaskCard.reviewReparseHint')}
+              >
+                {reparseBusy
+                  ? t('components.subTaskCard.reviewReparseBusy')
+                  : t('components.subTaskCard.reviewReparse')}
+              </button>
+              {reparseError && <span className="sub-review-error">{reparseError}</span>}
+            </div>
+          </>
         )}
         {verdict === 'pending' && (
           <span className="sub-review-verdict-sub">

@@ -310,6 +310,31 @@ func (s *CodeReviewService) MarkFinished(id string, out ReviewOutcome) error {
 	return err
 }
 
+// UpdateParsedFindings writes ONLY the structured columns of a finished
+// review, leaving the run's own bookkeeping alone.
+//
+// It exists for the 「重新解析结构化结果」 path: a report that was already
+// produced (and whose model run must NOT be repeated — that would cost the
+// user another full Review) had its trailing JSON contract mis-parsed, so
+// the grading columns are empty while the report text is intact. Re-parsing
+// recovers them from the stored text.
+//
+// It deliberately does NOT go through MarkFinished: that would flip the
+// status to `done` and stamp finished_at again, i.e. it would claim the run
+// happened again. A re-parse produces no new report, so status / job_id /
+// finished_at / revision_no all stay exactly as the run left them.
+func (s *CodeReviewService) UpdateParsedFindings(id string, out ReviewOutcome) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`UPDATE code_reviews
+		SET result_md = ?, findings_json = ?,
+		    p0_count = ?, p1_count = ?, p3_count = ?, goal_met = ?,
+		    goal_checks_json = ?, updated_at = ?
+		WHERE id = ?`,
+		out.ResultMD, out.FindingsJSON,
+		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, now, id)
+	return err
+}
+
 // Delete drops the session plus every attachment it owns — rows AND the
 // on-disk files. The FK CASCADE would handle the rows alone, which would
 // leave orphan bytes under ~/.novaworkbench/attachments/<crv_id>/, so the

@@ -430,6 +430,11 @@ export const projects = {
     reviewVerdictHintPending: 'This review has no report yet — hit "Start review" to run it.',
     reviewVerdictPlain: 'Ungraded',
     reviewVerdictHintPlain: 'The model did not follow the grading contract; the full report is below.',
+    // "Re-parse the structured result": re-read the JSON contract out of the
+    // stored report and refill the grading — no model run, no tokens.
+    reviewReparse: '🔁 Re-parse structured result',
+    reviewReparseBusy: 'Parsing…',
+    reviewReparseHint: 'Re-extract the grading and the findings list from the saved report (no model run, no tokens). It cannot recover a report whose contract block is missing.',
     reviewFullReport: 'Full report',
     // "Change diagrams": the report's Mermaid blocks, surfaced above the
     // collapsed full report so they are not hidden behind a disclosure.
