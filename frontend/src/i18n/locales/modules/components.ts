@@ -519,6 +519,17 @@ export const components = {
     button: '滚到底部',
     newMessages: '↓ {{count}} 条新消息',
   },
+  // Auto-scroll toggle in the sticky control bar of the SSE stream panels
+  // (design / wiki / coding). The toggle has three observable states:
+  // following (on), paused because the user scrolled up, and frozen
+  // because the user turned auto-scroll off entirely.
+  autoScroll: {
+    label: '自动滚动',
+    enable: '开启自动滚动',
+    disable: '暂停自动滚动',
+    on: '开',
+    off: '关',
+  },
 
   // RichDescriptionEditor — Markdown editor with image paste support.
   // Keys here drive the toolbar buttons, the edit/preview tab copy, the

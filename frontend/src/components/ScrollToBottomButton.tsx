@@ -1,10 +1,10 @@
-// Floating "↓ N new messages" pill shown inside an SSE chat panel when the
+// Inline "↓ N new messages" pill shown inside an SSE stream panel when the
 // user has scrolled up. Reads pendingCount from useStickToBottom and
 // triggers the panel's scrollToBottom on click.
 //
-// Positioning: rendered as the last child of the scroll container; sits at
-// viewport bottom-center via CSS (.scroll-to-bottom-button). The container
-// is expected to be `position: relative` (set on .chat-panel / .sub-log).
+// Positioning: rendered inside the sticky panel bar (.stream-panel-bar) at
+// the top of the scroll container, so it stays visible while the log scrolls
+// and remains reachable in fullscreen mode.
 
 import { useTranslation } from 'react-i18next';
 import './ScrollToBottomButton.css';
