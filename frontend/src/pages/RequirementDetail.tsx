@@ -24,6 +24,7 @@ import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
+import { DesignPreflightFields } from '../components/DesignPreflightFields';
 import ImportDesignDialog from '../components/ImportDesignDialog';
 import RequirementSplitModal from '../components/RequirementSplitModal';
 import RequirementChildrenPanel from '../components/RequirementChildrenPanel';
@@ -1298,6 +1299,22 @@ export default function RequirementDetail() {
   const [autoCreatePRDev, setAutoCreatePRDev] = useState(true);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
+  // Local selection state for the "generate design" preflight modal.
+  // Pre-filled from the page state on open and written back on confirm —
+  // exactly how requestRegenerateDesign / commitRegenerateConfirm work.
+  // This modal used to hold two checkboxes only: no model, no execution
+  // environment and no reasoning effort, which is why the effort tier was
+  // unreachable in the draft / analyzing states.
+  const [designPreflightModel, setDesignPreflightModel] = useState('');
+  const [designPreflightConfigId, setDesignPreflightConfigId] = useState('');
+  const [designPreflightAgentServerId, setDesignPreflightAgentServerId] = useState('');
+  const [designPreflightSyncMode, setDesignPreflightSyncMode] = useState<'' | 'local'>('');
+  // RAW pick (null = the user never picked one → the field stays off the
+  // wire and the backend resolves the configured stage default).
+  const [designPreflightEffort, setDesignPreflightEffort] = useState<EffortTier | null>(null);
+  // Display value = raw pick ?? configured stage default (EffortBar's
+  // `value` must always be a concrete tier).
+  const designPreflightEffortValue = designPreflightEffort ?? effortDefaults.forStage('design');
   // Designer-context toggle for the design stage: whether the architect
   // role prompt rides along with the plan-mode run.
   // Default true (checked) = historical behaviour; false = only the
@@ -1329,6 +1346,11 @@ export default function RequirementDetail() {
   const [regenerateAgentServerId, setRegenerateAgentServerId] = useState('');
   const [regenerateSyncMode, setRegenerateSyncMode] = useState<'' | 'local'>('');
   const [regenerateReadKnowledge, setRegenerateReadKnowledge] = useState(false);
+  // RAW pick (null = the user never picked one → the field stays off the
+  // wire). The regenerate modal had no effort bar at all, which made it
+  // inconsistent with every other design entry point.
+  const [regenerateEffort, setRegenerateEffort] = useState<EffortTier | null>(null);
+  const regenerateEffortValue = regenerateEffort ?? effortDefaults.forStage('design');
   // req_11e485759f583db8 — design version dropdown. listDesignRevisions
   // fetches once after every load (and refreshes after a successful run
   // or restore). The dropdown only mounts when revision count > 0 so the
@@ -2263,6 +2285,11 @@ export default function RequirementDetail() {
       agentServerId?: string;
       syncMode?: '' | 'local';
       useRoleContext?: boolean;
+      // Reasoning-effort RAW pick. undefined = not overridden, the page
+      // state wins; null = explicitly "never picked" (the field stays off
+      // the wire so the backend resolves the configured stage default);
+      // a concrete tier = what the user picked in the modal.
+      effort?: EffortTier | null;
     } = {},
     regenerate = false,
   ) => {
@@ -2271,6 +2298,10 @@ export default function RequirementDetail() {
     const configId = override.configId ?? architectConfigId;
     const agentServerId = override.agentServerId ?? designAgentServerId;
     const syncMode = override.syncMode ?? designSyncMode;
+    // Effort: the RAW pick only. The display value (pick ?? configured
+    // default) must NEVER reach the wire — it would arrive as an explicit
+    // pick and bypass the backend's configured-stage-default layer.
+    const rawEffort = override.effort !== undefined ? override.effort : architectEffort;
     // Designer-context toggle — the checkbox is positive (checked = keep
     // the persona), the request body carries the inverted value. The
     // override wins so a pick made inside the regenerate modal can
@@ -2344,7 +2375,7 @@ export default function RequirementDetail() {
           // design-stage default (llm.Gateway.ResolveEffort owns that
           // layer) instead of taking the frontend's copy as an explicit
           // pick.
-          ...effortPick(architectEffort),
+          ...effortPick(rawEffort),
           // Designer-context toggle. Inverted on the wire: a checked box
           // means "keep the architect persona". Sent unconditionally so the
           // backend's zero-value default never fights the frontend default.
@@ -2403,18 +2434,47 @@ export default function RequirementDetail() {
     designNeedsTransitionRef.current = needsTransition;
     setReadKnowledgeDesign(false); // reset to default (unchecked) each time
     setUseRoleContextDesign(true); // reset to default (checked) each time
+    // Pre-fill the preflight modal from the page's design-toolbar state so
+    // the dialog opens on the values the user already configured. The Agent
+    // server id is guarded against servers that dropped off the ready list
+    // since the page loaded (same fallback requestRegenerateDesign uses) —
+    // otherwise the run would silently degrade to local execution.
+    setDesignPreflightModel(architectModel || '');
+    setDesignPreflightConfigId(architectConfigId || '');
+    setDesignPreflightAgentServerId(
+      designAgentServerId && agentServers.some(s => s.id === designAgentServerId)
+        ? designAgentServerId
+        : '',
+    );
+    setDesignPreflightSyncMode(designSyncMode || '');
+    // RAW pick (not the display value) — so an unpicked bar stays off the wire.
+    setDesignPreflightEffort(architectEffort);
     setShowDesignKnowledgeModal(true);
   };
 
   const confirmDesignKnowledge = async () => {
     setShowDesignKnowledgeModal(false);
     const useKnowledge = readKnowledgeDesign;
+    // Write the modal's picks back into the page state so the design
+    // toolbar (and a post-run refresh) shows what actually ran. Without
+    // this the toolbar would advertise the old model / server while the
+    // SSE panel reports the new run's configuration.
+    setArchitectModel(designPreflightModel);
+    setArchitectConfigId(designPreflightConfigId);
+    setDesignAgentServerId(designPreflightAgentServerId);
+    setDesignSyncMode(designPreflightSyncMode);
+    setArchitectEffort(designPreflightEffort);
     if (designNeedsTransitionRef.current) {
       await transition('designing', t('requirements.detail2.intentGenerateDesign'));
-      await runArchitectDesign(useKnowledge);
-    } else {
-      await runArchitectDesign(useKnowledge);
     }
+    await runArchitectDesign(useKnowledge, {
+      model: designPreflightModel,
+      configId: designPreflightConfigId,
+      agentServerId: designPreflightAgentServerId,
+      syncMode: designPreflightSyncMode,
+      useRoleContext: useRoleContextDesign,
+      effort: designPreflightEffort,
+    });
   };
 
   // 重新生成（req_11e485759f583db8） — opens the preflight dialog (model +
@@ -2439,6 +2499,9 @@ export default function RequirementDetail() {
     );
     setRegenerateSyncMode(designSyncMode || '');
     setRegenerateReadKnowledge(false);
+    // RAW effort pick (not the display value) so an unpicked bar stays off
+    // the wire and the backend keeps resolving the configured default.
+    setRegenerateEffort(architectEffort);
     // Designer-context toggle: pre-fill from the toolbar so the modal
     // starts from the current page-level setting; the user may change it
     // here and commitRegenerateConfirm writes it back.
@@ -2462,6 +2525,7 @@ export default function RequirementDetail() {
     // the toolbar follows — otherwise the toolbar shows a stale value while
     // the SSE panel reports a different run's setting.
     setUseRoleContextDesign(regenerateUseRoleContext);
+    setArchitectEffort(regenerateEffort);
     await runArchitectDesign(
       regenerateReadKnowledge,
       {
@@ -2470,6 +2534,7 @@ export default function RequirementDetail() {
         agentServerId: regenerateAgentServerId,
         syncMode: regenerateSyncMode,
         useRoleContext: regenerateUseRoleContext,
+        effort: regenerateEffort,
       },
       /*regenerate*/ true,
     );
@@ -3338,60 +3403,105 @@ export default function RequirementDetail() {
       {designLaunchErrorToast && (
         <span className="merge-hint-toast" role="status">{designLaunchErrorToast}</span>
       )}
-      {/* Optional "read project knowledge" confirm modal for the design stage */}
-      {showDesignKnowledgeModal && (
+      {/* "Generate design" preflight modal — the design-stage entry point for
+          draft / analyzing requirements (and the designing empty state).
+          It used to be a plain `modal-box` with two unstyled checkboxes and
+          NO model / execution-environment / reasoning-effort picker, which
+          is why the effort tier was unreachable in the UI. It now uses the
+          same preflight family as the other design entry points, and shares the
+          DESIGN field block with them (DesignPreflightFields). */}
+      {showDesignKnowledgeModal && (() => {
+        const preflightEnvName = designPreflightAgentServerId
+          ? (agentServers.find(s => s.id === designPreflightAgentServerId)?.name || 'remote')
+          : t('requirements.detail2.preflightLocalExec');
+        const preflightModelName = designPreflightModel || 'default';
+        const preflightBase = baseBranch || project?.default_branch || 'main';
+        return (
         <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3><IconTriangle size={16} className="icon-mr" />{t('requirements.detail2.intentGenerateDesign')}</h3>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-              {t('requirements.detail2.designKnowledgeHint')}
-            </p>
-            {/* Show the current design base one more time so the user can
-                spot a stale value before clicking confirm (the input on the
-                page above is the source of truth — this is a read-only
-                mirror). Helps catch the case where the user opened the
-                modal after editing the base in another tab / ref. */}
-            <p className="design-knowledge-base-readout">
-              {t('requirements.detail2.designBaseBranchLabel')}:{' '}
-              <code>{baseBranch || project?.default_branch || 'main'}</code>
-            </p>
-            <label className="merge-check" style={{ margin: '8px 0 12px' }}>
-              <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
-              <IconBook size={13} className="icon-mr" />{t('requirements.detail2.preflightReadKnowledgeDefault')}
-            </label>
-            {/* Designer-context toggle: whether the architect role prompt
-                rides along with this plan-mode run. Default checked
-                (= historical behaviour). Shares the page-level state, so
-                a change here is reflected in the toolbar right away; when
-                unchecked the backend sends no --append-system-prompt and
-                the requirement material (description + attachment
-                manifest) moves into the task prompt instead. */}
-            <label
-              className="merge-check"
-              style={{ margin: '0 0 12px', display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'pointer' }}
-              title={t('requirements.detail2.designRoleContextDefault')}
+          <div className="modal-box preflight-box" onClick={e => e.stopPropagation()}>
+            <div className="preflight-header">
+              <div className="preflight-eyebrow">{t('requirements.detail2.designPreflightEyebrow')}</div>
+              <h3 className="preflight-title">{t('requirements.detail2.intentGenerateDesign')}</h3>
+              <p className="preflight-subtitle">{t('requirements.detail2.designPreflightSubtitle')}</p>
+            </div>
+
+            {/* Flight strip — the signature element of the preflight
+                family: a monospace HUD summarizing the picked execution
+                environment + model, the base branch and a READY dot. */}
+            <div
+              className="flight-strip"
+              aria-label={t('requirements.detail2.designPreflightFlightAria')}
             >
-              <input
-                type="checkbox"
-                checked={useRoleContextDesign}
-                onChange={e => setUseRoleContextDesign(e.target.checked)}
-                style={{ marginTop: 2 }}
-              />
-              <IconArchitect size={13} className="icon-mr" />
-              <span>
-                {t('requirements.detail2.designRoleContextLabel')}
-                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                  {t('requirements.detail2.designRoleContextHint')}
-                </span>
+              <span className="flight-leg">
+                <span className="flight-leg-label">DESIGN</span>
+                <span className="flight-leg-value" title={preflightEnvName}>{preflightEnvName}</span>
+                <span className="flight-arrow">·</span>
+                <span className="flight-leg-value" title={preflightModelName}>{preflightModelName}</span>
               </span>
-            </label>
-            <div className="modal-actions btn-row-2col">
-              <button className="btn btn-primary" onClick={confirmDesignKnowledge}>{t('requirements.detail2.btnConfirm')}</button>
-              <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>{t('requirements.detail2.btnCancel')}</button>
+              <span className="flight-sep">·</span>
+              <span className="flight-leg">
+                <span className="flight-leg-label">BASE</span>
+                <span className="flight-leg-value" title={preflightBase}>{preflightBase}</span>
+              </span>
+              <span className="flight-ready" aria-live="polite">
+                <span className="flight-ready-dot" />
+                {t('requirements.detail2.designPreflightConfirm').toUpperCase()}
+              </span>
+            </div>
+
+            <div className="preflight-body">
+              <div className="preflight-section">
+                <div className="preflight-section-label">{t('requirements.detail2.designPreflightDesignSection')}</div>
+
+                {/* Shared DESIGN field block — model + config / reasoning
+                    effort / knowledge pre-read / designer context /
+                    execution environment + sync mode. */}
+                <DesignPreflightFields
+                  model={designPreflightModel}
+                  onModelChange={setDesignPreflightModel}
+                  configId={designPreflightConfigId}
+                  onConfigChange={setDesignPreflightConfigId}
+                  working={designing}
+                  onEffortChange={setDesignPreflightEffort}
+                  effortValue={designPreflightEffortValue}
+                  effortDisabled={!effortDefaults.enabled || designing}
+                  effortId="design-preflight-effort"
+                  readKnowledge={readKnowledgeDesign}
+                  onReadKnowledgeChange={setReadKnowledgeDesign}
+                  readKnowledgeHint={t('requirements.detail2.designKnowledgeHint')}
+                  useRoleContext={useRoleContextDesign}
+                  onUseRoleContextChange={setUseRoleContextDesign}
+                  agentServers={agentServers}
+                  agentServerId={designPreflightAgentServerId}
+                  onAgentServerIdChange={setDesignPreflightAgentServerId}
+                  syncMode={designPreflightSyncMode}
+                  onSyncModeChange={setDesignPreflightSyncMode}
+                  disabled={designing}
+                />
+              </div>
+            </div>
+
+            <div className="preflight-launch">
+              <button
+                className="btn-launch"
+                onClick={confirmDesignKnowledge}
+                disabled={designing}
+              >
+                <IconRocket size={14} className="btn-icon" />
+                {t('requirements.detail2.designPreflightConfirm')}
+              </button>
+              <button
+                className="btn-cancel"
+                onClick={() => setShowDesignKnowledgeModal(false)}
+                disabled={designing}
+              >
+                {t('requirements.detail2.btnCancel')}
+              </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* req_11e485759f583db8 — 「重新生成技术方案」 preflight modal. Mirrors
           the DESIGN section of DesignCodingImmediateModal so the user can
@@ -3463,106 +3573,34 @@ export default function RequirementDetail() {
               <div className="preflight-section">
                 <div className="preflight-section-label">{t('requirements.detail2.regenerateDesignSection')}</div>
 
-                <div className="modal-field">
-                  <ModelSelect
-                    value={regenerateModel}
-                    onChange={setRegenerateModel}
-                    stage="architect"
-                    working={designing}
-                    label={t('schedules.modal.designModelLabel')}
-                    configId={regenerateConfigId || undefined}
-                    onConfigChange={setRegenerateConfigId}
-                  />
-                  <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                    {t('schedules.modal.modelHint')}
-                  </small>
-                </div>
-
-                {/* Same knowledge-pre-read toggle as DesignCodingImmediateModal
-                    so users opting into project knowledge on the design
-                    stage get consistent UX across first-time / regenerate. */}
-                <label className={`preflight-toggle ${regenerateReadKnowledge ? 'is-checked' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={regenerateReadKnowledge}
-                    onChange={e => setRegenerateReadKnowledge(e.target.checked)}
-                    disabled={designing}
-                  />
-                  <div className="preflight-toggle-body">
-                    <div className="preflight-toggle-title">
-                      <IconBook size={14} className="icon-mr" />
-                      {t('requirements.detail2.preflightReadKnowledge')}
-                    </div>
-                    <div className="preflight-toggle-desc">
-                      {t('requirements.detail2.regenerateReadKnowledgeHint')}
-                    </div>
-                  </div>
-                </label>
-
-                {/* Designer-context toggle — the re-run can pick a different
-                    setting in the same dialog; pre-filled from the toolbar
-                    on open and written back on confirm (see
-                    commitRegenerateConfirm). */}
-                <label className={`preflight-toggle ${regenerateUseRoleContext ? 'is-checked' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={regenerateUseRoleContext}
-                    onChange={e => setRegenerateUseRoleContext(e.target.checked)}
-                    disabled={designing}
-                  />
-                  <div className="preflight-toggle-body">
-                    <div className="preflight-toggle-title">
-                      <IconArchitect size={14} className="icon-mr" />
-                      {t('requirements.detail2.designRoleContextLabel')}
-                    </div>
-                    <div className="preflight-toggle-desc">
-                      {t('requirements.detail2.designRoleContextHint')}
-                    </div>
-                  </div>
-                </label>
-
-                <div className="modal-field">
-                  <label>{t('requirements.detail2.preflightExecEnvLabel')}</label>
-                  <div className="preflight-field-card preflight-field-card--exec">
-                    <span className="preflight-field-chip" aria-hidden="true">ENV</span>
-                    <ExecEnvSelect
-                      className="form-input preflight-field-input"
-                      servers={agentServers}
-                      value={regenerateAgentServerId}
-                      onChange={setRegenerateAgentServerId}
-                      disabled={designing}
-                      title={
-                        agentServers.length === 0
-                          ? t('requirements.detail2.preflightAgentEmptyTitle')
-                          : ''
-                      }
-                      localOptionLabel={t('requirements.detail2.preflightLocalExec')}
-                    />
-                  </div>
-                  {agentServers.length === 0 && (
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                      {t('requirements.detail2.preflightNoAgentHint')}
-                    </div>
-                  )}
-                </div>
-
-                {/* Sync-mode picker mirrors DesignCodingImmediateModal's
-                    DESIGN section — keeps disabled until a server is
-                    picked. Same single-state semantics as that modal. */}
-                <div className="modal-field">
-                  <label>{t('requirements.detail2.syncModeLabel')}</label>
-                  <SyncModeSelect
-                    enabled={!!regenerateAgentServerId}
-                    value={regenerateSyncMode}
-                    onChange={setRegenerateSyncMode}
-                    disabled={designing}
-                  />
-                  <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                    {regenerateSyncMode === 'local'
-                      ? t('requirements.detail2.syncModeLocalHint')
-                      : t('requirements.detail2.syncModeRemoteHint')}
-                  </small>
-                </div>
+                {/* Shared DESIGN field block — model + config / reasoning
+                    effort / knowledge pre-read / designer context /
+                    execution environment + sync mode. The regenerate
+                    dialog previously had no effort picker at all, which
+                    is why the same run could not be repeated with a
+                    different reasoning tier. */}
+                <DesignPreflightFields
+                  model={regenerateModel}
+                  onModelChange={setRegenerateModel}
+                  configId={regenerateConfigId}
+                  onConfigChange={setRegenerateConfigId}
+                  working={designing}
+                  onEffortChange={setRegenerateEffort}
+                  effortValue={regenerateEffortValue}
+                  effortDisabled={!effortDefaults.enabled || designing}
+                  effortId="regenerate-design-effort"
+                  readKnowledge={regenerateReadKnowledge}
+                  onReadKnowledgeChange={setRegenerateReadKnowledge}
+                  readKnowledgeHint={t('requirements.detail2.regenerateReadKnowledgeHint')}
+                  useRoleContext={regenerateUseRoleContext}
+                  onUseRoleContextChange={setRegenerateUseRoleContext}
+                  agentServers={agentServers}
+                  agentServerId={regenerateAgentServerId}
+                  onAgentServerIdChange={setRegenerateAgentServerId}
+                  syncMode={regenerateSyncMode}
+                  onSyncModeChange={setRegenerateSyncMode}
+                  disabled={designing}
+                />
               </div>
             </div>
 

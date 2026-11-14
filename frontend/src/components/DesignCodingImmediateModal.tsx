@@ -34,7 +34,8 @@ import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
-import { IconArrowRight, IconArchitect, IconBook, IconPin, IconRocket, IconSave } from './icons';
+import { IconArrowRight, IconPin, IconRocket, IconSave } from './icons';
+import { DesignPreflightFields } from './DesignPreflightFields';
 
 interface Props {
   open: boolean;
@@ -343,125 +344,31 @@ export function DesignCodingImmediateModal({
           <div className="preflight-section">
             <div className="preflight-section-label">{t('requirements.detail2.immediateDesignSection')}</div>
 
-            <div className="modal-field">
-              {/* ModelSelect renders its own stage chip + rail, so it
-                  stands in for the field card without an extra wrap.
-                  Controlled on configId so the carried id from the page
-                  toolbar survives into the request body — uncontrolled
-                  mode would self-fetch the active config and lose it. */}
-              <ModelSelect
-                value={designModel}
-                onChange={setDesignModel}
-                stage="architect"
-                working={submitting}
-                label={t('schedules.modal.designModelLabel')}
-                configId={designConfigId || undefined}
-                onConfigChange={setDesignConfigId}
-              />
-              <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                {t('schedules.modal.modelHint')}
-              </small>
-            </div>
-
-            {/* Reasoning-effort picker for the design stage — sits right
-                below the model picker, the other per-stage knob that
-                decides how the architect run thinks. */}
-            <div className="modal-field">
-              <EffortBar
-                id="immediate-design-effort"
-                label={t('components.effortBar.ariaLabel')}
-                value={designEffortValue}
-                onChange={setDesignEffort}
-                disabled={!effortDefaults.enabled || submitting}
-              />
-            </div>
-
-            {/* Read-knowledge toggle — same card styling as the
-                developer preflight modal. Knowledge pre-read runs once
-                before the design stage so the architect persona has the
-                context loaded. */}
-            <label className={`preflight-toggle ${readKnowledge ? 'is-checked' : ''}`}>
-              <input
-                type="checkbox"
-                checked={readKnowledge}
-                onChange={e => setReadKnowledge(e.target.checked)}
-                disabled={submitting}
-              />
-              <div className="preflight-toggle-body">
-                <div className="preflight-toggle-title">
-                  <IconBook size={14} className="icon-mr" />
-                  {t('requirements.detail2.preflightReadKnowledge')}
-                </div>
-                <div className="preflight-toggle-desc">
-                  {t('requirements.detail2.preflightReadKnowledgeHint')}
-                </div>
-              </div>
-            </label>
-
-            {/* Designer-context toggle — whether this design run carries
-                the architect role prompt. Local and Agent-server runs
-                share this single switch. */}
-            <label className={`preflight-toggle ${useRoleContext ? 'is-checked' : ''}`}>
-              <input
-                type="checkbox"
-                checked={useRoleContext}
-                onChange={e => setUseRoleContext(e.target.checked)}
-                disabled={submitting}
-              />
-              <div className="preflight-toggle-body">
-                <div className="preflight-toggle-title">
-                  <IconArchitect size={14} className="icon-mr" />
-                  {t('requirements.detail2.designRoleContextLabel')}
-                </div>
-                <div className="preflight-toggle-desc">
-                  {t('requirements.detail2.designRoleContextHint')}
-                </div>
-              </div>
-            </label>
-
-            <div className="modal-field">
-              <label>{t('requirements.detail2.preflightExecEnvLabel')}</label>
-              <div className="preflight-field-card preflight-field-card--exec">
-                <span className="preflight-field-chip" aria-hidden="true">ENV</span>
-                <ExecEnvSelect
-                  className="form-input preflight-field-input"
-                  servers={agentServers}
-                  value={designAgentServerId}
-                  onChange={setDesignAgentServerId}
-                  disabled={submitting}
-                  title={
-                    agentServers.length === 0
-                      ? t('requirements.detail2.preflightAgentEmptyTitle')
-                      : ''
-                  }
-                  localOptionLabel={t('requirements.detail2.preflightLocalExec')}
-                />
-              </div>
-              {agentServers.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                  {t('requirements.detail2.preflightNoAgentHint')}
-                </div>
-              )}
-            </div>
-
-            {/* Sync-mode picker — only renders when the design stage picked
-                an Agent server. The picker is shared with the CODING section
-                below (single state) so both stages always agree on the
-                transport. */}
-            <div className="modal-field">
-              <label>{t('requirements.detail2.syncModeLabel')}</label>
-              <SyncModeSelect
-                enabled={!!designAgentServerId}
-                value={syncMode}
-                onChange={setSyncMode}
-                disabled={submitting}
-              />
-              <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                {syncMode === 'local'
-                  ? t('requirements.detail2.syncModeLocalHint')
-                  : t('requirements.detail2.syncModeRemoteHint')}
-              </small>
-            </div>
+            {/* The shared DESIGN field block — model + config / reasoning
+                effort / knowledge pre-read / designer context / execution
+                environment + sync mode. Extracted so the three design
+                entry points can no longer drift apart. */}
+            <DesignPreflightFields
+              model={designModel}
+              onModelChange={setDesignModel}
+              configId={designConfigId}
+              onConfigChange={setDesignConfigId}
+              working={submitting}
+              onEffortChange={setDesignEffort}
+              effortValue={designEffortValue}
+              effortDisabled={!effortDefaults.enabled || submitting}
+              effortId="immediate-design-effort"
+              readKnowledge={readKnowledge}
+              onReadKnowledgeChange={setReadKnowledge}
+              useRoleContext={useRoleContext}
+              onUseRoleContextChange={setUseRoleContext}
+              agentServers={agentServers}
+              agentServerId={designAgentServerId}
+              onAgentServerIdChange={setDesignAgentServerId}
+              syncMode={syncMode}
+              onSyncModeChange={setSyncMode}
+              disabled={submitting}
+            />
           </div>
 
           {/* Coding-stage section — cyan accent rail mirrors the developer
