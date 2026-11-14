@@ -1086,15 +1086,50 @@
 
 /* Coding panel */
 .coding-panel {
-  background: #0f172a;
+  --panel-surface: #0f172a;
+  --panel-pad-x: 16px;
+  background: var(--panel-surface);
   border-radius: 8px;
-  padding: 16px;
+  padding: 16px var(--panel-pad-x);
   max-height: 480px;
   overflow-y: auto;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
 }
+/* Panels that carry the sticky stream control bar (.stream-panel-bar) drop
+   their top padding: the bar IS the top of the panel. The bar spans the full
+   panel width (negative horizontal margins cancel the panel padding) and
+   sticks to the top of the scroll viewport, so the auto-scroll toggle and
+   the "↓ N new messages" jump button stay reachable while the log scrolls
+   — including in fullscreen mode, where the page header is covered by the
+   fixed overlay. */
+.coding-panel.has-stream-bar {
+  padding-top: 0;
+}
+.coding-panel.has-stream-bar > .stream-panel-bar {
+  margin: 0 calc(var(--panel-pad-x) * -1);
+  /* The gap below the bar is PADDING, not margin: a margin would leave a
+     transparent strip through which the log lines stay visible while the
+     bar is stuck at the top. */
+  padding: 7px var(--panel-pad-x) 14px;
+  border-radius: 8px 8px 0 0;
+}
+/* Fullscreen mode swaps the panel padding (see .is-fullscreen), so the bar's
+   horizontal margins have to follow to keep it flush with the viewport edge. */
+.coding-panel.is-fullscreen {
+  --panel-pad-x: 28px;
+}
+.coding-panel.is-fullscreen.has-stream-bar {
+  padding-top: 0 !important;
+}
+/* In fullscreen the "exit fullscreen" affordance is a fixed button in the
+   top-right corner (see .fullscreen-close-btn) — reserve room so it does
+   not sit on top of the auto-scroll toggle. */
+.coding-panel.is-fullscreen.has-stream-bar > .stream-panel-bar {
+  padding-right: calc(var(--panel-pad-x) + 130px);
+}
+
 .coding-line { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
 .coding-line-phase { color: #7dd3fc; }
 .coding-line-message { color: #e2e8f0; }
@@ -2780,6 +2815,11 @@ allowed so the row collapses cleanly on every viewport. */
 @media (max-width: 768px) {
   .is-fullscreen {
     padding: 24px 16px calc(24px + var(--sab)) !important;
+  }
+  /* Keep the sticky stream bar flush with the viewport edge on mobile too
+     (the fullscreen padding above changes to 24px / 16px). */
+  .coding-panel.is-fullscreen {
+    --panel-pad-x: 16px;
   }
   .fullscreen-close-btn {
     top: 12px;

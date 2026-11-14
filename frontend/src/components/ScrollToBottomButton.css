@@ -1,39 +1,38 @@
-/* Floating "↓ N new messages" pill, anchored bottom-center of an SSE panel.
-   Expects the parent scroll container to be `position: relative`. */
+/* Inline "↓ N new messages" pill.
+   Rendered inside the sticky panel bar (.stream-panel-bar) of a dark SSE
+   panel, so it is a normal inline pill — NOT absolutely positioned. The old
+   `position: absolute; bottom: 16px` version was anchored to the scroll
+   *content* box and therefore scrolled away with the log; inside the sticky
+   bar it stays visible at the top of the viewport. */
 
 .scroll-to-bottom-button {
-  position: absolute;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
-  z-index: 10;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
-  border: 1px solid var(--color-border);
+  padding: 3px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
   border-radius: 999px;
-  background: var(--color-surface);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
-  color: var(--color-primary);
-  font-size: 13px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #7dd3fc;
+  font-size: 12px;
   font-weight: 500;
   font-family: inherit;
+  line-height: 1.5;
   cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .scroll-to-bottom-button:hover {
-  transform: translateX(-50%) translateY(-1px);
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
+  background: rgba(30, 41, 59, 0.95);
+  border-color: rgba(125, 211, 252, 0.6);
 }
 
 .scroll-to-bottom-button:active {
-  transform: translateX(-50%) translateY(0);
+  background: rgba(30, 41, 59, 1);
 }
 
 .scroll-to-bottom-button .stb-icon {
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
 }
 
