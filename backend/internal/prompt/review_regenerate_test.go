@@ -32,7 +32,13 @@ func TestBuildRegeneratePrompt_CarriesTheReviewContract(t *testing.T) {
 		"goal_checks",
 		"不使用 P2",
 		"## 改动概览图",
-		"JSON 必须是单个合法对象，且是整个回复的最后一段内容。",
+		"JSON 必须是单个合法对象。",
+		// The "no trailing characters after the json block" rule is what
+		// keeps the contract parseable — and the "the block may come first
+		// on a very long report" rule is the escape hatch for a truncated
+		// reply. Both are part of the contract now.
+		"json 块之后**不要再输出任何字符**",
+		"可以把这个 json 块放在正文**之前**先输出",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("regenerate prompt is missing %q", want)

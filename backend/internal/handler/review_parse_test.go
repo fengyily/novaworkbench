@@ -166,16 +166,39 @@ func TestBuildReviewOutcome_ContractHonoured(t *testing.T) {
 	}
 }
 
-// R1: a model that ignores the contract must still produce a usable row —
-// the full report as Markdown, no findings, zero counts.
+// R1: a model that ignores the contract must still produce a usable row.
+//
+// The report BODY is the second source of the grading: the report's own
+// P0/P1/P3 sections are what the user reads, so the finding is recovered
+// from them (deterministically, no model call). The report text itself is
+// untouched.
 func TestBuildReviewOutcome_DegradesWithoutContract(t *testing.T) {
 	report := "## 总体评价\n\n没有发现阻塞问题。\n\n## P1 — 建议修复\n\n**命名** — `a.go`"
 	out := buildReviewOutcome("done", report)
 	if out.ResultMD != report {
 		t.Fatalf("result_md should be the untouched report, got %q", out.ResultMD)
 	}
-	if out.FindingsJSON != "" || out.P0 != 0 || out.P1 != 0 || out.P3 != 0 || out.GoalMet != "" {
-		t.Fatalf("degraded row should be empty/zero, got %+v", out)
+	if out.P1 != 1 || out.P0 != 0 || out.P3 != 0 {
+		t.Fatalf("counts = (%d,%d,%d), want the P1 recovered from the body", out.P0, out.P1, out.P3)
+	}
+	if out.FindingsSource != reviewFindingsSourceMarkdown {
+		t.Fatalf("findings_source = %q, want %q", out.FindingsSource, reviewFindingsSourceMarkdown)
+	}
+	if !strings.Contains(out.FindingsJSON, "命名") {
+		t.Fatalf("findings_json = %q, want the body finding", out.FindingsJSON)
+	}
+}
+
+// A report with NO graded sections at all stays without findings — there is
+// nothing to recover, and inventing one would be worse than nothing.
+func TestBuildReviewOutcome_NoFindingsAnywhere(t *testing.T) {
+	report := "## 总体评价\n\n没有发现阻塞问题。\n\n## P1 — 建议修复\n\n无"
+	out := buildReviewOutcome("done", report)
+	if out.ResultMD != report {
+		t.Fatalf("result_md should be the untouched report, got %q", out.ResultMD)
+	}
+	if out.FindingsJSON != "" || out.P0 != 0 || out.P1 != 0 || out.P3 != 0 {
+		t.Fatalf("row should stay empty/zero, got %+v", out)
 	}
 }
 

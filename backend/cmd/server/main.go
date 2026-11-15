@@ -626,6 +626,11 @@ func main() {
 	// ALREADY-FINISHED report and back-fill the structured columns. It runs
 	// no model — the report the user read is the report they keep.
 	mux.HandleFunc("POST /api/reviews/{rid}/reparse", reviewH.ReparseReview)
+	// The AI fallback for a report whose grading could not be recovered
+	// deterministically. It runs a model, so it is asynchronous: it returns
+	// a JobStore id and streams over the shared wizard job channel
+	// (GET /api/wizard/jobs/{job_id}/stream).
+	mux.HandleFunc("POST /api/reviews/{rid}/reparse/ai", reviewH.ReparseReviewWithAI)
 	mux.HandleFunc("GET /api/reviews/{rid}/revisions", reviewH.ListRevisions)
 	mux.HandleFunc("GET /api/reviews/{rid}/revisions/{n}", reviewH.GetRevision)
 	mux.HandleFunc("POST /api/reviews/{rid}/revisions/{n}/restore", reviewH.RestoreRevision)
