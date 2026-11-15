@@ -128,6 +128,11 @@ func (h *ReviewHandler) ReparseReviewWithAI(w http.ResponseWriter, r *http.Reque
 func (h *ReviewHandler) runAIParse(job *store.Job, rv *model.CodeReview) {
 	defer releaseAIParse(rv.ID)
 
+	// The model that wrote the report is the model most likely to read it
+	// back correctly — record it on the job so the log says which one ran.
+	if m := strings.TrimSpace(rv.Model); m != "" {
+		job.SetModel(m)
+	}
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 正在用 AI 从报告正文中提取分级问题清单…"})
 
 	raw, err := h.extractFindings(rv.ResultMD)

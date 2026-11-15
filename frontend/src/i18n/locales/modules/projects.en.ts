@@ -443,6 +443,7 @@ export const projects = {
     reviewParseSourceContract: 'contract',
     reviewParseSourceMarkdown: 'body',
     reviewParseSourceLlm: 'AI',
+    reviewParseSourceHint: 'Where this graded list came from',
     reviewFullReport: 'Full report',
     // "Change diagrams": the report's Mermaid blocks, surfaced above the
     // collapsed full report so they are not hidden behind a disclosure.

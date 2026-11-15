@@ -447,6 +447,7 @@ export const projects = {
     reviewParseSourceContract: '契约块',
     reviewParseSourceMarkdown: '正文解析',
     reviewParseSourceLlm: 'AI 解析',
+    reviewParseSourceHint: '这份分级清单的来源',
     reviewFullReport: '完整报告',
     // 「改动概览图」：把报告里的 Mermaid 图提到折叠的完整报告之上单独展示。
     reviewDiagrams: '改动概览图',

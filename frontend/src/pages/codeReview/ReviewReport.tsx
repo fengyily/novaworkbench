@@ -310,6 +310,19 @@ export default function ReviewReport({
               <IconRobot size={12} />{review.model}
             </span>
           )}
+          {/* Where the graded list came from — the contract block, the
+              report body's own sections, or the AI extractor. Worth
+              showing: a list recovered from the body is a slightly
+              different extraction than one the model signed off on. */}
+          {review.findings_source && (
+            <span className="cr-meta-chip" title={t('projects.detail.reviewParseSourceHint')}>
+              {t(`projects.detail.reviewParseSource${
+                review.findings_source === 'contract' ? 'Contract'
+                  : review.findings_source === 'markdown' ? 'Markdown'
+                  : 'Llm'
+              }`)}
+            </span>
+          )}
           <span className="cr-meta-chip">
             <IconClock size={12} />{fmtDateTime(review.finished_at || review.created_at)}
           </span>
