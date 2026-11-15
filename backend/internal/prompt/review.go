@@ -76,7 +76,7 @@ const reviewMermaidDirective = "## 输出图示（Mermaid）\n\n" +
 	"- 平行四边形 `[/text/]` 必须 `[/` 开头、`/]` 结尾，两段斜杠都不能少。\n" +
 	"- sequenceDiagram 的消息文本、stateDiagram-v2 的转移说明里都不要用半角 `;` —— mermaid 11 会把它当成新语句开始并报错。\n" +
 	"- Mermaid 块里**只放图本身**（节点 + 连线），文件路径 / 函数签名等细节写到正文里，不要塞进节点文字。\n" +
-	"- 所有 Mermaid 块都必须出现在报告正文中，位置在文末 json 块**之前**。\n"
+	"- 所有 Mermaid 块都必须出现在报告正文中，位置在文末 json 块**之前**（若你把 json 块提前输出，则 Mermaid 块放在正文段落里即可，不要夹在 json 块内部）。\n"
 
 // reviewAttachmentDirective tells the reviewer how to USE the uploaded files,
 // not merely that they exist.
@@ -234,13 +234,16 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 ## P0 — 必须修复
 ## P1 — 建议修复
 ## P3 — 优化项建议
-（每项格式：**标题** — ` + "`文件路径:行号`" + `，问题描述，然后给出具体修改建议；
-问题本身涉及多步调用 / 并发时序 / 状态流转时，在该条目下补一个 Mermaid 图说明出错路径）
+（每项格式见下面的「问题条目格式」；问题本身涉及多步调用 / 并发时序 / 状态流转时，在该条目下补一个 Mermaid 图说明出错路径）
 
 ## 优点
 （值得保留的好设计）
 
 `)
+
+	b.WriteString(reviewFindingFormatDirective)
+
+
 
 	b.WriteString(reviewMermaidDirective)
 
@@ -248,6 +251,61 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 
 	return b.String()
 }
+
+// ReviewFindingLineFormat is the ONE line shape every graded finding in the
+// report body must use.
+//
+// It is exported so the prompt and the body parser cannot drift apart: the
+// parser (handler/review_mdparse.go) reads exactly this shape out of a
+// report whose trailing JSON contract block went missing, so the format has
+// to be stated in ONE place and reused by both.
+//
+// The severity is repeated inside the item ("[P0]") on purpose: the section
+// heading already says it, but a redundant marker survives a model that
+// restructures the section, and it makes the body self-describing — the
+// system can rebuild the whole grading from the prose alone.
+const ReviewFindingLineFormat = "**[P0] 一句话标题** — `文件路径:行号` — 问题描述 — 建议：具体改法"
+
+// reviewFindingFormatDirective pins the line format of the graded items.
+//
+// WHY IT IS A DIRECTIVE AND NOT A SUGGESTION: the trailing JSON contract
+// block is the primary machine-readable source of a Review report, but it
+// is also the LAST thing the model writes — so on a long report it is the
+// first thing to be truncated or dropped. When that happens the report
+// degrades to "readable prose, no grading", and the user cannot turn their
+// own P0 list into fix sub-tasks.
+//
+// Making the BODY self-describing (a fixed line shape with the severity
+// written into the item) gives the system a deterministic second source:
+// the report can be re-graded from its own text, with no model call and no
+// tokens. The backend parser reads both the old shape ("**标题** — `f.go:1`,
+// 说明") and this one.
+const reviewFindingFormatDirective = `
+## 问题条目格式（每个 P0 / P1 / P3 小节里的每一项）
+
+每项必须写成**一行**，格式固定为：
+
+` + ReviewFindingLineFormat + `
+
+规则：
+- 等级必须写进方括号（` + "`[P0]`" + ` / ` + "`[P1]`" + ` / ` + "`[P3]`" + `）——即使文末 json 块丢失，系统也能从正文恢复分级清单。
+- ` + "`文件路径:行号`" + ` 用反引号包起来；行号不确定时只写路径。
+- 「问题描述」写清楚**是什么问题、在什么条件下会出问题**，不要写「这里有问题」。
+- 「建议：」后写**具体改法**，不要写「建议优化」。
+- 小节没有内容时只写「无」，不要写「暂无问题」以外的解释性文字。
+
+`
+
+// ReviewJSONSchema is the ONE description of the machine-readable shape a
+// Review report must carry.
+//
+// It is exported because two prompts depend on it and they must not drift:
+// the review contract (what the model is asked to emit) and the extraction
+// prompt (what the extractor is asked to return). A drift between them
+// would mean the extractor's output no longer parses through the same
+// tolerant decoder — the extractor would be paying for a parse failure it
+// caused itself.
+const ReviewJSONSchema = `{"goal_met":"yes|partial|no","goal_checks":[{"criterion":"目标中的一条验收点","status":"yes|partial|no|unknown","evidence":"判断依据：diff 位置 / 日志行 / 文档小节"}],"findings":[{"severity":"P0","file":"path/to/file.go","line":"12-20","title":"一句话标题","detail":"问题说明","suggestion":"修改建议"}]}`
 
 // reviewJSONContract is the machine-readable tail of the report, shared by
 // the first review and by a regeneration so the two can never drift (a
@@ -260,10 +318,12 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 // treats a missing or malformed goal_checks as "no evidence table" rather
 // than as a contract violation.
 const reviewJSONContract = `
-**报告正文结束后，必须在最末尾追加一个 json 代码围栏块**，供系统解析分级统计（这是硬性要求，不可省略、不可放在正文中间）：
+**报告正文结束后，必须在最末尾追加一个 json 代码围栏块**，供系统解析分级统计：
+
+**这是硬性要求**：缺了这个块，分级统计 / 「生成修复子任务」/ 「回归 Review」全部失效，报告会被当成「未产出结构化问题清单」。不可省略、不可放在正文中间、不可改写字段名。
 
 ` + "```json" + `
-{"goal_met":"yes|partial|no","goal_checks":[{"criterion":"目标中的一条验收点","status":"yes|partial|no|unknown","evidence":"判断依据：diff 位置 / 日志行 / 文档小节"}],"findings":[{"severity":"P0","file":"path/to/file.go","line":"12-20","title":"一句话标题","detail":"问题说明","suggestion":"修改建议"}]}
+` + ReviewJSONSchema + `
 ` + "```" + `
 
 JSON 块的约束：
@@ -276,7 +336,9 @@ JSON 块的约束：
 - ` + "`findings`" + ` 必须包含正文里列出的**全部**问题，顺序与正文一致；没有任何问题时写 ` + "`\"findings\":[]`" + `。
 - ` + "`severity`" + ` 只能是 ` + "`P0`" + ` / ` + "`P1`" + ` / ` + "`P3`" + `。
 - ` + "`line`" + ` 写行号（可写 ` + "`\"42\"`" + ` 或 ` + "`\"12-20\"`" + `，不确定时写 ` + "`\"\"`" + `）；写成纯数字（如 ` + "`42`" + `）也能被正确解析。
-- JSON 必须是单个合法对象，且是整个回复的最后一段内容。
+- JSON 必须是单个合法对象。
+- json 块之后**不要再输出任何字符**（不要写总结、致谢、说明、"以上是本次 Review 结果"之类的话）。
+- 正文很长、担心写不完导致末尾被截断时，可以把这个 json 块放在正文**之前**先输出——系统按 ` + "```json" + ` 围栏识别，不要求它在最后。
 `
 
 // ── 修复子任务 (fix sub-task generated from a Review finding) ───────────────
@@ -602,15 +664,61 @@ func BuildRegeneratePrompt(in RegeneratePromptInput) string {
 ## P0 — 必须修复
 ## P1 — 建议修复
 ## P3 — 优化项建议
-（每项格式：**标题** — ` + "`文件路径:行号`" + `，问题描述，然后给出具体修改建议）
+（每项格式见下面的「问题条目格式」）
 
 ## 优点
 （值得保留的好设计）
 
 `)
 
+	b.WriteString(reviewFindingFormatDirective)
 	b.WriteString(reviewMermaidDirective)
 	b.WriteString(reviewJSONContract)
 
+	return b.String()
+}
+
+// ── 结构化结果提取（第 2 层：LLM 兜底） ────────────────────────────────────
+
+// maxReviewExtractReportRunes caps how much of the report is handed to the
+// extractor. Same order of magnitude as the other extractors (24k runes): a
+// report's graded sections are in its first half, and an unbounded paste
+// would blow the model's context for no gain.
+const maxReviewExtractReportRunes = 24000
+
+// BuildReviewExtractPrompt asks a model to recover a Review report's
+// structured findings from its BODY.
+//
+// This is the LAST of three sources, and it only runs when the user asks
+// for it explicitly (the report's contract block is missing AND the body's
+// severity sections could not be parsed deterministically). It costs tokens
+// and can take minutes, so it is never automatic.
+//
+// The output shape is the SAME contract the reviewer was asked to emit
+// (ReviewJSONSchema), so the result goes through the same tolerant decoder
+// (handler.parseContractSections) — one shape, one parser.
+//
+// The instructions are deliberately narrow: extract what the report says,
+// do not re-review the code, do not invent findings. A model that starts
+// reviewing would produce findings the user never read in the report.
+func BuildReviewExtractPrompt(reportMD string) string {
+	runes := []rune(reportMD)
+	if len(runes) > maxReviewExtractReportRunes {
+		reportMD = string(runes[:maxReviewExtractReportRunes]) + "\n…（后文省略）"
+	}
+	var b strings.Builder
+	b.WriteString("下面是一份代码 Review 报告的正文。\n\n")
+	b.WriteString("请从这份报告中**提取**已经写出的分级问题清单，输出一个 JSON 对象。\n\n")
+	b.WriteString("规则：\n")
+	b.WriteString("- 只提取报告里**已经写出**的问题，不要重新审查代码、不要新增问题、不要推测报告里没有的问题。\n")
+	b.WriteString("- 等级只认报告里写明的 P0 / P1 / P3；没有写等级的问题不要收录。\n")
+	b.WriteString("- `title` 取问题的标题（报告里加粗的那句），`file` / `line` 取报告里写的文件位置，`detail` 取问题描述，`suggestion` 取报告里写的修改建议。\n")
+	b.WriteString("- 报告里写「无」的小节不产生任何条目。\n")
+	b.WriteString("- `goal_met` 与 `goal_checks` 只需要在报告正文里明确写出了对应内容时填写，否则写 `\"goal_met\":\"\"`、`\"goal_checks\":[]`。\n")
+	b.WriteString("- 只输出一个 JSON 对象，不要输出解释文字、不要用 markdown 代码围栏。\n\n")
+	b.WriteString("JSON 格式：\n")
+	b.WriteString(ReviewJSONSchema)
+	b.WriteString("\n\n报告正文如下：\n")
+	b.WriteString(reportMD)
 	return b.String()
 }

@@ -924,6 +924,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             bulkCreating={bulkCreating}
             onReparse={() => void reviewSession.reparse()}
             reparsing={reviewSession.reparsing}
+            onReparseWithAI={() => void reviewSession.reparseWithAI()}
+            aiParsing={reviewSession.aiParsing}
+            aiParseNote={reviewSession.aiParseNote}
           />
           <aside className="cr-result-aside">
             <ReviewChat

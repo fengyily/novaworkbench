@@ -78,35 +78,86 @@ func (h *ReviewHandler) ReparseReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonPart, markdownPart := extractTrailingJSON(rv.ResultMD)
-	if jsonPart == "" {
-		writeError(w, http.StatusUnprocessableEntity, reparseContractMissing,
-			"报告正文中没有找到 JSON 契约块，无法重新解析")
-		return
-	}
 
-	sections := parseContractSections(jsonPart)
-	if !sections.FindingsOK {
-		writeError(w, http.StatusUnprocessableEntity, "FINDINGS_UNAVAILABLE",
-			"报告中的问题清单段落格式异常，无法重新解析")
-		return
+	// Two sources, in order:
+	//  1. the report's trailing JSON contract block (what the model was
+	//     asked to emit);
+	//  2. the report's own P0/P1/P3 sections — a deterministic, zero-cost
+	//     recovery for the reports whose contract block never made it into
+	//     the reply (long report on a custom model, truncation, or simply a
+	//     model that forgot).
+	//
+	// The second source is what makes this endpoint useful for the reports
+	// it was built for: before it, a degraded report could only be recovered
+	// by re-running the model (a different report, at full price).
+	var (
+		findings   []model.ReviewFinding
+		goalMet    string
+		goalChecks string
+		source     string
+		resultMD   = rv.ResultMD
+	)
+	if jsonPart != "" {
+		sections := parseContractSections(jsonPart)
+		if !sections.FindingsOK {
+			// The contract's findings section is not an array — but the
+			// report body may still carry the grading, so the body is
+			// consulted before giving up.
+			bodyFindings, ok := parseMarkdownFindings(markdownPart)
+			if !ok {
+				writeError(w, http.StatusUnprocessableEntity, "FINDINGS_UNAVAILABLE",
+					"报告中的问题清单段落格式异常，无法重新解析")
+				return
+			}
+			findings = bodyFindings
+			source = reviewFindingsSourceMarkdown
+			resultMD = markdownPart
+			goalMet = sections.GoalMet
+			goalChecks = sections.GoalChecksJSON
+		} else {
+			findings = sections.Findings
+			goalMet = sections.GoalMet
+			goalChecks = sections.GoalChecksJSON
+			source = reviewFindingsSourceContract
+			// The contract block is stripped out of the report text, so the
+			// stored text matches what a normally parsed report looks like.
+			resultMD = markdownPart
+			if len(findings) == 0 {
+				// The contract says "no findings" — but if the body carries
+				// graded sections, the body is what the user reads, so it wins.
+				if bodyFindings, ok := parseMarkdownFindings(markdownPart); ok {
+					findings = bodyFindings
+					source = reviewFindingsSourceMarkdown
+				}
+			}
+		}
+	} else {
+		bodyFindings, ok := parseMarkdownFindings(rv.ResultMD)
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, reparseContractMissing,
+				"报告正文中没有找到 JSON 契约块，也未能从正文的分级小节中解析出问题清单，无法重新解析")
+			return
+		}
+		findings = bodyFindings
+		source = reviewFindingsSourceMarkdown
 	}
 
 	// The same shape buildReviewOutcome produces for a normally parsed
-	// report: the contract block is stripped out of the report text and the
-	// structured half lives in its own columns.
-	raw, err := json.Marshal(sections.Findings)
+	// report: the structured half lives in its own columns.
+	raw, err := json.Marshal(findings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "PARSE_FAILED", err.Error())
 		return
 	}
 	out := service.ReviewOutcome{
 		Status:         rv.Status,
-		ResultMD:       markdownPart,
+		ResultMD:       resultMD,
 		FindingsJSON:   string(raw),
-		GoalMet:        sections.GoalMet,
-		GoalChecksJSON: sections.GoalChecksJSON,
+		FindingsSource: source,
+		GoalMet:        goalMet,
+		GoalChecksJSON: goalChecks,
 	}
-	out.P0, out.P1, out.P3 = countBySeverity(sections.Findings)
+	out.P0, out.P1, out.P3 = countBySeverity(findings)
 
 	if err := h.reviewSvc.UpdateParsedFindings(rv.ID, out); err != nil {
 		writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())
@@ -128,10 +179,11 @@ func (h *ReviewHandler) ReparseReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"p0":       out.P0,
-		"p1":       out.P1,
-		"p3":       out.P3,
-		"goal_met": out.GoalMet,
-		"findings": len(sections.Findings),
+		"p0":             out.P0,
+		"p1":             out.P1,
+		"p3":             out.P3,
+		"goal_met":       out.GoalMet,
+		"findings":       len(findings),
+		"findings_source": out.FindingsSource,
 	})
 }

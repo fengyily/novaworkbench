@@ -2380,6 +2380,12 @@ export interface CodeReview {
   result_md: string;
   /** JSON-encoded ReviewFinding[]; '' when the model broke the contract. */
   findings_json: string;
+  /**
+   * Where the structured findings came from: 'contract' (the report's
+   * trailing json block), 'markdown' (the report's own P0/P1/P3 sections)
+   * or 'llm' (the AI extractor). '' = no structured findings at all.
+   */
+  findings_source?: string;
   p0_count: number;
   p1_count: number;
   p3_count: number;
@@ -2647,10 +2653,24 @@ export const codeReviewsApi = {
   // the prose intact but the grading — and therefore the fix sub-tasks —
   // unusable.
   reparse: (reviewId: string) =>
-    api.post<{ p0: number; p1: number; p3: number; goal_met: string; findings: number }>(
+    api.post<{ p0: number; p1: number; p3: number; goal_met: string; findings: number; findings_source: string }>(
       `/api/reviews/${reviewId}/reparse`,
       {},
     ),
+  // ── AI re-parse (the LLM fallback) ─────────────────────────────────────
+  // The LAST source of a report's grading: an LLM extracts the graded
+  // findings from the report body. It costs tokens and can take minutes, so
+  // it is asynchronous — the returned job_id streams over the shared wizard
+  // job channel (qaChatApi.streamJobUrl), and the review row is refreshed
+  // when the job finishes.
+  reparseWithAI: (reviewId: string) =>
+    api.post<{ job_id: string; review_id: string }>(
+      `/api/reviews/${reviewId}/reparse/ai`,
+      {},
+    ),
+  // The extraction job streams over the shared wizard job channel — the
+  // JobStore is process-global, so the review's job is readable there.
+  reparseAIStreamUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
 
   // ── 创建 issue 需求 ────────────────────────────────────────────────────
   // Turn a graded finding into a tracked issue-kind requirement. Single

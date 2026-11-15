@@ -61,6 +61,19 @@ type ReviewHandler struct {
 	// requirements are disabled, while every other review endpoint keeps
 	// working.
 	reqSvc *service.RequirementService
+	// extractFindings extracts a report's structured findings from its body
+	// with an LLM (the last of the three sources — see
+	// handler/review_ai_parse.go). It is a field rather than a direct call
+	// into llm.Gateway so the endpoint can be exercised without a model.
+	// nil → the AI-parse endpoint answers 503.
+	extractFindings func(reportMD string) (string, error)
+}
+
+// SetFindingsExtractor wires the LLM-backed findings extractor used by
+// 「AI 解析结构化结果」. It exists mainly for tests (and for builds that
+// want to swap the extractor without touching the gateway).
+func (h *ReviewHandler) SetFindingsExtractor(fn func(reportMD string) (string, error)) {
+	h.extractFindings = fn
 }
 
 // SetCodeReviewFollowupSvc wires the 追问 thread store (see
@@ -96,7 +109,7 @@ func (h *ReviewHandler) SetAgentServerSvc(svc *service.AgentServerService) { h.a
 func (h *ReviewHandler) SetRequirementSvc(svc *service.RequirementService) { h.reqSvc = svc }
 
 func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *ReviewHandler {
-	return &ReviewHandler{
+	h := &ReviewHandler{
 		projectSvc:  projectSvc,
 		platformSvc: platformSvc,
 		roleSvc:     roleSvc,
@@ -106,6 +119,12 @@ func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.P
 		claudeCfg:   claudeCfg,
 		usageSvc:    usageSvc,
 	}
+	// The AI-parse fallback goes through the gateway by default; the
+	// extractor is a seam so the endpoint can be tested without a model.
+	if llmGateway != nil {
+		h.extractFindings = llmGateway.ExtractReviewFindingsJSON
+	}
+	return h
 }
 
 // roleConfig loads a role's system prompt + effective model + Claude config
@@ -991,10 +1010,19 @@ func buildReviewTaskPrompt(rv *model.CodeReview, headRef, baseRef string, hasAtt
 //
 // Happy path: the trailing JSON contract parses, so result_md is the report
 // WITHOUT the contract block and the findings land structured + counted.
-// Degraded path (contract missing or malformed): result_md keeps the whole
-// report, findings_json stays empty and all counts stay 0, which is the
-// signal the frontend uses to fall back to plain-Markdown rendering. The
-// report's own ## P0/P1/P3 sections mean the user loses nothing.
+//
+// Degraded path (contract missing or malformed): the report BODY is parsed
+// for its own "## P0 / ## P1 / ## P3" sections (see review_mdparse.go). The
+// report's prose is what the user actually reads, so when it carries a
+// grading, the grading is recovered from it — deterministically, with no
+// model call and no token cost. Only when the body yields nothing either
+// does the row stay without structured findings (the frontend's
+// plain-Markdown fallback), and only then can the user ask for the LLM
+// extractor.
+//
+// The contract block is ALWAYS the primary source; the body only fills the
+// gap. That ordering matters: the contract carries fields the body cannot
+// (goal_met / goal_checks), and it is the shape the model was asked for.
 //
 // Both paths run the report through service.SanitizeMermaidBlocks first:
 // prompt.BuildReviewPrompt asks for Mermaid diagrams (改动概览图 + per-finding
@@ -1006,34 +1034,76 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 	report = service.SanitizeMermaidBlocks(report)
 	out := service.ReviewOutcome{Status: status, ResultMD: report}
 	jsonPart, markdownPart := extractTrailingJSON(report)
+	// The body the severity sections are read from: the report without its
+	// contract block (identical to the report itself when there is none).
+	body := markdownPart
 	if jsonPart == "" {
-		return out
+		body = report
 	}
-	// The three sections are decoded independently (see review_parse.go), so
-	// a broken goal_checks costs only the evidence table and a broken
-	// findings section costs only the grading.
-	sections := parseContractSections(jsonPart)
-	if !sections.FindingsOK {
-		// The findings section is not usable — there is no grading to
-		// persist. The evidence table and the verdict still are, so they
-		// are kept: the report body itself is untouched (the whole report,
-		// contract block included, is what the user reads).
-		out.GoalMet = sections.GoalMet
-		out.GoalChecksJSON = sections.GoalChecksJSON
-		return out
+	if jsonPart != "" {
+		// The three sections are decoded independently (see review_parse.go),
+		// so a broken goal_checks costs only the evidence table and a broken
+		// findings section costs only the grading.
+		sections := parseContractSections(jsonPart)
+		if sections.FindingsOK {
+			raw, err := json.Marshal(sections.Findings)
+			if err == nil {
+				out.ResultMD = markdownPart
+				out.FindingsJSON = string(raw)
+				out.GoalMet = sections.GoalMet
+				// Evidence for the 目标达成 verdict. Optional by contract and
+				// parsed on its own, so a malformed goal_checks costs only
+				// the evidence table.
+				out.GoalChecksJSON = sections.GoalChecksJSON
+				out.P0, out.P1, out.P3 = countBySeverity(sections.Findings)
+				out.FindingsSource = reviewFindingsSourceContract
+				// An explicitly EMPTY findings array is the model saying
+				// "I found nothing" — but if the body contradicts it with
+				// real graded sections, the body is what the user reads, so
+				// it wins. (The body is only consulted for the findings;
+				// goal_met / goal_checks stay as the contract stated them.)
+				if len(sections.Findings) == 0 {
+					if bodyFindings, ok := parseMarkdownFindings(body); ok {
+						applyMarkdownFindings(&out, bodyFindings)
+					}
+				}
+				return out
+			}
+		} else {
+			// The findings section is not usable — there is no grading to
+			// persist from the contract. The evidence table and the verdict
+			// still are, so they are kept: the report body itself is
+			// untouched (the whole report, contract block included, is what
+			// the user reads).
+			out.GoalMet = sections.GoalMet
+			out.GoalChecksJSON = sections.GoalChecksJSON
+		}
 	}
-	raw, err := json.Marshal(sections.Findings)
-	if err != nil {
-		return out
+	// No usable contract: recover the grading from the report's own
+	// severity sections.
+	if bodyFindings, ok := parseMarkdownFindings(body); ok {
+		applyMarkdownFindings(&out, bodyFindings)
+		// The report is graded now, so it gets the same shape as a
+		// contract-parsed one: the contract block (if there was one) is
+		// stripped out of the stored text.
+		if jsonPart != "" {
+			out.ResultMD = markdownPart
+		}
 	}
-	out.ResultMD = markdownPart
-	out.FindingsJSON = string(raw)
-	out.GoalMet = sections.GoalMet
-	// Evidence for the 目标达成 verdict. Optional by contract and parsed on
-	// its own, so a malformed goal_checks costs only the evidence table.
-	out.GoalChecksJSON = sections.GoalChecksJSON
-	out.P0, out.P1, out.P3 = countBySeverity(sections.Findings)
 	return out
+}
+
+// applyMarkdownFindings writes findings recovered from the report body into
+// the outcome, re-marshalling them into the SAME shape the contract parser
+// produces (so every downstream reader is unchanged).
+func applyMarkdownFindings(out *service.ReviewOutcome, findings []model.ReviewFinding) {
+	raw, err := json.Marshal(findings)
+	if err != nil {
+		return
+	}
+	out.FindingsJSON = string(raw)
+	out.P0, out.P1, out.P3 = countBySeverity(findings)
+	out.FindingsSource = reviewFindingsSourceMarkdown
 }
 
 // detectBaseBranch reads origin/HEAD or falls back to main/master.

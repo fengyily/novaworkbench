@@ -22,6 +22,13 @@ export const errors = {
   WIKI_ONLY: 'A knowledge-base requirement can only be scheduled for knowledge-doc generation',
   NOT_WIKI: 'Knowledge-doc generation can only be scheduled for knowledge-base requirements',
   WIKI_NOT_DEVELOPABLE: 'A knowledge-base requirement cannot enter the development stage',
+  // Recovery paths for a Review report's structured result
+  // (handler/review_reparse.go, handler/review_ai_parse.go).
+  CONTRACT_UNAVAILABLE: 'The report has neither a JSON contract block nor parsable severity sections',
+  FINDINGS_UNAVAILABLE: 'The findings section of the report is malformed',
+  REVIEW_NOT_FINISHED: 'This Review has not produced its final report yet',
+  NOT_AVAILABLE: 'This feature is not enabled in the current environment',
+  AI_PARSE_IN_PROGRESS: 'This Review is already being AI-parsed — please wait for it to finish',
   NETWORK: 'Network error, please try again later',
 } as const;
 

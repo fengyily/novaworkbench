@@ -37,7 +37,7 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 }
 
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
-	title, description, status, job_id, result_md, findings_json,
+	title, description, status, job_id, result_md, findings_json, findings_source,
 	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
 	model, effort, claude_config_id,
 	agent_server_id, claude_session_id, requirement_id, role_key,
@@ -209,6 +209,7 @@ func (s *CodeReviewService) Update(id string, rv *model.CodeReview) (*model.Code
 func (s *CodeReviewService) MarkRunning(id, jobID, modelName string) error {
 	_, err := s.db.Exec(`UPDATE code_reviews
 		SET status = ?, job_id = ?, model = ?, result_md = '', findings_json = '',
+		    findings_source = '',
 		    p0_count = 0, p1_count = 0, p3_count = 0, goal_met = '', goal_checks_json = '',
 		    claude_session_id = '', finished_at = NULL, updated_at = ?
 		WHERE id = ?`,
@@ -285,8 +286,11 @@ type ReviewOutcome struct {
 	Status       string // model.ReviewStatusDone | ReviewStatusError
 	ResultMD     string
 	FindingsJSON string
-	P0, P1, P3   int
-	GoalMet      string
+	// FindingsSource records how the structured half was obtained:
+	// "contract" | "markdown" | "llm". Empty = no structured findings.
+	FindingsSource string
+	P0, P1, P3     int
+	GoalMet        string
 	// GoalChecksJSON is the optional per-criterion evidence array. Empty
 	// when the model answered only the one-word verdict.
 	GoalChecksJSON string
@@ -301,11 +305,11 @@ func (s *CodeReviewService) MarkFinished(id string, out ReviewOutcome) error {
 	}
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`UPDATE code_reviews
-		SET status = ?, result_md = ?, findings_json = ?,
+		SET status = ?, result_md = ?, findings_json = ?, findings_source = ?,
 		    p0_count = ?, p1_count = ?, p3_count = ?, goal_met = ?,
 		    goal_checks_json = ?, finished_at = ?, updated_at = ?
 		WHERE id = ?`,
-		out.Status, out.ResultMD, out.FindingsJSON,
+		out.Status, out.ResultMD, out.FindingsJSON, out.FindingsSource,
 		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, now, now, id)
 	return err
 }
@@ -326,11 +330,11 @@ func (s *CodeReviewService) MarkFinished(id string, out ReviewOutcome) error {
 func (s *CodeReviewService) UpdateParsedFindings(id string, out ReviewOutcome) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`UPDATE code_reviews
-		SET result_md = ?, findings_json = ?,
+		SET result_md = ?, findings_json = ?, findings_source = ?,
 		    p0_count = ?, p1_count = ?, p3_count = ?, goal_met = ?,
 		    goal_checks_json = ?, updated_at = ?
 		WHERE id = ?`,
-		out.ResultMD, out.FindingsJSON,
+		out.ResultMD, out.FindingsJSON, out.FindingsSource,
 		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, now, id)
 	return err
 }
@@ -405,7 +409,7 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(&rv.ID, &rv.ProjectID, &rv.ReviewType, &rv.Branch,
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
-		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
+		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.FindingsSource, &rv.P0Count, &rv.P1Count,
 		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
 		&rv.Model, &rv.Effort, &rv.ClaudeConfigID,
 		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.RequirementID, &rv.RoleKey,

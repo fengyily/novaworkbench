@@ -1774,6 +1774,15 @@ var alterColumns = []string{
 	// Review 会话的实际档位。与 code_reviews.model 对称：追问（followup）
 	// 与「基于对话重新生成」都续接这一行，继承它记录的档位，不重新解析。
 	`ALTER TABLE code_reviews ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,
+	// findings_source: how the structured half of a review report was
+	// obtained — "contract" (the report's trailing ```json block),
+	// "markdown" (the report's own P0/P1/P3 sections) or "llm" (the LLM
+	// extractor). Empty = the report has no structured findings. Purely
+	// informational: the UI shows it as a chip so the user knows whether
+	// the grading came from the model's contract block or from a recovery
+	// path. Append-only (like every other column here): a fresh install
+	// gets it from this ALTER, an existing one from the same statement.
+	`ALTER TABLE code_reviews ADD COLUMN findings_source TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

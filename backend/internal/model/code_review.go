@@ -46,10 +46,20 @@ type CodeReview struct {
 	// ResultMD alone).
 	ResultMD     string `json:"result_md"`
 	FindingsJSON string `json:"findings_json"`
-	P0Count      int    `json:"p0_count"`
-	P1Count      int    `json:"p1_count"`
-	P3Count      int    `json:"p3_count"`
-	GoalMet      string `json:"goal_met"`
+	// FindingsSource records WHERE the structured findings came from:
+	// "contract" (the report's trailing ```json block), "markdown" (the
+	// report's own P0/P1/P3 sections — the deterministic second source) or
+	// "llm" (the LLM extractor, used when neither of the above yielded
+	// anything). Empty = the report has no structured findings at all.
+	//
+	// It is informational: nothing branches on it, but it lets the UI tell
+	// the user how the grading was obtained (and lets an operator see how
+	// often the contract block goes missing).
+	FindingsSource string `json:"findings_source"`
+	P0Count        int    `json:"p0_count"`
+	P1Count        int    `json:"p1_count"`
+	P3Count        int    `json:"p3_count"`
+	GoalMet        string `json:"goal_met"`
 	// GoalChecksJSON is the contract's optional `goal_checks` array verbatim
 	// (a []GoalCheck): the per-criterion evidence behind GoalMet's single
 	// yes/partial/no verdict. Empty when the model skipped it — the verdict

@@ -19,7 +19,7 @@
 // code_reviews row is the AUTHORITATIVE source (the sub-task's artifact is
 // only a display copy), so the card and the review page can never disagree.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   codeReviewsApi,
@@ -30,6 +30,8 @@ import {
   type ReviewSeverity,
   type SubTask,
 } from '../api/client';
+import { createEventStream, type EventStream } from '../api/stream';
+import { errorMessage } from '../utils/errMsg';
 import MarkdownRender from './MarkdownRender';
 import { stripArtifactCodeFence, stripArtifactHeader } from '../utils/subTaskArtifact';
 import { SEVERITIES, severityCount } from '../pages/codeReview/shared';
@@ -66,6 +68,11 @@ export default function RequirementReviewCard({
   const [reparseBusy, setReparseBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [reparseError, setReparseError] = useState('');
+  // The AI fallback: an async job that extracts the findings with a model.
+  const [aiParseBusy, setAiParseBusy] = useState(false);
+  const [aiParseNote, setAiParseNote] = useState('');
+  // The extraction streams its progress over the shared wizard job channel.
+  const aiStreamRef = useRef<EventStream | null>(null);
 
   const load = useCallback(() => {
     let alive = true;
@@ -147,9 +154,63 @@ export default function RequirementReviewCard({
       await load();
       onChanged?.();
     } catch (e) {
-      setReparseError(String((e as Error)?.message || e));
+      // errorMessage translates the backend's stable error code (and falls
+      // back to the server message) — a raw "CODE: message" string reads like
+      // a stack trace to the user.
+      setReparseError(errorMessage(e));
     } finally {
       setReparseBusy(false);
+    }
+  };
+
+  // The AI fallback: a model extracts the graded findings from the report
+  // body. It is the LAST resort (the deterministic re-parse above runs
+  // first), it costs tokens, and it can take minutes — so it runs as an
+  // async job whose progress streams over the shared wizard job channel.
+  const onReparseWithAI = async () => {
+    setAiParseBusy(true);
+    setAiParseNote('');
+    setReparseError('');
+    try {
+      const { job_id } = await codeReviewsApi.reparseWithAI(reviewId);
+      aiStreamRef.current?.close();
+      aiStreamRef.current = createEventStream(
+        codeReviewsApi.reparseAIStreamUrl(job_id),
+        (evt) => {
+          if (evt.type === 'job_done') {
+            aiStreamRef.current?.close();
+            aiStreamRef.current = null;
+            setAiParseBusy(false);
+            // The terminal frame carries the outcome: a failed extraction
+            // must say so rather than look like a silent no-op.
+            if (evt.status && evt.status !== 'done') {
+              setReparseError(t('components.subTaskCard.reviewReparseAIFailed'));
+            }
+            void load();
+            onChanged?.();
+            return;
+          }
+          if (evt.type === 'error') {
+            aiStreamRef.current?.close();
+            aiStreamRef.current = null;
+            setAiParseBusy(false);
+            setReparseError(String(evt.content ?? ''));
+            return;
+          }
+          if (evt.content) setAiParseNote(String(evt.content));
+        },
+        () => {
+          // The stream ended without a terminal frame — the job may still
+          // be running. Re-read the row once so the user sees whatever
+          // state it reached.
+          aiStreamRef.current = null;
+          setAiParseBusy(false);
+          void load();
+        },
+      );
+    } catch (e) {
+      setAiParseBusy(false);
+      setReparseError(errorMessage(e));
     }
   };
 
@@ -186,6 +247,22 @@ export default function RequirementReviewCard({
             🧠 {review.effort}
           </span>
         )}
+        {/* Where the graded list came from — the contract block, the report
+            body's own sections, or the AI extractor. Worth showing: a list
+            recovered from the body is a slightly different extraction than
+            one the model signed off on. */}
+        {review?.findings_source && (
+          <span
+            className="sub-review-chip sub-review-chip-source"
+            title={t('components.subTaskCard.reviewParseSourceHint')}
+          >
+            {t(`components.subTaskCard.reviewParseSource${
+              review.findings_source === 'contract' ? 'Contract'
+                : review.findings_source === 'markdown' ? 'Markdown'
+                : 'Llm'
+            }`)}
+          </span>
+        )}
         <span className="sub-review-spacer" />
         <a className="btn btn-sm" href={`/reviews/${reviewId}`}>
           {t('components.subTaskCard.reviewOpenFull')}
@@ -217,13 +294,28 @@ export default function RequirementReviewCard({
                 type="button"
                 className="btn btn-sm"
                 onClick={onReparse}
-                disabled={reparseBusy}
+                disabled={reparseBusy || aiParseBusy}
                 title={t('components.subTaskCard.reviewReparseHint')}
               >
                 {reparseBusy
                   ? t('components.subTaskCard.reviewReparseBusy')
                   : t('components.subTaskCard.reviewReparse')}
               </button>
+              {/* The AI fallback: a model reads the report body and extracts
+                  the graded list. It costs tokens, so it is offered only
+                  after the free deterministic re-parse. */}
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={onReparseWithAI}
+                disabled={reparseBusy || aiParseBusy}
+                title={t('components.subTaskCard.reviewReparseAIHint')}
+              >
+                {aiParseBusy
+                  ? t('components.subTaskCard.reviewReparseAIBusy')
+                  : t('components.subTaskCard.reviewReparseAI')}
+              </button>
+              {aiParseNote && <span className="sub-review-note">{aiParseNote}</span>}
               {reparseError && <span className="sub-review-error">{reparseError}</span>}
             </div>
           </>

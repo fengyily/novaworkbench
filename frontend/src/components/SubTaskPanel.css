@@ -2210,6 +2210,19 @@
   margin-top: 4px;
 }
 
+/* Progress note of the AI extraction job (it runs for tens of seconds to
+   minutes, so the user needs to see that something is happening). */
+.sub-review-note {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* The chip naming where the graded list came from. */
+.sub-review-chip-source {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
 /* Severity ledger — a zero bucket stays grey so the eye lands only on what
    actually needs attention (same rule as the project-level Review view). */
 .sub-review-ledger {
