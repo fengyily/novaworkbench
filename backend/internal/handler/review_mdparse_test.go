@@ -3,6 +3,8 @@ package handler
 import (
 	"strings"
 	"testing"
+
+	"github.com/novaworkbench/backend/internal/prompt"
 )
 
 // The body parser is the deterministic second source of a Review report's
@@ -258,5 +260,29 @@ func TestParseMarkdownFindings_PreambleIgnored(t *testing.T) {
 	}
 	if len(findings) != 1 {
 		t.Fatalf("len(findings) = %d, want 1: %+v", len(findings), findings)
+	}
+}
+
+// The pinned prompt format and the body parser must agree on ONE shape: the
+// prompt states it (prompt.ReviewFindingLineFormat), the parser reads it
+// back. If they drift, the deterministic recovery silently stops finding
+// anything — and nothing would fail loudly, because the reports would just
+// keep degrading.
+func TestPromptFormatAndParserAgree(t *testing.T) {
+	line := prompt.ReviewFindingLineFormat
+	if !strings.Contains(line, "[P0]") {
+		t.Fatalf("the pinned format must carry the severity: %q", line)
+	}
+	f, ok := parseFindingItem("P1", "**[P0] 标题** — `a.go:1` — 说明")
+	if !ok {
+		t.Fatal("parseFindingItem failed")
+	}
+	if f.Title != "标题" {
+		t.Fatalf("title = %q, want 标题", f.Title)
+	}
+	// The SECTION wins over the item's own marker: the model may contradict
+	// itself, and the section is the bucket it declared.
+	if f.Severity != "P1" {
+		t.Fatalf("severity = %q, want P1 (the section's bucket)", f.Severity)
 	}
 }
