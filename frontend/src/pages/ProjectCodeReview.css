@@ -230,6 +230,18 @@
 .cr-reparse {
   margin-top: 8px;
 }
+/* The two recovery buttons (deterministic re-parse + the AI fallback) sit
+   on one row, with the job's progress note after them. */
+.cr-reparse-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.cr-reparse-row .cr-reparse {
+  margin-top: 0;
+}
 .cr-verdict-meta {
   display: flex;
   align-items: center;

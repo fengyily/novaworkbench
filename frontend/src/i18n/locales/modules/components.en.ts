@@ -263,6 +263,17 @@ export const components = {
     reviewReparse: '🔁 Re-parse structured result',
     reviewReparseBusy: 'Parsing…',
     reviewReparseHint: 'Re-extract the grading and the findings list from the saved report (no model run, no tokens). It cannot recover a report whose contract block is missing.',
+    // The AI fallback: after the deterministic re-parse fails, a model
+    // extracts the graded list from the report body. Async, costs tokens.
+    reviewReparseAI: '🤖 AI-parse structured result',
+    reviewReparseAIBusy: 'AI parsing…',
+    reviewReparseAIHint: 'Have a model extract the graded findings from the report body (runs a model and costs tokens — usually tens of seconds to a few minutes).',
+    // Where the structured result came from.
+    reviewParseSourceContract: 'contract',
+    reviewParseSourceMarkdown: 'body',
+    reviewParseSourceLlm: 'AI',
+    reviewParseSourceHint: 'Where this graded list came from',
+    reviewReparseAIFailed: 'The AI extraction produced no graded findings',
     reviewOpenFull: 'Open the full report',
     reviewFullReport: 'Full Review report',
     reviewVerdict_pass: '✅ Review passed',

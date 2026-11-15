@@ -280,6 +280,17 @@ export const components = {
     reviewReparse: '🔁 重新解析结构化结果',
     reviewReparseBusy: '解析中…',
     reviewReparseHint: '从已保存的报告正文重新提取分级与问题清单（不重跑模型，不消耗 token）。报告里若没有契约块则无法恢复。',
+    // AI 解析结构化结果：确定性解析（重新解析）也失败后的最后兜底 ——
+    // 调一次模型从报告正文里抽分级清单，异步跑，会消耗 token。
+    reviewReparseAI: '🤖 AI 解析结构化结果',
+    reviewReparseAIBusy: 'AI 解析中…',
+    reviewReparseAIHint: '用 AI 从报告正文里抽取分级问题清单（会调用模型、消耗 token，通常需要几十秒到几分钟）。',
+    // 结构化结果的来源徽标：契约块 / 正文解析 / AI 解析。
+    reviewParseSourceContract: '契约块',
+    reviewParseSourceMarkdown: '正文解析',
+    reviewParseSourceLlm: 'AI 解析',
+    reviewParseSourceHint: '这份分级清单的来源',
+    reviewReparseAIFailed: 'AI 解析未产出分级问题清单',
     reviewOpenFull: '打开完整报告',
     reviewFullReport: '完整 Review 报告',
     reviewVerdict_pass: '✅ Review 通过',

@@ -440,6 +440,13 @@ export const projects = {
     reviewReparse: '🔁 重新解析结构化结果',
     reviewReparseBusy: '解析中…',
     reviewReparseHint: '从已保存的报告正文重新提取分级与问题清单（不重跑模型，不消耗 token）。报告里若没有契约块则无法恢复。',
+    // AI 解析：确定性解析也失败后的最后兜底 —— 调模型抽分级清单（消耗 token）。
+    reviewReparseAI: '🤖 AI 解析结构化结果',
+    reviewReparseAIBusy: 'AI 解析中…',
+    reviewReparseAIHint: '用 AI 从报告正文里抽取分级问题清单（会调用模型、消耗 token，通常需要几十秒到几分钟）。',
+    reviewParseSourceContract: '契约块',
+    reviewParseSourceMarkdown: '正文解析',
+    reviewParseSourceLlm: 'AI 解析',
     reviewFullReport: '完整报告',
     // 「改动概览图」：把报告里的 Mermaid 图提到折叠的完整报告之上单独展示。
     reviewDiagrams: '改动概览图',

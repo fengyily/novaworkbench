@@ -54,6 +54,15 @@ export interface UseReviewSessionResult {
   /** Re-read the stored report's contract block and refill the grading. */
   reparse: () => Promise<void>;
   reparsing: boolean;
+  /**
+   * The AI fallback: a model extracts the graded findings from the report
+   * body. It runs as a job (tokens + minutes), so it is asynchronous and
+   * streams over the shared wizard job channel.
+   */
+  reparseWithAI: () => Promise<void>;
+  aiParsing: boolean;
+  /** The last line the extraction job printed (progress feedback). */
+  aiParseNote: string;
   setActiveRevisionNo: (n: number | null) => void;
   restoreRevision: (n: number) => Promise<void>;
   reload: () => Promise<void>;
@@ -83,6 +92,9 @@ export function useReviewSession(
   const [running, setRunning] = useState(false);
   // True while a 「重新解析结构化结果」 round-trip is in flight.
   const [reparsing, setReparsing] = useState(false);
+  // True while the AI extraction job is in flight.
+  const [aiParsing, setAiParsing] = useState(false);
+  const [aiParseNote, setAiParseNote] = useState('');
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
 
@@ -319,6 +331,55 @@ export function useReviewSession(
     }
   }, [reparsing, refreshAfterRun, fail]);
 
+  // reparseWithAI starts the AI extraction and follows it on the shared
+  // wizard job channel.
+  //
+  // It does NOT reuse the review's own SSE: that channel is reserved for
+  // runs of the review itself (start / rerun / regenerate / follow-up), and
+  // hijacking it would make the extraction look like a review run.
+  const aiStreamRef = useRef<EventStream | null>(null);
+  const reparseWithAI = useCallback(async () => {
+    const rid = reviewIdRef.current;
+    if (!rid || aiParsing) return;
+    setAiParsing(true);
+    setAiParseNote('');
+    try {
+      const { job_id } = await codeReviewsApi.reparseWithAI(rid);
+      aiStreamRef.current?.close();
+      aiStreamRef.current = createEventStream(
+        codeReviewsApi.reparseAIStreamUrl(job_id),
+        (data) => {
+          if (data.type === 'job_done') {
+            aiStreamRef.current?.close();
+            aiStreamRef.current = null;
+            setAiParsing(false);
+            refreshAfterRun(rid);
+            return;
+          }
+          if (data.type === 'error') {
+            aiStreamRef.current?.close();
+            aiStreamRef.current = null;
+            setAiParsing(false);
+            fail(new Error(String(data.content ?? '')));
+            return;
+          }
+          if (data.content) setAiParseNote(String(data.content));
+        },
+        () => {
+          aiStreamRef.current = null;
+          setAiParsing(false);
+          refreshAfterRun(rid);
+        },
+      );
+    } catch (err: unknown) {
+      setAiParsing(false);
+      fail(err);
+    }
+  }, [aiParsing, refreshAfterRun, fail]);
+
+  // Close the extraction stream when the hook unmounts.
+  useEffect(() => () => { aiStreamRef.current?.close(); aiStreamRef.current = null; }, []);
+
   const reload = useCallback(async () => {
     const rid = reviewIdRef.current;
     if (!rid) return;
@@ -353,6 +414,9 @@ export function useReviewSession(
     rerun,
     reparse,
     reparsing,
+    reparseWithAI,
+    aiParsing,
+    aiParseNote,
     setActiveRevisionNo,
     restoreRevision,
     reload,

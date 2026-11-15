@@ -27,6 +27,13 @@ export const errors = {
   WIKI_ONLY: '「知识库」类需求的定时任务只能是「生成知识库文档」',
   NOT_WIKI: '「生成知识库文档」定时任务仅适用于「知识库」类需求',
   WIKI_NOT_DEVELOPABLE: '「知识库」类需求不支持进入开发阶段',
+  // Review 报告的结构化结果恢复路径（handler/review_reparse.go、
+  // handler/review_ai_parse.go）。
+  CONTRACT_UNAVAILABLE: '报告正文里既没有 JSON 契约块，也没有从分级小节中解析出问题清单',
+  FINDINGS_UNAVAILABLE: '报告中的问题清单段落格式异常，无法解析',
+  REVIEW_NOT_FINISHED: '本次 Review 尚未产出最终报告，结束后才能解析',
+  NOT_AVAILABLE: '该功能在当前环境未启用',
+  AI_PARSE_IN_PROGRESS: '本次 Review 正在 AI 解析中，请等待当前解析结束',
   NETWORK: '网络错误，请稍后重试',
 } as const;
 

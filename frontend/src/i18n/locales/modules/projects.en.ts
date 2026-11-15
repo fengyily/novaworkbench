@@ -435,6 +435,14 @@ export const projects = {
     reviewReparse: '🔁 Re-parse structured result',
     reviewReparseBusy: 'Parsing…',
     reviewReparseHint: 'Re-extract the grading and the findings list from the saved report (no model run, no tokens). It cannot recover a report whose contract block is missing.',
+    // The AI fallback: after the deterministic re-parse fails, a model
+    // extracts the graded list from the report body. Costs tokens.
+    reviewReparseAI: '🤖 AI-parse structured result',
+    reviewReparseAIBusy: 'AI parsing…',
+    reviewReparseAIHint: 'Have a model extract the graded findings from the report body (runs a model and costs tokens — usually tens of seconds to a few minutes).',
+    reviewParseSourceContract: 'contract',
+    reviewParseSourceMarkdown: 'body',
+    reviewParseSourceLlm: 'AI',
     reviewFullReport: 'Full report',
     // "Change diagrams": the report's Mermaid blocks, surfaced above the
     // collapsed full report so they are not hidden behind a disclosure.

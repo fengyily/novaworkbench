@@ -1034,6 +1034,12 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 	report = service.SanitizeMermaidBlocks(report)
 	out := service.ReviewOutcome{Status: status, ResultMD: report}
 	jsonPart, markdownPart := extractTrailingJSON(report)
+	// The body the severity sections are read from: the report without its
+	// contract block (identical to the report itself when there is none).
+	body := markdownPart
+	if jsonPart == "" {
+		body = report
+	}
 	if jsonPart != "" {
 		// The three sections are decoded independently (see review_parse.go),
 		// so a broken goal_checks costs only the evidence table and a broken
@@ -1057,7 +1063,7 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 				// it wins. (The body is only consulted for the findings;
 				// goal_met / goal_checks stay as the contract stated them.)
 				if len(sections.Findings) == 0 {
-					if bodyFindings, ok := parseMarkdownFindings(markdownPart); ok {
+					if bodyFindings, ok := parseMarkdownFindings(body); ok {
 						applyMarkdownFindings(&out, bodyFindings)
 					}
 				}
@@ -1075,8 +1081,14 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 	}
 	// No usable contract: recover the grading from the report's own
 	// severity sections.
-	if bodyFindings, ok := parseMarkdownFindings(report); ok {
+	if bodyFindings, ok := parseMarkdownFindings(body); ok {
 		applyMarkdownFindings(&out, bodyFindings)
+		// The report is graded now, so it gets the same shape as a
+		// contract-parsed one: the contract block (if there was one) is
+		// stripped out of the stored text.
+		if jsonPart != "" {
+			out.ResultMD = markdownPart
+		}
 	}
 	return out
 }
