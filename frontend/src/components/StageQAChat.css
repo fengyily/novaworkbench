@@ -569,6 +569,12 @@
   color: var(--color-warning-deep);
 }
 
+/* The retry affordance of a failed turn. Pushed to the far right of the
+   meta row so it reads as an action, not as another piece of metadata. */
+.qa-turn-retry {
+  margin-left: auto;
+}
+
 .qa-live {
   margin: 8px 10px 0;
   padding: 8px 10px;

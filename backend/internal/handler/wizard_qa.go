@@ -75,6 +75,33 @@ const (
 	qaModeFresh = "fresh"
 )
 
+// qaErrorKind classifies a failed Q&A turn. The vocabulary mirrors
+// job_logs.error_kind so the frontend can key off one shared set of
+// failure shapes.
+//
+// It exists because "the answer is empty" and "the model answered but the
+// reply was lost" are completely different bugs, and the difference is what
+// tells the next occurrence whether a retry is worth anything.
+const (
+	// qaErrorKindEmptyResult: the CLI delivered a terminal result event
+	// with an empty body — the model was never asked (or answered with
+	// nothing).
+	qaErrorKindEmptyResult = "empty-result"
+	// qaErrorKindEmptyAfterFallback: the same, but the automatic fresh
+	// re-run was attempted and ALSO came back empty.
+	qaErrorKindEmptyAfterFallback = "empty-result-after-fallback"
+	// qaErrorKindStaleSession: the forked source session no longer exists
+	// on disk.
+	qaErrorKindStaleSession = "stale-session"
+	// qaErrorKindForkGuard: the fork guard refused to fork (the source
+	// session was not created in an isolated worktree).
+	qaErrorKindForkGuard = "fork-guard"
+	// qaErrorKindCliCrash: the CLI died on its own with a non-zero exit.
+	qaErrorKindCliCrash = "cli-crash"
+	// qaErrorKindTimeout: the run hit the stage's idle / total cap.
+	qaErrorKindTimeout = "timeout"
+)
+
 // qaSessionPlan is the pure result of resolving "which session should this
 // turn run in". Kept as a value type (no I/O) so the whole decision tree can
 // be unit-tested.
@@ -94,6 +121,10 @@ type qaSessionPlan struct {
 	// already holds the forked context). False for a fresh run, whose prompt
 	// has to carry the context itself.
 	Resumed bool
+	// GuardDowngraded is true when the fork guard refused to fork and the
+	// plan was rewritten to the fresh mode. It only affects how a failure
+	// is classified (error_kind=fork-guard) — the run itself is unchanged.
+	GuardDowngraded bool
 }
 
 // resolveQASession decides how a new Q&A turn gets its context.
@@ -437,7 +468,7 @@ func (h *WizardHandler) runStageQA(job *store.Job, turn *model.RequirementQATurn
 		if gerr := h.requireAnchoredFork(reqRow, projectPath); gerr != nil {
 			log.Printf("[qa-chat] fork guard: %v — degrading to a fresh answer", gerr)
 			job.Append(store.LogLine{Type: "phase", Content: "⚠️ " + gerr.Error() + "，改用「方案文档 + 仓库代码」作答"})
-			plan = qaSessionPlan{Mode: qaModeFresh, NewSessionID: util.NewUUID()}
+			plan = qaSessionPlan{Mode: qaModeFresh, NewSessionID: util.NewUUID(), GuardDowngraded: true}
 		}
 	}
 
@@ -447,7 +478,7 @@ func (h *WizardHandler) runStageQA(job *store.Job, turn *model.RequirementQATurn
 	// cwd would not find the source session (and the fork would degrade).
 	workDir, err := h.resolveWorkDir(ctx, reqRow, projectPath, defaultBranch, false)
 	if err != nil {
-		h.finishQATurn(job, turn, modelName, "", err.Error(), false, plan.NewSessionID, plan.SourceSID)
+		h.finishQATurn(job, turn, modelName, "", err.Error(), qaErrorKindCliCrash, false, plan.NewSessionID, plan.SourceSID)
 		return
 	}
 
@@ -460,7 +491,7 @@ func (h *WizardHandler) runStageQA(job *store.Job, turn *model.RequirementQATurn
 	history := h.qaHistory(req.RequirementID, req.Stage, turn.ID)
 
 	res := h.runQATurn(ctx, stage.hb, job, workDir, systemPrompt, modelName, claudeConfigID, reqRow, req, plan, history, usage)
-	h.finishQATurn(job, turn, modelName, res.answer, res.errMsg, res.resumed, res.sessionID, res.sourceSessionID)
+	h.finishQATurn(job, turn, modelName, res.answer, res.errMsg, res.errorKind, res.resumed, res.sessionID, res.sourceSessionID)
 }
 
 // qaTurnResult is the outcome of one turn's run.
@@ -469,6 +500,8 @@ type qaTurnResult struct {
 	answer string
 	// errMsg is the failure text (empty on success).
 	errMsg string
+	// errorKind classifies a failure (qaErrorKind*). Empty on success.
+	errorKind string
 	// resumed is true when the answer came from a session that held the
 	// forked context.
 	resumed bool
@@ -480,6 +513,50 @@ type qaTurnResult struct {
 	// sourceSessionID is the stage session the answer was forked from
 	// ("" for a degraded / fresh run).
 	sourceSessionID string
+}
+
+// shouldRetryQAFresh reports whether an empty-answer turn should be retried
+// through the "fresh session (context pasted in)" path.
+//
+// The failure this exists for: a FORKED turn that the CLI finishes with a
+// successful-but-empty result event, having never asked the model at all
+// (num_turns=0, zero api-request records). The cause is inherited state —
+// the parent session left an unfinished background command behind, and the
+// CLI's "that command never finished" notification was queued ahead of the
+// user's question, so the turn was consumed before the model saw it.
+// Retrying the SAME fork reproduces the same failure, so the only way
+// forward is a different session.
+//
+// Conditions (all must hold):
+//
+//  1. the turn produced no text;
+//  2. the CLI's verdict was an empty result (not an error we should
+//     surface as-is);
+//  3. the run was NOT already the fresh path (nothing to gain by retrying);
+//  4. the model demonstrably never spoke — no assistant message, and the
+//     transcript proves no api-request was ever issued.
+//
+// Condition 4 is what keeps a genuine "the model answered with nothing" from
+// being masked by a silent retry through another path.
+func shouldRetryQAFresh(out claudeStreamOutcome, probe claudeTranscriptProbe, mode string) bool {
+	if mode == qaModeFresh {
+		return false
+	}
+	if out.finalResult != "" || !out.emptyResult {
+		return false
+	}
+	if out.sawAssistantMsg {
+		return false
+	}
+	if probe.Found {
+		// The transcript is the hard evidence: a request was made → the
+		// answer was lost downstream, which is a different failure.
+		return !probe.RequestLeftMachine() && probe.Assistants == 0
+	}
+	// No transcript at all (the CLI never wrote one): fall back to the
+	// CLI's own report — a successful result event with zero model turns
+	// means the turn ended before the model was asked.
+	return out.resultEventSeen && out.numTurns == 0
 }
 
 // runQATurn executes one turn.
@@ -494,6 +571,10 @@ type qaTurnResult struct {
 // with the context pasted into the prompt — the answer gets shallower, but the
 // user still gets one. Same for a failed fork guard: QA is read-only, so a
 // shallower answer costs far less than a hard error.
+//
+// A fork that comes back EMPTY (no model request was ever issued) also
+// degrades to a fresh run — retrying the same fork would reproduce the same
+// failure. See shouldRetryQAFresh.
 func (h *WizardHandler) runQATurn(
 	ctx context.Context,
 	hb chan struct{},
@@ -511,7 +592,21 @@ func (h *WizardHandler) runQATurn(
 	// not (the session already holds it).
 	freshInput := qaFreshPromptInput(reqRow, req.Stage)
 
+	// attemptStart / attemptSID describe the run that is currently on the
+	// table, so the transcript probe can ask "did THIS attempt ever reach
+	// the model?" (a forked session inherits the parent's whole history —
+	// the probe filters by time window). lastMode is the mode of THAT run:
+	// after a stale-session degradation the failed attempt already ran in
+	// the fresh mode, and re-running the fresh mode again would change
+	// nothing.
+	var attemptStart time.Time
+	var attemptSID string
+	var lastMode string
+
 	run := func(p qaSessionPlan) claudeStreamOutcome {
+		attemptStart = time.Now()
+		attemptSID = p.NewSessionID
+		lastMode = p.Mode
 		in := freshInput
 		in.Stage = req.Stage
 		in.Question = req.Question
@@ -549,13 +644,20 @@ func (h *WizardHandler) runQATurn(
 			opts.SessionID = p.NewSessionID
 		}
 		cmd := h.llm.StreamCmd(ctx, opts)
-		return runClaudeStream(sink, cmd, "qa-chat", usage, nil, hb, 0, withStallTimeout(qaStallTimeout), withCtx(ctx))
+		out := runClaudeStream(sink, cmd, "qa-chat", usage, nil, hb, 0, withStallTimeout(qaStallTimeout), withCtx(ctx))
+		if out.sessionID != "" {
+			// The CLI reports the id it really opened — the transcript lives
+			// under THAT id.
+			attemptSID = out.sessionID
+		}
+		return out
 	}
 
 	out := run(plan)
 	resumed := plan.Resumed
 	sourceSID := plan.SourceSID
 	sessionID := plan.NewSessionID
+	guardDowngraded := plan.GuardDowngraded
 
 	if out.staleSession && plan.Mode != qaModeFresh {
 		// The source conversation is gone (the user re-ran the stage and the
@@ -578,11 +680,65 @@ func (h *WizardHandler) runQATurn(
 		sessionID = out.sessionID
 	}
 
-	if out.finalResult == "" {
-		if out.errMsg != "" {
-			return qaTurnResult{errMsg: out.errMsg, resumed: resumed, sessionID: sessionID, sourceSessionID: sourceSID}
+	// Self-healing: an empty answer that never reached the model is a
+	// failure of the FORK, not of the question. Retry once through the
+	// fresh path (context pasted into the prompt), which cannot inherit
+	// the polluted parent state.
+	fellBack := false
+	probeNow := func() claudeTranscriptProbe {
+		return probeClaudeTranscript(workDir, attemptSID, attemptStart)
+	}
+	if out.emptyResult {
+		probe := probeNow()
+		if shouldRetryQAFresh(out, probe, lastMode) {
+			log.Printf("[qa-chat] empty answer without a model request (%s) — retrying with a fresh session", probe.Describe())
+			job.Append(store.LogLine{Type: "phase",
+				Content: "🔄 续接会话未产出回答（" + probe.Describe() + "），自动改用「方案文档 + 仓库代码」重新作答"})
+			freshPlan := qaSessionPlan{Mode: qaModeFresh, NewSessionID: util.NewUUID()}
+			out = run(freshPlan)
+			resumed = false
+			sourceSID = ""
+			sessionID = freshPlan.NewSessionID
+			if out.sessionID != "" {
+				sessionID = out.sessionID
+			}
+			fellBack = true
 		}
-		return qaTurnResult{errMsg: "Claude 未返回结果，请重试", resumed: resumed, sessionID: sessionID, sourceSessionID: sourceSID}
+	}
+
+	if out.finalResult == "" {
+		msg := out.errMsg
+		kind := qaErrorKindCliCrash
+		switch {
+		case out.emptyResult && fellBack:
+			msg = "Claude 连续两轮都没有产出回答（已自动降级为「方案文档 + 仓库代码」重试，仍为空）。\n\n" + msg
+			kind = qaErrorKindEmptyAfterFallback
+		case out.emptyResult:
+			kind = qaErrorKindEmptyResult
+		case out.staleSession:
+			kind = qaErrorKindStaleSession
+		case out.IdleTimeoutHit:
+			kind = qaErrorKindTimeout
+		case guardDowngraded:
+			kind = qaErrorKindForkGuard
+		}
+		if msg == "" {
+			msg = "Claude 未返回结果，请重试"
+		}
+		// The transcript evidence answers the only question that matters
+		// here: did the request ever leave the machine? Stale-session
+		// failures are left alone — their diagnosis comes from the jsonl
+		// lookup itself.
+		if !out.staleSession {
+			msg = appendTranscriptEvidence(msg, probeNow())
+		}
+		return qaTurnResult{
+			errMsg:          msg,
+			errorKind:       kind,
+			resumed:         resumed,
+			sessionID:       sessionID,
+			sourceSessionID: sourceSID,
+		}
 	}
 	return qaTurnResult{
 		answer:          out.finalResult,
@@ -664,7 +820,12 @@ func (h *WizardHandler) qaHistory(requirementID, stage, excludeID string) []prom
 // sessionID / sourceSessionID are the terminal values of the turn's session
 // bookkeeping. The session id was pre-minted when the row was created, so it
 // only has to be corrected here when the CLI reported a different one.
-func (h *WizardHandler) finishQATurn(job *store.Job, turn *model.RequirementQATurn, modelName, answer, errMsg string, resumed bool, sessionID, sourceSessionID string) {
+//
+// errorKind classifies a failure (qaErrorKind*); it is empty on success. It
+// is persisted so the next occurrence can be told apart from the log alone
+// ("the model was never asked" vs "the model answered and the reply was
+// lost").
+func (h *WizardHandler) finishQATurn(job *store.Job, turn *model.RequirementQATurn, modelName, answer, errMsg, errorKind string, resumed bool, sessionID, sourceSessionID string) {
 	status := model.QAStatusDone
 	body := service.SanitizeMermaidBlocks(answer)
 	if errMsg != "" {
@@ -676,7 +837,7 @@ func (h *WizardHandler) finishQATurn(job *store.Job, turn *model.RequirementQATu
 		if sessionID == "" {
 			sessionID = turn.SessionID
 		}
-		if err := h.qaSvc.MarkFinished(turn.ID, status, body, modelName, sessionID, sourceSessionID, resumed); err != nil {
+		if err := h.qaSvc.MarkFinished(turn.ID, status, body, modelName, sessionID, sourceSessionID, resumed, errorKind); err != nil {
 			log.Printf("[qa-chat] persist turn %s: %v", turn.ID, err)
 		}
 	}

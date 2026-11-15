@@ -70,6 +70,15 @@ type RequirementQATurn struct {
 	// and the answer came from a fresh run seeded with the design doc + the
 	// earlier Q&A — still useful, but without the original tool history.
 	Resumed bool `json:"resumed"`
+	// ErrorKind classifies a FAILED turn (empty-result /
+	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
+	// timeout). Empty on success.
+	//
+	// It is persisted so the next occurrence of the same symptom can be
+	// classified without another archaeology session: "empty-result" means
+	// the model was never asked, "cli-crash" means it was asked and the
+	// process died.
+	ErrorKind string `json:"error_kind"`
 	// CreatedBy is the user id that asked the question.
 	CreatedBy  string     `json:"created_by"`
 	CreatedAt  time.Time  `json:"created_at"`

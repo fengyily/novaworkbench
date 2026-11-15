@@ -169,3 +169,99 @@ func TestQaStageHasArtifact(t *testing.T) {
 		t.Fatal("a coding context summary is an artifact")
 	}
 }
+
+// TestShouldRetryQAFresh pins the self-healing trigger for the "forked turn
+// that never reached the model" failure.
+//
+// Background: a fork can inherit a polluted parent session (an unfinished
+// background command), and the CLI's "that command never finished"
+// notification is then queued AHEAD of the user's question. The turn is
+// consumed before the model is asked, the CLI still reports success — with an
+// empty body — and the old code blamed the CLI for the exit code 143 it had
+// produced itself.
+//
+// The retry must happen ONLY when the transcript proves the request never
+// left the machine; otherwise a genuine "the model answered with nothing"
+// would be masked by a silent retry through another path.
+func TestShouldRetryQAFresh(t *testing.T) {
+	// The signature of the failure: a successful-but-empty result event
+	// with zero model turns and no assistant message.
+	empty := claudeStreamOutcome{
+		resultEventSeen: true,
+		resultSubtype:   "success",
+		numTurns:        0,
+		emptyResult:     true,
+		finalResult:     "",
+	}
+	noRequest := claudeTranscriptProbe{Found: true, TotalRecords: 4, APIRequests: 0, Assistants: 0}
+
+	if !shouldRetryQAFresh(empty, noRequest, qaModeFork) {
+		t.Fatal("an empty answer that never reached the model must be retried as a fresh session")
+	}
+
+	cases := []struct {
+		name  string
+		out   claudeStreamOutcome
+		probe claudeTranscriptProbe
+		mode  string
+	}{
+		{
+			name:  "有回答",
+			out:   claudeStreamOutcome{finalResult: "答案", resultEventSeen: true},
+			probe: noRequest,
+			mode:  qaModeFork,
+		},
+		{
+			name:  "模型出过声",
+			out:   claudeStreamOutcome{emptyResult: true, resultEventSeen: true, sawAssistantMsg: true},
+			probe: noRequest,
+			mode:  qaModeFork,
+		},
+		{
+			name:  "不是空结果（是别的错误）",
+			out:   claudeStreamOutcome{errMsg: "Claude 异常退出: exit status 1"},
+			probe: noRequest,
+			mode:  qaModeFork,
+		},
+		{
+			name:  "已经是 fresh 模式",
+			out:   empty,
+			probe: noRequest,
+			mode:  qaModeFresh,
+		},
+		{
+			name:  "转录证明请求已发出（模型答了但丢包）",
+			out:   empty,
+			probe: claudeTranscriptProbe{Found: true, TotalRecords: 9, APIRequests: 1},
+			mode:  qaModeFork,
+		},
+		{
+			name:  "转录里有 assistant 记录",
+			out:   empty,
+			probe: claudeTranscriptProbe{Found: true, TotalRecords: 9, APIRequests: 0, Assistants: 1},
+			mode:  qaModeFork,
+		},
+	}
+	for _, tc := range cases {
+		if shouldRetryQAFresh(tc.out, tc.probe, tc.mode) {
+			t.Errorf("%s: must NOT retry through the fresh path", tc.name)
+		}
+	}
+}
+
+// TestShouldRetryQAFresh_NoTranscriptFallsBackToTheCLIsOwnReport pins the
+// fallback: when the CLI never wrote a transcript at all, the CLI's own
+// result event is the evidence — a successful result with zero model turns
+// means the turn ended before the model was asked.
+func TestShouldRetryQAFresh_NoTranscriptFallsBackToTheCLIsOwnReport(t *testing.T) {
+	out := claudeStreamOutcome{resultEventSeen: true, resultSubtype: "success", numTurns: 0, emptyResult: true}
+	if !shouldRetryQAFresh(out, claudeTranscriptProbe{Found: false}, qaModeFork) {
+		t.Error("without a transcript, a zero-turn result must still trigger the fresh retry")
+	}
+	// A result event that DID talk to the model (turns > 0) is not the
+	// failure this path handles.
+	out.numTurns = 2
+	if shouldRetryQAFresh(out, claudeTranscriptProbe{Found: false}, qaModeFork) {
+		t.Error("a result with model turns must not trigger the fresh retry")
+	}
+}

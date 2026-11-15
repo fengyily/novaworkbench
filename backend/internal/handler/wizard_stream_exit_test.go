@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -275,5 +276,139 @@ func TestTranscriptProbe_MissingFile(t *testing.T) {
 	}
 	if !strings.Contains(p.Describe(), "未找到") {
 		t.Errorf("Describe should mention the transcript was not found; got: %s", p.Describe())
+	}
+}
+
+// TestEmptyResultMessage_NotACliCrash pins the headline fix of this round: a
+// run whose CLI delivered a terminal result event with an EMPTY body is NOT
+// a crash, and the 143 that comes with it is the one WE produced by
+// terminating the process group during teardown.
+//
+// The old code reported "Claude 异常退出: exit status 143" for exactly this
+// shape — which is what the user hit in the 答疑 panel.
+func TestEmptyResultMessage_NotACliCrash(t *testing.T) {
+	out := claudeStreamOutcome{
+		resultEventSeen: true,
+		resultSubtype:   "success",
+		numTurns:        0,
+		emptyResult:     true,
+		killReason:      killReasonPostResult,
+		stdoutEnded:     "result",
+		elapsed:         804 * time.Millisecond,
+	}
+
+	msg := emptyResultMessage(out, 143, "")
+
+	if strings.Contains(msg, "Claude 异常退出") {
+		t.Errorf("an empty result is not a CLI crash; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "没有产出回答") {
+		t.Errorf("message should say the turn produced no answer; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "终止原因=post-result") {
+		t.Errorf("diagnostic should name our own teardown kill; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "结果子类型=success") {
+		t.Errorf("diagnostic should carry the result subtype; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "模型轮次=0") {
+		t.Errorf("diagnostic should carry the model turn count; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "退出码=143") {
+		t.Errorf("diagnostic should keep the exit code visible; got:\n%s", msg)
+	}
+}
+
+// TestTerminationDiagnostics_KeepsFieldOrder pins that the two new
+// diagnostic fields are APPENDED — the existing order is greppable across
+// runs and downstream log alerts key off it.
+func TestTerminationDiagnostics_KeepsFieldOrder(t *testing.T) {
+	out := claudeStreamOutcome{
+		killReason:       killReasonPostResult,
+		stdoutEnded:      "result",
+		lastEventType:    "result",
+		streamEventCount: 0,
+		eventCount:       5,
+		elapsed:          804 * time.Millisecond,
+		resultSubtype:    "success",
+		numTurns:         0,
+	}
+	line := terminationDiagnostics(out, 143, "")
+	want := "诊断：耗时=804ms 事件数=5 stream事件数=0 最后事件类型=result stdout结束=result stderr=(空) 退出码=143 终止原因=post-result 结果子类型=success 模型轮次=0"
+	if line != want {
+		t.Errorf("diagnostic line changed shape:\n got: %s\nwant: %s", line, want)
+	}
+}
+
+// TestKillReason_PostResultIsOurs pins that the teardown kill AFTER a result
+// event is recorded as ours — the CLI's exit code in that case is the SIGTERM
+// code WE caused.
+func TestKillReason_PostResultIsOurs(t *testing.T) {
+	var k claudeKillReason
+	k.set(killReasonPostResult)
+	if got := k.get(); got != killReasonPostResult {
+		t.Fatalf("killReason = %q, want %q", got, killReasonPostResult)
+	}
+	// The real causes still win over it (first write wins).
+	var k2 claudeKillReason
+	k2.set(killReasonWatchdog)
+	k2.set(killReasonPostResult)
+	if got := k2.get(); got != killReasonWatchdog {
+		t.Fatalf("killReason = %q, want %q (first write must win)", got, killReasonWatchdog)
+	}
+}
+
+// TestRunClaudeStream_EmptyResultIsNotACliCrash is the END-TO-END version of
+// the fix: a fake CLI that emits a terminal result event with an empty body
+// and then keeps running (exactly what the Claude CLI does when a proxy
+// holds the connection open) must NOT be reported as "Claude 异常退出:
+// exit status 143".
+//
+// The fake installs a SIGTERM trap that exits 143 — the Claude CLI's own
+// SIGTERM exit code — so the test reproduces the real exit status too.
+func TestRunClaudeStream_EmptyResultIsNotACliCrash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group semantics differ on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-claude.sh")
+	body := "#!/bin/sh\n" +
+		"trap 'exit 143' TERM\n" +
+		"echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\"}'\n" +
+		"echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"\",\"num_turns\":0}'\n" +
+		"sleep 2\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	cmd := exec.Command("/bin/sh", script)
+	out := runClaudeStream(silentSink{}, cmd, "test-empty-result", nil, nil, nil, 0, withStallTimeout(30*time.Second))
+
+	if !out.resultEventSeen {
+		t.Fatalf("the result event was not seen; outcome=%+v", out)
+	}
+	if !out.emptyResult {
+		t.Fatalf("an empty result body must be flagged; outcome=%+v", out)
+	}
+	if out.resultSubtype != "success" {
+		t.Errorf("resultSubtype = %q, want success", out.resultSubtype)
+	}
+	if out.numTurns != 0 {
+		t.Errorf("numTurns = %d, want 0", out.numTurns)
+	}
+	if out.sawAssistantMsg {
+		t.Errorf("no assistant message was seen — sawAssistantMsg must stay false")
+	}
+	if out.killReason != killReasonPostResult {
+		t.Errorf("killReason = %q, want %q (the teardown kill after a result is ours)", out.killReason, killReasonPostResult)
+	}
+	if strings.Contains(out.errMsg, "Claude 异常退出") {
+		t.Errorf("an empty result is not a CLI crash; got:\n%s", out.errMsg)
+	}
+	if !strings.Contains(out.errMsg, "没有产出回答") {
+		t.Errorf("message should say the turn produced no answer; got:\n%s", out.errMsg)
+	}
+	if !strings.Contains(out.errMsg, "终止原因=post-result") {
+		t.Errorf("diagnostic should name our own teardown kill; got:\n%s", out.errMsg)
 	}
 }
