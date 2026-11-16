@@ -650,7 +650,7 @@ func TestBuildGenerationPromptExistingDocRule(t *testing.T) {
 
 	// No CLAUDE.md in the generation root → no rule.
 	empty := t.TempDir()
-	prompt, diskExists := h.buildGenerationPrompt("proj", empty, "")
+	prompt, diskExists := h.buildGenerationPrompt("proj", empty, "", false)
 	if diskExists {
 		t.Error("diskExists = true although the generation root has no CLAUDE.md")
 	}
@@ -663,7 +663,7 @@ func TestBuildGenerationPromptExistingDocRule(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(withDoc, "CLAUDE.md"), []byte("# 旧文档\n"), 0o644); err != nil {
 		t.Fatalf("write CLAUDE.md: %v", err)
 	}
-	prompt, diskExists = h.buildGenerationPrompt("proj", withDoc, "")
+	prompt, diskExists = h.buildGenerationPrompt("proj", withDoc, "", false)
 	if !diskExists {
 		t.Error("diskExists = false although the generation root has a CLAUDE.md")
 	}

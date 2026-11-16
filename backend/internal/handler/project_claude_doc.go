@@ -473,9 +473,13 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 // file the model chose to read) and that it must re-derive the document
 // from the code. genRoot is the directory the CLI runs in, so it — not the
 // user's checkout — decides whether such a file is in reach.
-func (h *ProjectClaudeDocHandler) buildGenerationPrompt(projectName, genRoot, focus string) (string, bool) {
+//
+// inSnapshot says the generation root is a throwaway worktree of the synced
+// base branch; the prompt then forbids the model from documenting the
+// snapshot itself (see prompt.claudeDocSnapshotRule).
+func (h *ProjectClaudeDocHandler) buildGenerationPrompt(projectName, genRoot, focus string, inSnapshot bool) (string, bool) {
 	diskDocExists := service.DiskClaudeDocExists(genRoot)
-	return promptpkg.BuildClaudeDocGenerationPrompt(projectName, focus, diskDocExists), diskDocExists
+	return promptpkg.BuildClaudeDocGenerationPrompt(projectName, focus, diskDocExists, inSnapshot), diskDocExists
 }
 
 // runGenerate is the background worker behind POST /generate.
@@ -497,8 +501,9 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 	//
 	// The generation is pinned to the fetched commit in a throwaway
 	// worktree, so the user's working tree is never touched.
-	genRoot, cleanup := h.prepareGenerationRoot(job, p, projectPath)
-	defer cleanup()
+	gen := h.prepareGenerationRoot(job, p, projectPath)
+	defer gen.cleanup()
+	genRoot := gen.Dir
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在分析项目结构（只读探索，不会修改任何文件）..."})
 
@@ -511,7 +516,7 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 	//
 	// The flag describes the GENERATION ROOT (the cwd the CLI runs in), not
 	// the user's checkout: that is where the CLI picks the file up from.
-	promptText, diskDocExists := h.buildGenerationPrompt(p.Name, genRoot, focus)
+	promptText, diskDocExists := h.buildGenerationPrompt(p.Name, genRoot, focus, gen.Snapshot)
 	if diskDocExists {
 		job.Append(store.LogLine{Type: "message",
 			Content: "ℹ️ 仓库内已存在 CLAUDE.md：已要求模型以代码为准重新推导，而不是照抄既有文档。"})
@@ -545,6 +550,14 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 
 	out := runClaudeStream(jobSink{job}, cmd, "claude-doc", nil, nil, nil, 0, withStallTimeout(claudeDocStallTimeout))
 	content := normalizeClaudeDocContent(out.finalResult)
+	// The run happened in a throwaway worktree, so the document may carry
+	// the snapshot's own traces (its temporary path, the `.git` indirection
+	// a linked worktree carries). Those are statements about the scratch
+	// checkout — wrong for the user's checkout and meaningless for the
+	// project — so they are scrubbed before the document is stored.
+	if gen.Snapshot {
+		content = sanitizeClaudeDocSnapshotArtifacts(content, genRoot)
+	}
 	if strings.TrimSpace(content) == "" {
 		// No usable document. The stream's own error message is the better
 		// diagnosis when there is one (timeout, stale session, CLI crash);
@@ -613,7 +626,7 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 // commit SHA and subject, and how far the checkout is from the pinned ref.
 // The user needs those numbers to judge whether the document is based on the
 // code they expected.
-func (h *ProjectClaudeDocHandler) prepareGenerationRoot(job *store.Job, p *model.Project, projectPath string) (string, func()) {
+func (h *ProjectClaudeDocHandler) prepareGenerationRoot(job *store.Job, p *model.Project, projectPath string) claudeDocGenRoot {
 	noop := func() {}
 	emit := func(s string) {
 		if job != nil && strings.TrimSpace(s) != "" {
@@ -639,16 +652,39 @@ func (h *ProjectClaudeDocHandler) prepareGenerationRoot(job *store.Job, p *model
 			info.Note = "未找到可用的主分支引用，基于当前工作目录生成"
 		}
 		emit("ℹ️ " + info.Note)
-		return projectPath, noop
+		return claudeDocGenRoot{Dir: projectPath, cleanup: noop}
 	}
 
 	dir, cleanup, err := claudeDocGenerationRoot(projectPath, info.Ref)
 	if err != nil {
 		emit("ℹ️ 创建独立工作区失败，改用当前工作目录生成：" + err.Error())
-		return projectPath, noop
+		return claudeDocGenRoot{Dir: projectPath, cleanup: noop}
 	}
 	emit("🗂 已在独立工作区基于 " + info.Ref + " @ " + shortSHA(info.RefSHA) + " 生成：" + dir)
-	return dir, cleanup
+	return claudeDocGenRoot{Dir: dir, Snapshot: true, Ref: info.Ref, RefSHA: info.RefSHA, cleanup: cleanup}
+}
+
+// claudeDocGenRoot is where a generation run happens.
+//
+// Snapshot is true when Dir is the throwaway worktree pinned to the synced
+// base-branch commit — the run then has to be told not to document the
+// snapshot, and the stored document has to be scrubbed of the snapshot's
+// own paths (a linked worktree's `.git` is a file pointing at the real
+// repository's metadata, and the model faithfully writes that down).
+//
+// cleanup removes the worktree; it is always safe to call.
+type claudeDocGenRoot struct {
+	// Dir is the directory the claude CLI runs in.
+	Dir string
+	// Snapshot marks Dir as a throwaway worktree rather than the user's
+	// own checkout.
+	Snapshot bool
+	// Ref / RefSHA name the commit the snapshot is pinned to (empty when
+	// the run fell back to the local checkout).
+	Ref    string
+	RefSHA string
+
+	cleanup func()
 }
 
 // stripCodeFence removes a surrounding ```markdown fence if the model added

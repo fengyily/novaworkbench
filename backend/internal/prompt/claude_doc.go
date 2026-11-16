@@ -86,10 +86,17 @@ func truncateClaudeDoc(content string) string {
 //  3. when the repository already ships a CLAUDE.md, the model is told
 //     that the CLI auto-loaded it and that it must NOT be copied.
 //
-// diskDocExists must describe the directory the model will actually see
+// DiskDocExists must describe the directory the model will actually see
 // (the generation root), not the user's checkout — that is where the CLI
 // picks the file up from.
-func BuildClaudeDocGenerationPrompt(projectName, focus string, diskDocExists bool) string {
+//
+// InSnapshot tells the model that the generation root is a THROWAWAY
+// snapshot of the base branch (a linked worktree) rather than the user's
+// own checkout. Without that instruction the model faithfully documents
+// what it sees — including the scratch directory path and the `.git`
+// indirection a linked worktree carries — and those details then live
+// forever in a document that is injected into every later AI stage.
+func BuildClaudeDocGenerationPrompt(projectName, focus string, diskDocExists, inSnapshot bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("请为项目「%s」生成一份 CLAUDE.md（项目级 AI 开发指南）。\n\n", strings.TrimSpace(projectName)))
 	b.WriteString("## 探索要求\n")
@@ -101,6 +108,9 @@ func BuildClaudeDocGenerationPrompt(projectName, focus string, diskDocExists boo
 	}
 	if diskDocExists {
 		b.WriteString(claudeDocExistingDocRule)
+	}
+	if inSnapshot {
+		b.WriteString(claudeDocSnapshotRule)
 	}
 	b.WriteString("\n## 文档结构\n")
 	b.WriteString("请按以下小节组织（缺少依据的小节可以省略，不要凭空编造）：\n")
@@ -140,3 +150,32 @@ const claudeDocExistingDocRule = "" +
 	"- 旧文档里的每一条命令、路径、分层约定都必须在仓库中找到依据，找不到就不要写；\n" +
 	"- 旧文档与代码冲突时以代码为准，并按代码的实际形态描述；\n" +
 	"- 旧文档中经核实仍然成立的约定可以保留，但要按代码的实际形态重写，不要复述原文。\n"
+
+// claudeDocSnapshotRule keeps the snapshot's own mechanics out of the
+// document.
+//
+// The generation runs in a throwaway worktree pinned to the freshly synced
+// base-branch commit — that is what makes "generate from the latest main"
+// possible without touching the user's working tree. But a linked worktree
+// is NOT shaped like a normal checkout: its `.git` is a FILE that points at
+// the real repository's worktree metadata, and it sits in a temporary
+// directory whose name is random.
+//
+// The model reads what it sees and writes it down. Left alone it produces a
+// document that says things like "the working copy at this path is a linked
+// worktree (.git is a file containing gitdir: /tmp/nova-claude-doc-XXXX)".
+// That text is: (a) a statement about the scratch checkout rather than about
+// the project, (b) wrong for the user's own checkout, and (c) carrying a
+// machine-specific path into an asset that is injected into every later AI
+// stage and survives every future regeneration.
+//
+// So the rule names the snapshot for what it is and bans describing it: the
+// document describes the PROJECT, as a normal checkout of the base branch
+// would look.
+const claudeDocSnapshotRule = "" +
+	"\n## 当前工作目录是临时快照（重要）\n" +
+	"你当前浏览的目录是该项目主分支某个提交的**临时只读快照**（linked worktree），不是用户日常使用的那份检出：\n" +
+	"- 这里的 `.git` 是一个指向真实仓库的**文件**而不是目录，这是快照机制造成的，不代表项目本身如此；\n" +
+	"- 不要把快照写进文档：不要提临时目录路径、`.git` 指向的 gitdir 路径、worktree / 快照 / 临时检出等字样；\n" +
+	"- 文档要描述的是**项目本身**（主分支上的代码与配置）。凡是涉及仓库形态的表述，按普通检出的形态来写（例如「仓库根目录」「`.git` 目录」），不要写「当前工作目录是 linked worktree」这类与项目无关的实现细节；\n" +
+	"- 只有当源码或配置中确实能核实到相关事实时（例如远程仓库地址、分支命名约定），才写与 Git 相关的项目约定。\n"

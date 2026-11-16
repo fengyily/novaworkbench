@@ -65,7 +65,7 @@ func TestBuildProjectClaudeDocBlockTruncates(t *testing.T) {
 // TestBuildClaudeDocGenerationPrompt pins the generation contract: read-only
 // exploration, no invented commands, and the body as the only output.
 func TestBuildClaudeDocGenerationPrompt(t *testing.T) {
-	p := BuildClaudeDocGenerationPrompt("NovaWorkbench", "重点关注后端分层", false)
+	p := BuildClaudeDocGenerationPrompt("NovaWorkbench", "重点关注后端分层", false, false)
 	for _, want := range []string{
 		"NovaWorkbench",
 		"重点关注后端分层",
@@ -97,12 +97,12 @@ func TestBuildClaudeDocGenerationPrompt(t *testing.T) {
 // model "there may be a CLAUDE.md" when the repository has none sends it
 // looking for a document that does not exist.
 func TestBuildClaudeDocGenerationPromptExistingDocRule(t *testing.T) {
-	without := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", false)
+	without := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", false, false)
 	if strings.Contains(without, "既有 CLAUDE.md") {
 		t.Errorf("the existing-document rule appears although the repo has no CLAUDE.md:\n%s", without)
 	}
 
-	with := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", true)
+	with := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", true, false)
 	for _, want := range []string{
 		"既有 CLAUDE.md",
 		"不要照抄它",
@@ -118,5 +118,41 @@ func TestBuildClaudeDocGenerationPromptExistingDocRule(t *testing.T) {
 	// paraphrased the old document.
 	if strings.Index(with, "既有 CLAUDE.md") > strings.Index(with, "## 文档结构") {
 		t.Errorf("the existing-document rule comes after the section layout:\n%s", with)
+	}
+}
+
+// TestBuildClaudeDocGenerationPromptSnapshotRule pins the rule that keeps
+// the generation snapshot out of the document.
+//
+// The generation runs in a throwaway worktree pinned to the synced base
+// branch. A linked worktree's `.git` is a FILE pointing at the real
+// repository's metadata, and the model reads what it sees: left alone it
+// documents the scratch checkout instead of the project, and the random
+// temp path ends up in an asset that is injected into every later stage.
+//
+// The rule must appear ONLY in a snapshot run — telling a model about a
+// snapshot that does not exist sends it looking for one.
+func TestBuildClaudeDocGenerationPromptSnapshotRule(t *testing.T) {
+	plain := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", false, false)
+	if strings.Contains(plain, "临时快照") {
+		t.Errorf("the snapshot rule appears although the run is not a snapshot:\n%s", plain)
+	}
+
+	snapshot := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", false, true)
+	for _, want := range []string{
+		"临时快照",
+		"linked worktree",
+		"不要把快照写进文档",
+		"gitdir",
+		"项目本身",
+	} {
+		if !strings.Contains(snapshot, want) {
+			t.Errorf("snapshot prompt missing %q:\n%s", want, snapshot)
+		}
+	}
+	// The rule must come before the section layout — the model has to read
+	// it while it is still deciding what to write.
+	if strings.Index(snapshot, "临时快照") > strings.Index(snapshot, "## 文档结构") {
+		t.Errorf("the snapshot rule comes after the section layout:\n%s", snapshot)
 	}
 }

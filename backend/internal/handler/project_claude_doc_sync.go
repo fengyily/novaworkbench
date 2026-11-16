@@ -255,3 +255,49 @@ func removeClaudeDocWorktreeDir(dir string) {
 		log.Printf("[claude-doc] failed to remove worktree dir %s: %v", dir, err)
 	}
 }
+
+// sanitizeClaudeDocSnapshotArtifacts removes the snapshot's own traces from a
+// generated document.
+//
+// The prompt already forbids the model from documenting the snapshot, but a
+// prompt is a request, not a guarantee: a linked worktree's `.git` is a FILE
+// pointing at the real repository's metadata, and that is exactly the kind
+// of detail a model dutifully writes down ("the working copy at this path is
+// a linked worktree (.git is a file containing gitdir: /tmp/nova-claude-doc-XXXX)").
+//
+// Such a line is a statement about the scratch checkout, not about the
+// project — and the document is stored forever and injected into every later
+// AI stage, so the random temp path would outlive the worktree by a long way.
+//
+// The scrubber is deliberately narrow: only lines that literally carry the
+// snapshot's path (or its random directory name) are dropped. A project that
+// legitimately uses git worktrees keeps its own wording — the marker is OUR
+// directory name, which no project would ever mention.
+func sanitizeClaudeDocSnapshotArtifacts(content, snapshotDir string) string {
+	if strings.TrimSpace(content) == "" || strings.TrimSpace(snapshotDir) == "" {
+		return content
+	}
+	markers := []string{snapshotDir, filepath.Base(snapshotDir)}
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	dropped := 0
+	for _, line := range lines {
+		hit := false
+		for _, m := range markers {
+			if m != "" && strings.Contains(line, m) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			dropped++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if dropped == 0 {
+		return content
+	}
+	log.Printf("[claude-doc] scrubbed %d line(s) describing the generation snapshot", dropped)
+	return strings.Join(kept, "\n")
+}

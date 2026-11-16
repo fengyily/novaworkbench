@@ -208,7 +208,8 @@ func TestPrepareGenerationRootStreamsCommitFacts(t *testing.T) {
 	}
 
 	job := h.jobs.Create(projID)
-	root, cleanup := h.prepareGenerationRoot(job, proj, clone)
+	gen := h.prepareGenerationRoot(job, proj, clone)
+	root := gen.Dir
 	if root == clone {
 		t.Error("the generation must not run in the user's working tree")
 	}
@@ -227,8 +228,111 @@ func TestPrepareGenerationRootStreamsCommitFacts(t *testing.T) {
 		}
 	}
 
-	cleanup()
+	gen.cleanup()
 	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
 		t.Errorf("the worktree dir survived the cleanup: %v", statErr)
 	}
+}
+
+// TestSanitizeClaudeDocSnapshotArtifacts pins the safety net behind the
+// snapshot rule.
+//
+// The prompt asks the model not to document the scratch worktree, but a
+// prompt is a request: a linked worktree's `.git` is a file pointing at the
+// real repository's metadata, and that is exactly the kind of detail a
+// model writes down. Such a line must not survive into the stored
+// document — it describes the scratch checkout, not the project, and it
+// carries a machine-specific path into an asset that lives forever.
+func TestSanitizeClaudeDocSnapshotArtifacts(t *testing.T) {
+	snapshotDir := "/var/folders/xx/T/nova-claude-doc-1665575766"
+	content := strings.Join([]string{
+		"# Project",
+		"",
+		"- The working copy at this path is a **linked worktree** (`.git` is a file containing `gitdir: /var/folders/xx/T/nova-claude-doc-1665575766/.git/worktrees/nova-claude-doc-1665575766`).",
+		"- The project uses `make build` to build.",
+		"- The origin remote is `https://example.com/acme/demo.git`.",
+		"",
+	}, "\n")
+
+	out := sanitizeClaudeDocSnapshotArtifacts(content, snapshotDir)
+	if strings.Contains(out, "nova-claude-doc-1665575766") {
+		t.Errorf("the snapshot path survived:\n%s", out)
+	}
+	if strings.Contains(out, "linked worktree") {
+		t.Errorf("the linked-worktree line survived:\n%s", out)
+	}
+	for _, keep := range []string{"# Project", "make build", "example.com/acme/demo.git"} {
+		if !strings.Contains(out, keep) {
+			t.Errorf("the scrubber dropped legitimate content %q:\n%s", keep, out)
+		}
+	}
+
+	// A document without snapshot traces is returned unchanged.
+	clean := "# Project\n\n- uses make build\n"
+	if got := sanitizeClaudeDocSnapshotArtifacts(clean, snapshotDir); got != clean {
+		t.Errorf("clean document was modified:\n%s", got)
+	}
+	// No snapshot dir → no scrubbing at all.
+	if got := sanitizeClaudeDocSnapshotArtifacts(content, ""); got != content {
+		t.Errorf("document was modified without a snapshot dir:\n%s", got)
+	}
+}
+
+// TestPrepareGenerationRootReportsSnapshot pins the flag the prompt and the
+// scrubber rely on: the pinned worktree is a snapshot, the fallback to the
+// user's checkout is not.
+func TestPrepareGenerationRootReportsSnapshot(t *testing.T) {
+	origin := newOriginRepo(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	if out, err := exec.Command("git", "clone", "-q", "-b", "main", origin, clone).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v\n%s", err, out)
+	}
+
+	d, err := db.Init(db.Config{Driver: string(db.SQLite), SQLitePath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	svc := service.NewProjectService(d, nil, nil)
+	const projID = "proj_claude_doc_snapshot_flag"
+	if _, err := d.Exec(
+		`INSERT INTO projects (id, name, local_path, default_branch) VALUES (?, ?, ?, ?)`,
+		projID, "snapshot project", clone, "main"); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	h := NewProjectClaudeDocHandler(svc, nil, store.NewJobStore(4))
+	proj, err := svc.Get(projID)
+	if err != nil {
+		t.Fatalf("svc.Get: %v", err)
+	}
+
+	gen := h.prepareGenerationRoot(h.jobs.Create(projID), proj, clone)
+	if !gen.Snapshot {
+		t.Errorf("Snapshot = false for a pinned worktree (dir=%q)", gen.Dir)
+	}
+	if gen.Ref == "" || gen.RefSHA == "" {
+		t.Errorf("Ref/RefSHA not reported: %q / %q", gen.Ref, gen.RefSHA)
+	}
+	gen.cleanup()
+
+	// A non-git project falls back to the local checkout — no snapshot.
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := d.Exec(`UPDATE projects SET local_path = ? WHERE id = ?`, plain, projID); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+	proj, err = svc.Get(projID)
+	if err != nil {
+		t.Fatalf("svc.Get: %v", err)
+	}
+	gen = h.prepareGenerationRoot(h.jobs.Create(projID), proj, plain)
+	if gen.Snapshot {
+		t.Errorf("Snapshot = true for a non-git fallback (dir=%q)", gen.Dir)
+	}
+	if gen.Dir != plain {
+		t.Errorf("Dir = %q, want the local checkout %q", gen.Dir, plain)
+	}
+	gen.cleanup()
 }
