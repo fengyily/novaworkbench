@@ -34,6 +34,10 @@ export const errors = {
   // document carries hand-edited content.
   MANUAL_EDIT_PROTECTED: 'This CLAUDE.md contains hand-edited content — regenerating or importing would overwrite it. Confirm and retry (the old version is kept in the history and can be restored)',
   REVISION_NOT_FOUND: 'That version does not exist (or was pruned)',
+  // Per-project admission gate for the CLAUDE.md generation: a second run
+  // would explore the same repository at the same time and overwrite the
+  // first run's result.
+  GENERATION_IN_PROGRESS: 'A CLAUDE.md generation for this project is already running — wait for it to finish before starting another',
   NETWORK: 'Network error, please try again later',
 } as const;
 

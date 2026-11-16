@@ -57,10 +57,18 @@ type ProjectClaudeDocHandler struct {
 	projectSvc *service.ProjectService
 	llm        *llm.Gateway
 	jobs       *store.JobStore
+	// genGate is the admission gate for the generation: one run per project
+	// at a time, plus a platform-wide cap. See project_claude_doc_gate.go.
+	genGate claudeDocGenGate
 }
 
 func NewProjectClaudeDocHandler(projectSvc *service.ProjectService, llmGateway *llm.Gateway, jobs *store.JobStore) *ProjectClaudeDocHandler {
-	return &ProjectClaudeDocHandler{projectSvc: projectSvc, llm: llmGateway, jobs: jobs}
+	return &ProjectClaudeDocHandler{
+		projectSvc: projectSvc,
+		llm:        llmGateway,
+		jobs:       jobs,
+		genGate:    claudeDocGenGate{globalCap: claudeDocGenerationConcurrency()},
+	}
 }
 
 // claudeDocResponse is the GET payload. `exists` is false (with an empty
@@ -426,8 +434,34 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusServiceUnavailable, "CLAUDE_CLI_MISSING", "未找到 claude CLI，无法生成 CLAUDE.md")
 		return
 	}
+	// Admission: one generation per project at a time. A second tab (or a
+	// double click that slipped through the disabled button) would start a
+	// second claude process exploring the same repository, and the two runs
+	// would race on the same document row — the later write silently wins,
+	// so the user would end up with whichever model happened to finish last.
+	// The slot is taken BEFORE the job is created, so a rejected request
+	// does not even burn a JobStore slot.
+	release, ok := h.genGate.tryAcquire(p.ID)
+	if !ok {
+		writeErrorSuggestion(w, http.StatusConflict, "GENERATION_IN_PROGRESS",
+			"该项目已有 CLAUDE.md 生成任务在运行中",
+			"等待当前生成结束后再试；重复触发只会让多个模型同时探索同一份仓库，最后写入的还会覆盖前一个结果。")
+		return
+	}
 	job := h.jobs.Create(p.ID)
-	go h.runGenerate(job, p, projectPath, body.Focus, body.OverwriteManual)
+	go func() {
+		// The slot is released on every exit path, including a panic: a
+		// leaked slot would block the project's next generation forever.
+		defer release()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[claude-doc] generation panicked for project %s: %v", p.ID, r)
+				job.Append(store.LogLine{Type: "error", Content: "❌ 生成过程异常终止: " + fmt.Sprint(r)})
+				job.Finish(1, store.JobError)
+			}
+		}()
+		h.runGenerate(job, p, projectPath, body.Focus, body.OverwriteManual)
+	}()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"job_id": job.ID})
 }
 
@@ -458,6 +492,22 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 	promptText := promptpkg.BuildClaudeDocGenerationPrompt(p.Name, focus)
 	ctx, cancel := context.WithTimeout(context.Background(), claudeDocGenerateTimeout)
 	defer cancel()
+
+	// Platform-wide admission: only a few generations may explore a
+	// repository at the same time. The slot is taken AFTER the base-branch
+	// sync (cheap) and BEFORE the claude run (expensive), so a queued
+	// project waits with a visible reason instead of piling up claude
+	// processes on the shared job slots.
+	waited, err := h.genGate.acquireGlobal(ctx)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 等待生成槽位超时: " + err.Error()})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if waited {
+		job.Append(store.LogLine{Type: "phase", Content: "⏳ 正在等待生成槽位（同时生成的 CLAUDE.md 数量已达上限）..."})
+	}
+	defer h.genGate.releaseGlobal()
 
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:  promptText,

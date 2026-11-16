@@ -38,6 +38,9 @@ export const errors = {
   // 在文档含人工编辑时必须先确认。
   MANUAL_EDIT_PROTECTED: '当前 CLAUDE.md 含有人工编辑的内容，重新生成/导入会覆盖它们，请确认后重试（旧版本会存入历史版本，可随时恢复）',
   REVISION_NOT_FOUND: '该历史版本不存在或已被清理',
+  // 同一项目的 CLAUDE.md 生成任务并发保护：重复触发只会让多个模型同时
+  // 探索同一份仓库，最后写入的还会覆盖前一个结果。
+  GENERATION_IN_PROGRESS: '该项目的 CLAUDE.md 生成任务正在运行中，请等待当前生成结束后再试',
   NETWORK: '网络错误，请稍后重试',
 } as const;
 
