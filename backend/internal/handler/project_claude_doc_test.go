@@ -276,6 +276,11 @@ func TestClaudeDocBlockNilServiceIsSafe(t *testing.T) {
 //     Here is a CLAUDE.md:") before the document. That lead-in must not be
 //     stored — the document is injected verbatim into every AI prompt, so a
 //     stray "here you go" paragraph would ride along forever.
+//
+// The cleanup may only remove formatting noise. Every "keep everything"
+// case below is a document the model wrote that the cleanup must NOT
+// truncate: a wrong cut DELETES document content, and the survivor is
+// stored in the DB and injected into every later stage.
 func TestNormalizeClaudeDocContent(t *testing.T) {
 	cases := []struct {
 		name string
@@ -311,6 +316,43 @@ func TestNormalizeClaudeDocContent(t *testing.T) {
 			name: "a document ending with a code block keeps its fences",
 			in:   "# smoke\n\n## Commands\n\n```sh\nmake build\n```",
 			want: "# smoke\n\n## Commands\n\n```sh\nmake build\n```",
+		},
+		// ── The regression this rewrite exists for ──
+		//
+		// A "# " line inside a code fence is a shell / YAML comment, NOT
+		// the document title. The previous implementation cut at it and
+		// threw away everything before it — the whole document was
+		// reduced to the one comment line inside the fence.
+		{
+			name: "a hash comment inside a code fence is not a title",
+			in:   "## Project Overview\n\n正文\n\n```bash\n# install deps\nmake build\n```\n\n## Conventions\n\n分层约定。\n",
+			want: "## Project Overview\n\n正文\n\n```bash\n# install deps\nmake build\n```\n\n## Conventions\n\n分层约定。",
+		},
+		{
+			// The cut is made at an H1 title only. This document has no H1
+			// (its first heading is an H2), so there is no title to cut at
+			// and the lead-in stays — losing a two-sentence lead-in is
+			// acceptable, losing the first paragraph of a real document is
+			// not. The hash comment inside the fence is untouched either
+			// way, which is what this case is really about.
+			name: "a hash comment in a fence, preceded by a lead-in",
+			in:   "Here is the guide.\n\n## Project Overview\n\n```bash\n# install deps\nmake build\n```\n\n## Conventions\n\n分层约定。",
+			want: "Here is the guide.\n\n## Project Overview\n\n```bash\n# install deps\nmake build\n```\n\n## Conventions\n\n分层约定。",
+		},
+		{
+			name: "a document that starts with a paragraph keeps it",
+			in:   "This project is a build tool.\n\n```sh\nmake build\n```",
+			want: "This project is a build tool.\n\n```sh\nmake build\n```",
+		},
+		{
+			name: "a lead-in followed by a list is document content",
+			in:   "- one\n- two\n\n# smoke\n\n## Tech Stack\n\nGo.",
+			want: "- one\n- two\n\n# smoke\n\n## Tech Stack\n\nGo.",
+		},
+		{
+			name: "an unterminated fence keeps its content",
+			in:   "# smoke\n\n## Commands\n\n```sh\nmake build",
+			want: "# smoke\n\n## Commands\n\n```sh\nmake build",
 		},
 	}
 	for _, tc := range cases {

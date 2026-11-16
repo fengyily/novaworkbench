@@ -345,48 +345,152 @@ func stripCodeFence(s string) string {
 // before the document ("This repository is essentially a stub … Here is a
 // CLAUDE.md:") even though the contract asks for the body only.
 //
-// The cut is made at the first Markdown H1 ("# Title" at the start of a
-// line) — a CLAUDE.md always opens with its title, so anything before it is
-// the model's commentary, not the document. When there is no H1 (the model
-// started straight at "## Project Overview"), nothing is removed.
+// The rules are deliberately conservative, because a wrong cut DELETES
+// document content and the result is stored in the DB and injected into
+// every later stage:
+//
+//  1. the candidate title must be a Markdown H1 ("# Title" at the start of a
+//     line) that sits OUTSIDE any code fence — a "# install deps" comment
+//     inside a ```bash block is not a title, and treating it as one would
+//     truncate the document to that comment;
+//  2. no fence may appear before the title — cutting there would drop the
+//     fenced content;
+//  3. everything before the title must be plain prose (no heading, list,
+//     table or blockquote of its own) — otherwise that text belongs to the
+//     document and must be kept.
+//
+// When any rule fails the document is returned unchanged. Losing a
+// two-sentence lead-in is acceptable; losing half the document is not.
 func stripPreamble(s string) string {
 	lines := strings.Split(s, "\n")
+	inFence := false
+	fenceSeen := false
 	for i, line := range lines {
-		if strings.HasPrefix(line, "# ") {
-			if i == 0 {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			fenceSeen = true
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if !strings.HasPrefix(line, "# ") {
+			continue
+		}
+		// Candidate title at line i.
+		if i == 0 {
+			return s
+		}
+		if fenceSeen {
+			// A fence precedes the title — cutting here would drop it.
+			return s
+		}
+		for _, pre := range lines[:i] {
+			p := strings.TrimSpace(pre)
+			if p == "" {
+				continue
+			}
+			if !isPlainProseLine(p) {
 				return s
 			}
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 		}
+		return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 	}
 	return s
 }
 
-// normalizeClaudeDocContent turns the model's raw answer into the document
-// body that gets stored.
-func normalizeClaudeDocContent(raw string) string {
-	t := strings.TrimSpace(stripPreamble(stripCodeFence(raw)))
-	// A preamble in front of a FENCED body survives the preamble cut with a
-	// dangling closing fence at the end. Drop it only when the fence count
-	// is odd — a document that legitimately ends with a code block has an
-	// even number of fence lines and must keep them.
-	if fenceLineCount(t)%2 == 1 {
-		if idx := strings.LastIndex(t, "```"); idx >= 0 {
-			t = strings.TrimSpace(t[:idx])
+// unwrapWrappedFence removes a code fence that wraps the whole answer.
+//
+// The model sometimes wraps the document in a ```markdown fence. Unwrapping
+// it is only safe when the fence is unambiguous:
+//
+//   - the answer holds exactly ONE fence pair;
+//   - everything before the opening fence is plain prose (a document that
+//     starts with a paragraph and then shows a code block must keep that
+//     paragraph);
+//   - nothing follows the closing fence;
+//   - the fenced content starts with a Markdown heading, i.e. it really is
+//     the document and not a snippet.
+//
+// Otherwise the answer is returned unchanged.
+func unwrapWrappedFence(s string) string {
+	lines := strings.Split(s, "\n")
+	var fenceIdx []int
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			fenceIdx = append(fenceIdx, i)
 		}
 	}
-	return t
+	if len(fenceIdx) != 2 {
+		return s
+	}
+	openIdx, closeIdx := fenceIdx[0], fenceIdx[1]
+	for _, pre := range lines[:openIdx] {
+		p := strings.TrimSpace(pre)
+		if p == "" {
+			continue
+		}
+		if !isPlainProseLine(p) {
+			return s
+		}
+	}
+	for _, post := range lines[closeIdx+1:] {
+		if strings.TrimSpace(post) != "" {
+			return s
+		}
+	}
+	content := strings.TrimSpace(strings.Join(lines[openIdx+1:closeIdx], "\n"))
+	if !startsWithHeading(content) {
+		return s
+	}
+	return content
 }
 
-// fenceLineCount counts the lines that open or close a code fence.
-func fenceLineCount(s string) int {
-	n := 0
-	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			n++
-		}
+// isPlainProseLine reports whether a line is ordinary prose — i.e. it carries
+// no Markdown structure of its own (heading, bullet, ordered list item,
+// blockquote, table row or setext underline).
+func isPlainProseLine(p string) bool {
+	if p == "" {
+		return false
 	}
-	return n
+	switch p[0] {
+	case '#', '-', '*', '+', '>', '|', '=':
+		return false
+	}
+	// Ordered-list marker ("1. ", "2) ").
+	if len(p) >= 3 && p[0] >= '0' && p[0] <= '9' && (p[1] == '.' || p[1] == ')') && (p[2] == ' ' || p[2] == '\t') {
+		return false
+	}
+	return true
+}
+
+// startsWithHeading reports whether the text opens with a Markdown heading.
+func startsWithHeading(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		return strings.HasPrefix(t, "# ") || strings.HasPrefix(t, "## ")
+	}
+	return false
+}
+
+// normalizeClaudeDocContent turns the model's raw answer into the document
+// body that gets stored.
+//
+// Every step here may only REMOVE formatting noise (a wrapping fence, a
+// chat-style lead-in) — never document content. The whole-answer fence is
+// unwrapped first; the lead-in cut then runs on what is left, and the
+// remaining fence pair is unwrapped afterwards (a lead-in in front of a
+// fenced body is dropped by that unwrap); the lead-in cut runs once more
+// in case the unwrap exposed a title.
+func normalizeClaudeDocContent(raw string) string {
+	t := stripCodeFence(raw)
+	t = stripPreamble(t)
+	t = unwrapWrappedFence(t)
+	t = stripPreamble(t)
+	return strings.TrimSpace(t)
 }
 
 // StreamJob streams the generation job's progress.
