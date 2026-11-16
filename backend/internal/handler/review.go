@@ -744,7 +744,7 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 
 	reviewUsage := h.newReviewUsage(job.ID, rv, modelName)
 
-	taskPrompt := buildReviewTaskPrompt(rv, headRef, baseRef, manifest != "")
+	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "")
 
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:         taskPrompt,
@@ -987,10 +987,25 @@ func appendManifest(systemPrompt, manifest string) string {
 // 改动目标 the reviewer grades 目标达成 against, while the PR entry point's
 // single-line field is 额外审查要求. One column, two prompt slots — so a re-run
 // from history keeps the text either way, correctly labelled.
-func buildReviewTaskPrompt(rv *model.CodeReview, headRef, baseRef string, hasAttachments bool) string {
+//
+// The project-level CLAUDE.md is appended here as well (project is the
+// project's row, used for the disk check). The reviewer needs the project's
+// conventions: the checklist's 「与项目既有约定是否一致」 dimension is graded
+// against them, and the injected block itself promises that 代码审查 follows
+// them. Without it, the project-level Review graded the diff against
+// conventions it had never seen while the requirement-level Review — which
+// runs through the sub-task runner — did see them.
+//
+// A project without a document yields an empty block, so the prompt stays
+// byte-for-byte identical to what it was before the feature existed.
+func (h *ReviewHandler) buildReviewTaskPrompt(rv *model.CodeReview, project *model.Project, headRef, baseRef string, hasAttachments bool) string {
 	description, extra := rv.Description, ""
 	if rv.ReviewType == model.ReviewTypePR {
 		description, extra = "", rv.Description
+	}
+	diskPath := ""
+	if project != nil {
+		diskPath = project.LocalPath
 	}
 	return prompt.BuildReviewPrompt(prompt.ReviewPromptInput{
 		ReviewType:        rv.ReviewType,
@@ -1003,7 +1018,22 @@ func buildReviewTaskPrompt(rv *model.CodeReview, headRef, baseRef string, hasAtt
 		Description:       description,
 		ExtraRequirements: extra,
 		HasAttachments:    hasAttachments,
+		ProjectContext:    h.projectClaudeDocBlock(rv.ProjectID, diskPath),
 	})
+}
+
+// projectClaudeDocBlock renders the project-level CLAUDE.md injection block.
+//
+// It is the single entry point for the review surfaces (the first review and
+// the regeneration), so the two can never disagree about whether the reviewer
+// sees the project's conventions. An unwired project service (unit tests) or
+// a project without a document yields an empty string — the caller then
+// appends nothing and the prompt is unchanged.
+func (h *ReviewHandler) projectClaudeDocBlock(projectID, diskPath string) string {
+	if h.projectSvc == nil {
+		return ""
+	}
+	return claudeDocBlock(h.projectSvc, projectID, diskPath)
 }
 
 // buildReviewOutcome maps a finished report onto the row we persist.

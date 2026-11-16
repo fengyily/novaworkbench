@@ -232,7 +232,7 @@ func (h *ReviewHandler) runRegenerate(job *store.Job, rv *model.CodeReview, proj
 	hasAttachments := attachManifestFor(h.attachSvc, rv.ID, "") != ""
 	spec := reviewTurnSpec{
 		scope:             "review-regenerate",
-		prompt:            func(resumed bool) string { return regeneratePrompt(rv, history, resumed, hasAttachments) },
+		prompt:            func(resumed bool) string { return h.regeneratePrompt(rv, project, history, resumed, hasAttachments) },
 		usage:             func() *usageCtx { return h.newRegenerateUsage(job.ID, rv, modelName) },
 		resumePhase:       "🔗 续接本次 Review 的会话上下文...",
 		staleNotice:       "⚠️ 原 Review 会话已失效，改用「上一版报告 + 追问对话 + 仓库代码」重新生成",
@@ -361,12 +361,23 @@ func (h *ReviewHandler) followupHistoryCapped(reviewID string) []prompt.Followup
 // regeneratePrompt renders the task prompt for one regeneration attempt.
 // resumed selects the short form (the session still holds the diff and the
 // report) or the self-contained one (report + thread pasted in).
-func regeneratePrompt(rv *model.CodeReview, history []prompt.FollowupTurn, resumed, hasAttachments bool) string {
+//
+// The project-level CLAUDE.md comes along: the regenerated report REPLACES
+// the old one in front of the user, so it has to be graded against the same
+// conventions as the first report. The self-contained form in particular
+// rebuilds the whole context from scratch — without the conventions it would
+// quietly re-grade the change against rules the first review never used.
+func (h *ReviewHandler) regeneratePrompt(rv *model.CodeReview, project *model.Project, history []prompt.FollowupTurn, resumed, hasAttachments bool) string {
+	diskPath := ""
+	if project != nil {
+		diskPath = project.LocalPath
+	}
 	in := prompt.RegeneratePromptInput{
 		Resumed:        resumed,
 		ReviewType:     rv.ReviewType,
 		History:        history,
 		HasAttachments: hasAttachments,
+		ProjectContext: h.projectClaudeDocBlock(rv.ProjectID, diskPath),
 	}
 	if !resumed {
 		in.Branch = rv.Branch

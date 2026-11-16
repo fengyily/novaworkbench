@@ -137,7 +137,7 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	manifest := attachManifestFor(h.attachSvc, rv.ID, attachDir)
 	systemPrompt := appendManifest(rolePrompt, manifest)
 
-	taskPrompt := buildReviewTaskPrompt(rv, headRef, baseRef, manifest != "")
+	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "")
 
 	ignoreLocal := true
 	opts := llm.StreamOpts{
