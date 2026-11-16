@@ -296,6 +296,20 @@ body.no-scroll {
   .btn-row-2col > .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
 }
 
+/* Desktop / mobile visibility helpers. A page that renders two DOM trees
+   for the same data (table on wide screens, cards on phones) marks them
+   with these classes instead of hand-rolling a media query per file.
+   Defined globally because the pair is a shared vocabulary — a page that
+   ships its own copy drifts from the others the moment the breakpoint
+   changes. */
+@media (max-width: 768px) {
+  .desktop-only { display: none !important; }
+}
+
+@media (min-width: 769px) {
+  .mobile-only { display: none !important; }
+}
+
 /* Tap-target utility for non-button interactive surfaces (nav items, tab
    buttons, list rows). Buttons get the global .btn min-height automatically;
    this is for the rest. */

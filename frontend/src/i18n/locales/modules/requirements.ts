@@ -45,6 +45,10 @@ export const requirements = {
     calendar: '日历',
     searchAriaLabel: '按标题或描述搜索',
     clearSearch: '清除搜索',
+    // Accessible name of a mobile requirement card. The card is a
+    // role="button" (it hosts nested controls), so it needs a label of
+    // its own for screen readers.
+    openCardAria: '打开需求「{{title}}」',
     // Has-pending-schedule affordance rendered by RequirementsList rows.
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: '定时执行 · {{time}} · {{rel}}',
@@ -1006,6 +1010,11 @@ export const requirements = {
     errSelfHasChildren: '该需求自身有子需求，请先将子需求移出',
     parentLabel: '所属主需求',
     parentNone: '无',
+    // Mobile card badges: the ordinal marks a sub-requirement's position
+    // inside its master's child list; parentOf names the master when the
+    // card is detached from its group (pagination split the tree).
+    childOrdinal: '第 {{n}} 个子需求',
+    parentOf: '所属主需求：{{title}}',
     parentDisabledHint: '该需求有子需求，请先将子需求移出后再设置主需求',
     parentFailed: '设置主需求失败：{{msg}}',
   },

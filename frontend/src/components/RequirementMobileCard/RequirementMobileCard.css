@@ -1,0 +1,273 @@
+/* ── Requirement mobile card ───────────────────────────────────────
+   The phone rendering of a requirement row, shared by the cross-project
+   list (/requirements) and the project detail tab. The class names are
+   the ones RequirementsList.css already used, so the card looks exactly
+   the same as before the extraction — the rules only MOVED here.
+
+   The card root is a <div role="button">, not a <button>: the project tab
+   nests the "create a sub-requirement" trigger (a real <button>) in the
+   title row. Everything that used to rely on the native button
+   (appearance reset, text-align) is kept explicit below. */
+
+.req-cards-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* A flex column's items default to min-width:auto, so a long title
+     would widen the whole column and push a horizontal scrollbar onto
+     the page. */
+  min-width: 0;
+}
+
+.req-card-mobile {
+  /* Reset native button styles so the card looks like a div. */
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* A faint left rail picks up the kind color so the user can scan a
+     list of cards by color without reading the badge. Mirrors the
+     .model-select-card stage-rail pattern. */
+  border-left: 3px solid var(--color-border, #E2E8F0);
+  transition: transform 120ms ease, box-shadow 120ms ease,
+              border-color 120ms ease, background-color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.req-card-mobile.kind-issue       { border-left-color: #EF4444; }
+.req-card-mobile.kind-requirement { border-left-color: #4F46E5; }
+.req-card-mobile.kind-idea        { border-left-color: #F59E0B; }
+
+.req-card-mobile:hover {
+  background: var(--color-hover, #F1F5F9);
+}
+
+.req-card-mobile:active {
+  /* Tiny press-down so the user gets tactile feedback on tap. */
+  transform: scale(0.985);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+/* Keyboard focus: the card is a role="button", so it needs its own
+   focus ring — the native one belonged to the <button> it replaced. */
+.req-card-mobile:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
+.req-card-mobile-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.req-card-mobile-head .kind-badge,
+.req-card-mobile-head .status-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* "Which child of its master is this" badge. Pinned to the right of the
+   header row so a long group of sub-requirements can be scanned. */
+.req-card-mobile-ordinal {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-text-secondary, #64748B);
+  background: var(--color-hover, #F1F5F9);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.req-card-mobile-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-text, #1E293B);
+  /* Inline flex row so mark chips sit on the same line as the title (marked
+     cards stay one row; unmarked cards show only the title). The title text
+     itself stays capped via .req-row-title-text-label so a long title
+     doesn't blow up the card. */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* The title label. Declared in full (not inherited from the desktop
+   table's rules) so the card renders identically on a page that never
+   loads RequirementsList.css. */
+.req-card-mobile-title > .req-row-title-text-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  word-break: break-word;
+  text-overflow: clip;
+}
+
+/* Two-line variant for the project tab, where a compact card is the
+   whole point (six to eight rows per screen). */
+.req-card-mobile.is-title-2line .req-card-mobile-title > .req-row-title-text-label {
+  -webkit-line-clamp: 2;
+}
+
+/* Wrapper for controls appended to the title row (the "create a
+   sub-requirement" trigger). align-self keeps the control on the FIRST
+   title line — without it a wrapped title pushes the button onto a
+   third line of its own. */
+.req-card-mobile-title-extra {
+  margin-left: auto;
+  align-self: flex-start;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+/* When the title row carries a trailing control, the title text gives up
+   the space that control needs. Without this cap the title's intrinsic
+   width pushes the control onto a line of its own — the button then sits
+   below the title instead of at its right. */
+.req-card-mobile-title.has-extra > .req-row-title-text-label {
+  max-width: calc(100% - 26px);
+}
+
+/* "Belongs to <master>" line. Only rendered when the master is not on
+   the current page (pagination splits the tree), so an orphaned child
+   still says who owns it. */
+.req-card-mobile-parent {
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.req-card-mobile-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+  min-width: 0;
+}
+
+.req-card-mobile-project {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.req-card-mobile-spacer {
+  flex: 0 0 auto;
+  width: 4px;
+}
+
+/* Mobile card chip for the Agent Server. Only rendered when the requirement
+   ran on a remote target (local runs render as the absence of the chip so
+   the tight footer row stays uncluttered). Shares the violet palette with
+   the desktop .agent-server-tag. */
+.req-card-mobile-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7C3AED;
+}
+
+/* Token / cost figures. Plain text colour — the violet agent chip is
+   reserved for the execution target so the footer stays readable. */
+.req-card-mobile-usage {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-text-secondary, #64748B);
+}
+
+.req-card-mobile-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* ── Mobile layout tweaks (≤768px) ───────────────────────────────── */
+
+@media (max-width: 768px) {
+  /* Sub-requirements (mobile): toggle sits beside the card; children indent
+     12px with a 3px group rail and the card itself picks up the same
+     tinted background as the desktop group block. Same card styling as
+     top-level cards. */
+  .req-card-mobile-wrap {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    /* Same reason as .req-cards-mobile: a flex item's automatic minimum
+       size is its content, so a long title would stretch the row. */
+    min-width: 0;
+  }
+  .req-card-mobile-wrap > .req-card-mobile {
+    flex: 1 1 auto;
+    min-width: 0;
+    /* Overrides the card's own width:100% — inside a flex row the card
+       must take the free space, not push the row wider. */
+    width: auto;
+  }
+  .req-card-mobile-wrap > .req-tree-toggle,
+  .req-card-mobile-wrap > .req-tree-spacer,
+  .req-card-mobile-wrap > .req-tree-cell {
+    /* The card's first line starts 12px down (padding: 12px 14px), so
+       the toggle lands on the same line as the kind badge. */
+    margin-top: 12px;
+  }
+  .req-card-mobile-child {
+    /* wrap 上的轨道：桌面端色轨的移动端对应物 */
+    margin-left: 12px;
+    border-left: 3px solid var(--req-group-rail, var(--color-border, #E2E8F0));
+    padding-left: 8px;
+  }
+  /* tint 落在卡片本体（wrap 会被卡片的不透明白底盖住），
+     但保留卡片自己的 kind 色左边框 */
+  .req-card-mobile-child .req-card-mobile { background: var(--req-group-bg); }
+  .req-card-mobile-child .req-card-mobile:hover { background: var(--req-group-bg-hover); }
+
+  /* Selection box placement. The checkbox is a SIBLING inside
+     .req-card-mobile-wrap rather than a descendant of the card (an
+     <input> inside the card would be invalid HTML). It sits first so
+     masters (which also render the tree cell) and children (which don't)
+     keep the box on one vertical line. */
+  .req-card-mobile-wrap > .rb-check {
+    /* The card's first line starts 12px down (padding: 12px 14px), so
+       the box lands on the same line as the kind badge. */
+    margin-top: 12px;
+  }
+  /* Selected card: tint + a primary ring. The card already owns its
+     left edge for the kind colour rail, so the selected state uses a
+     ring rather than a second border that would fight that colour. */
+  .req-card-mobile-wrap.rb-selected .req-card-mobile {
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    box-shadow: inset 0 0 0 1px var(--color-primary);
+  }
+  .req-card-mobile-wrap.rb-selected .req-card-mobile:hover {
+    background: color-mix(in srgb, var(--color-primary) 13%, transparent);
+  }
+}

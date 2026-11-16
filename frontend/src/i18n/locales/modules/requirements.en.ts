@@ -45,6 +45,10 @@ export const requirements = {
     calendar: 'Calendar',
     searchAriaLabel: 'Search by title or description',
     clearSearch: 'Clear search',
+    // Accessible name of a mobile requirement card. The card is a
+    // role="button" (it hosts nested controls), so it needs a label of
+    // its own for screen readers.
+    openCardAria: 'Open requirement "{{title}}"',
     // Has-pending-schedule affordance rendered by RequirementsList rows.
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: 'Scheduled · {{time}} · {{rel}}',
@@ -943,6 +947,11 @@ export const requirements = {
     errSelfHasChildren: 'This requirement has sub-requirements; move them out first',
     parentLabel: 'Parent requirement',
     parentNone: 'None',
+    // Mobile card badges: the ordinal marks a sub-requirement's position
+    // inside its master's child list; parentOf names the master when the
+    // card is detached from its group (pagination split the tree).
+    childOrdinal: 'Child #{{n}}',
+    parentOf: 'Part of: {{title}}',
     parentDisabledHint: 'This requirement has sub-requirements; move them out before assigning a parent',
     parentFailed: 'Failed to set parent: {{msg}}',
   },

@@ -15,6 +15,7 @@ import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import RequirementMobileCard from '../components/RequirementMobileCard/RequirementMobileCard';
 import { RequirementQuickCreate } from '../components/RequirementQuickCreate';
 import { RequirementQAPeek } from '../components/RequirementQAPeek';
 import {
@@ -1388,6 +1389,156 @@ export default function ProjectDetail() {
     );
   });
 
+  // ── Mobile card list (requirements tab) ───────────────────────────
+  // The desktop table has eleven columns; below 768px the generic
+  // `.table-cards` fallback turned every column into its own "label →
+  // value" row, so one requirement ate a whole screen. The phone gets a
+  // real card instead, rendered by the shared RequirementMobileCard
+  // component (the cross-project list uses the same one).
+  //
+  // The card keeps what a phone can actually show — kind / status badges,
+  // the title, the execution environment and the last update — and drops
+  // what it cannot: the 20-char id, the Q&A counter and the absolute
+  // creation timestamp.
+  const renderProjectReqMobileCard = (
+    item: { req: Requirement; depth: number; last?: boolean; open?: boolean },
+  ) => {
+    const { req, depth } = item;
+
+    // Which child of its master is this? The ordinal is the position
+    // inside the master's child list, so a long group can be scanned
+    // ("② is the one about the search box").
+    const siblings = req.parent_id ? reqChildrenByParent.get(req.parent_id) : undefined;
+    const childOrdinal = depth > 0 && req.parent_id && siblings
+      ? siblings.findIndex(s => s.id === req.id) + 1
+      : 0;
+
+    // The master may live on ANOTHER page: pagination runs over the
+    // tree rows, so a master and its children are routinely split. A
+    // child whose master is not on this page has lost its group and
+    // must name its owner.
+    const parentOnPage = !req.parent_id
+      || pagedReqRowIds.has(req.parent_id);
+    const parentRow = req.parent_id ? reqs.find(r => r.id === req.parent_id) : undefined;
+    const parentTitle = depth > 0 && !parentOnPage && parentRow
+      ? (parentRow.title || parentRow.id)
+      : undefined;
+
+    return (
+      <RequirementMobileCard
+        key={req.id}
+        req={req}
+        depth={depth}
+        selected={reqSelection.isSelected(req.id)}
+        titleLines={2}
+        childOrdinal={childOrdinal || undefined}
+        parentTitle={parentTitle}
+        cardId={depth > 0 && req.parent_id && siblings?.[0]?.id === req.id
+          ? `pr-req-children-${req.parent_id}`
+          : undefined}
+        /* Selection box and tree toggle stay SIBLINGS of the card — the
+           card is a role="button" and an <input> nested in one is
+           invalid HTML whose click the card would swallow. */
+        leading={
+          <>
+            <RowSelectBox
+              checked={reqSelection.isSelected(req.id)}
+              label={t('requirements.batch.selectRowAria', { title: req.title || t('requirements.list.noTitle') })}
+              onToggle={() => reqSelection.toggle(req.id)}
+            />
+            {depth === 0 && renderReqTreeToggle(req, depth)}
+          </>
+        }
+        /* Header badges: the priority dot rides right before the kind
+           badge (the same pairing as the desktop Type cell), and the
+           split / dev-delegated markers follow the status chips. */
+        headLeading={
+          req.priority ? (
+            <span
+              className={`priority-dot priority-${req.priority}`}
+              title={tLabel(t, priorityLabelKeys, req.priority)}
+              aria-label={tLabel(t, priorityLabelKeys, req.priority)}
+            />
+          ) : null
+        }
+        headExtra={
+          <>
+            {req.split_batch_id && (
+              <span
+                className="req-badge req-badge-split"
+                title={t('requirements.split.badgeTitle')}
+                aria-label={t('requirements.split.badgeTitle')}
+              >
+                🧩
+              </span>
+            )}
+            {req.dev_delegated && (
+              <span
+                className="req-badge req-badge-devdelegated"
+                title={t('requirements.devDelegated.badgeTitle')}
+                aria-label={t('requirements.devDelegated.badgeTitle')}
+              >
+                {t('requirements.devDelegated.badge')}
+              </span>
+            )}
+          </>
+        }
+        /* Inline "create a sub-requirement" trigger, gated exactly like
+           the desktop row: top-level rows only (the hierarchy is one
+           level deep) and never on archived rows. */
+        titleExtra={
+          depth === 0 && req.status !== 'archived' ? (
+            <RequirementQuickCreate
+              projectId={req.project_id}
+              parentId={req.id}
+              parentTitle={req.title || t('requirements.list.noTitle')}
+              parentKind={req.kind}
+              open={quickCreateFor?.id === req.id}
+              onOpenChange={o => setQuickCreateFor(o ? req : null)}
+              onCreated={async () => {
+                setQuickCreateFor(null);
+                try {
+                  setReqs(await requirementsApi.list({ project_id: id }));
+                  setReqExpanded(prev => new Set(prev).add(req.id));
+                } catch (err) {
+                  console.error('[project-detail] refresh after quick-create failed', err);
+                }
+              }}
+            />
+          ) : null
+        }
+        /* Footer: where it ran, how many tokens it burned, what it cost
+           and when it was last touched. */
+        footExtra={
+          <>
+            {req.agent_server_name ? (
+              <span className="req-card-mobile-agent" title={req.agent_server_name}>
+                🖥️ {req.agent_server_name}
+              </span>
+            ) : (
+              <span className="pr-c-dim">{t('projects.detail.agentServerLocal')}</span>
+            )}
+            {(() => {
+              const u = reqUsageMap.get(req.id);
+              if (!u) return null;
+              const inp = usageTotalInput(u);
+              const out = u.output_tokens;
+              return (
+                <>
+                  <span className="req-card-mobile-usage" title={`${inp.toLocaleString()} / ${out.toLocaleString()}`}>
+                    {`${fmtNum(inp)} / ${fmtNum(out)}`}
+                  </span>
+                  <span className="req-card-mobile-usage" title={fmtCost(u.costs)}>{fmtCost(u.costs)}</span>
+                </>
+              );
+            })()}
+          </>
+        }
+        onOpen={r => navigate(`/requirements/${r.id}`)}
+      />
+    );
+  };
+
   // Overview shows only tasks that have not finished development ('done').
   // The requirements tab keeps showing everything (done sorts to the end).
   const overviewReqs = reqs.filter(r => r.status !== 'done');
@@ -1865,6 +2016,13 @@ export default function ProjectDetail() {
   const totalReqPages = Math.max(1, Math.ceil(reqTreeRows.length / REQ_PAGE_SIZE));
   const curReqPage = Math.min(reqPage, totalReqPages);
   const pagedReqRows = reqTreeRows.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
+  // Ids on the current page. A sub-requirement whose master is not in
+  // this set has been split from its group by pagination — the mobile
+  // card uses this to decide whether it has to name its owner.
+  const pagedReqRowIds = useMemo(
+    () => new Set(pagedReqRows.map(r => r.req.id)),
+    [pagedReqRows],
+  );
 
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
@@ -2810,7 +2968,13 @@ export default function ProjectDetail() {
                 </div>
               )}
               <div className="sr-only" aria-live="polite" role="status">{reqLiveMsg}</div>
-              <div className="pr-list">
+              {/* Phone rendering: one card per requirement instead of the
+                  eleven-column table. Same rows, same order, same
+                  pagination — only the presentation differs. */}
+              <div className="req-cards-mobile mobile-only">
+                {pagedReqRows.map(renderProjectReqMobileCard)}
+              </div>
+              <div className="pr-list desktop-only">
               <table className="pr-table table-cards">
                 <thead>
                   <tr>

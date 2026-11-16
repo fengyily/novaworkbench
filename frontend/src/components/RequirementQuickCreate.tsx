@@ -82,18 +82,39 @@ export function RequirementQuickCreate({
   const popRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  // Whether the trigger this instance owns is actually on screen. A
+  // requirement row is rendered TWICE — once in the desktop table, once in
+  // the mobile card list — and only one of the two surfaces is visible at a
+  // time. The hidden surface's trigger has a zero-size rect, and a popover
+  // anchored to it would be pinned to the top-left corner of the viewport.
+  const [anchorVisible, setAnchorVisible] = useState(false);
 
   const close = () => {
     onOpenChange(false);
     setError('');
   };
 
+  // Is this trigger the visible one? Checked before the panel is rendered.
+  useLayoutEffect(() => {
+    if (!open) {
+      setAnchorVisible(false);
+      return;
+    }
+    const btn = btnRef.current;
+    if (!btn) {
+      setAnchorVisible(false);
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    setAnchorVisible(r.width > 0 || r.height > 0);
+  }, [open]);
+
   // Position the popover against the button, flipping above it when there is
   // no room below. Measured AFTER the panel's first paint so its real
   // width/height drive the clamp — assuming a size would misplace it on
   // narrow viewports, where the panel is capped at 86vw.
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!open || !anchorVisible) return;
     const place = () => {
       const panel = popRef.current;
       const btn = btnRef.current;
@@ -118,14 +139,16 @@ export function RequirementQuickCreate({
       window.removeEventListener('scroll', place, true);
       window.removeEventListener('resize', place);
     };
-  }, [open]);
+  }, [open, anchorVisible]);
 
   // Focus the textarea as soon as the panel opens — the whole point of the
-  // fast path is that the user can type immediately.
+  // fast path is that the user can type immediately. Gated on
+  // `anchorVisible` because the textarea only exists once the panel is
+  // actually rendered.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !anchorVisible) return;
     textRef.current?.focus();
-  }, [open]);
+  }, [open, anchorVisible]);
 
   // Click outside / Esc closes the panel. The toggle button itself is
   // EXCLUDED: it toggles on click, and treating the click as "outside" would
@@ -216,7 +239,7 @@ export function RequirementQuickCreate({
           <path d="M6 2.25v7.5M2.25 6h7.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
         </svg>
       </button>
-      {open && createPortal(
+      {open && anchorVisible && createPortal(
         <div
           ref={popRef}
           className="req-quick-create"
