@@ -636,3 +636,41 @@ func TestConfirmOverwriteManual(t *testing.T) {
 		t.Errorf("refused despite the confirmation: %s", rec.Body.String())
 	}
 }
+
+// TestBuildGenerationPromptExistingDocRule pins the wiring between the
+// generation root and the prompt's "do not copy the existing document"
+// rule.
+//
+// The rule may only appear when the directory the CLI runs in actually
+// holds a CLAUDE.md: the CLI auto-loads that file as project memory, so
+// the model needs to be told about it — but telling a model to beware of a
+// document that is not there only sends it looking for one.
+func TestBuildGenerationPromptExistingDocRule(t *testing.T) {
+	h := &ProjectClaudeDocHandler{}
+
+	// No CLAUDE.md in the generation root → no rule.
+	empty := t.TempDir()
+	prompt, diskExists := h.buildGenerationPrompt("proj", empty, "")
+	if diskExists {
+		t.Error("diskExists = true although the generation root has no CLAUDE.md")
+	}
+	if strings.Contains(prompt, "既有 CLAUDE.md") {
+		t.Errorf("the existing-document rule appears although the generation root has no CLAUDE.md:\n%s", prompt)
+	}
+
+	// A CLAUDE.md in the generation root → the rule is there.
+	withDoc := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withDoc, "CLAUDE.md"), []byte("# 旧文档\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	prompt, diskExists = h.buildGenerationPrompt("proj", withDoc, "")
+	if !diskExists {
+		t.Error("diskExists = false although the generation root has a CLAUDE.md")
+	}
+	if !strings.Contains(prompt, "既有 CLAUDE.md") {
+		t.Errorf("the existing-document rule is missing:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "不要照抄它") {
+		t.Errorf("the existing-document rule does not forbid copying:\n%s", prompt)
+	}
+}

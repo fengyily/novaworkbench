@@ -465,6 +465,19 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]interface{}{"job_id": job.ID})
 }
 
+// buildGenerationPrompt builds the prompt for a generation run and reports
+// whether the generation root already contains a CLAUDE.md.
+//
+// The two go together on purpose: the prompt has to tell the model that the
+// CLI auto-loaded that file (as project memory — as instructions, not as a
+// file the model chose to read) and that it must re-derive the document
+// from the code. genRoot is the directory the CLI runs in, so it — not the
+// user's checkout — decides whether such a file is in reach.
+func (h *ProjectClaudeDocHandler) buildGenerationPrompt(projectName, genRoot, focus string) (string, bool) {
+	diskDocExists := service.DiskClaudeDocExists(genRoot)
+	return promptpkg.BuildClaudeDocGenerationPrompt(projectName, focus, diskDocExists), diskDocExists
+}
+
 // runGenerate is the background worker behind POST /generate.
 //
 // On success the document is written to the DB with source=generated and a
@@ -489,7 +502,20 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在分析项目结构（只读探索，不会修改任何文件）..."})
 
-	promptText := promptpkg.BuildClaudeDocGenerationPrompt(p.Name, focus)
+	// The CLI auto-loads `<cwd>/CLAUDE.md` into the session as project
+	// memory, so the model may already be holding a prior version of the
+	// very document it is asked to write. Tell it that this file exists and
+	// that it must re-derive everything from the code — otherwise the
+	// cheapest way to satisfy "write a CLAUDE.md" is to paraphrase the text
+	// it was just handed.
+	//
+	// The flag describes the GENERATION ROOT (the cwd the CLI runs in), not
+	// the user's checkout: that is where the CLI picks the file up from.
+	promptText, diskDocExists := h.buildGenerationPrompt(p.Name, genRoot, focus)
+	if diskDocExists {
+		job.Append(store.LogLine{Type: "message",
+			Content: "ℹ️ 仓库内已存在 CLAUDE.md：已要求模型以代码为准重新推导，而不是照抄既有文档。"})
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), claudeDocGenerateTimeout)
 	defer cancel()
 
@@ -530,6 +556,20 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
 		job.Finish(1, store.JobError)
 		return
+	}
+	// The prompt forbids copying the on-disk CLAUDE.md, but a prompt is a
+	// request, not a guarantee. When the generated document reuses most of
+	// the existing one verbatim, say so on the stream: the document is
+	// stored and injected into every later stage, so a silent copy of a
+	// stale guide is exactly the kind of thing the user must be able to
+	// catch before it becomes the project's conventions.
+	if diskDocExists {
+		if existing, ok, rerr := h.projectSvc.ReadDiskClaudeDoc(genRoot); rerr == nil && ok {
+			if ratio := claudeDocReuseRatio(existing, content); ratio >= claudeDocReuseWarnRatio {
+				job.Append(store.LogLine{Type: "warning",
+					Content: fmt.Sprintf("⚠️ 生成结果复用了仓库内既有 CLAUDE.md 约 %.0f%% 的正文表述，请人工复核其中的描述是否仍与当前代码一致。", ratio*100)})
+			}
+		}
 	}
 	// Re-check the guard right before the write: the run takes minutes, and
 	// the user may have saved a hand-edit in the meantime. That edit was

@@ -65,7 +65,7 @@ func TestBuildProjectClaudeDocBlockTruncates(t *testing.T) {
 // TestBuildClaudeDocGenerationPrompt pins the generation contract: read-only
 // exploration, no invented commands, and the body as the only output.
 func TestBuildClaudeDocGenerationPrompt(t *testing.T) {
-	p := BuildClaudeDocGenerationPrompt("NovaWorkbench", "重点关注后端分层")
+	p := BuildClaudeDocGenerationPrompt("NovaWorkbench", "重点关注后端分层", false)
 	for _, want := range []string{
 		"NovaWorkbench",
 		"重点关注后端分层",
@@ -81,5 +81,42 @@ func TestBuildClaudeDocGenerationPrompt(t *testing.T) {
 	}
 	if strings.Contains(p, "```") && !strings.Contains(p, "不要使用 ``` 代码围栏") {
 		t.Errorf("generation prompt contains a stray fence:\n%s", p)
+	}
+}
+
+// TestBuildClaudeDocGenerationPromptExistingDocRule pins the rule that keeps
+// the generation from degenerating into a copy of the CLAUDE.md that is
+// already on disk.
+//
+// The Claude CLI auto-loads that file into the session as project memory —
+// as instructions, not as a file the model chose to read — so without an
+// explicit rule the model has no reason to prefer the code over the text
+// it was just handed.
+//
+// The rule must appear only when such a file is actually there: telling a
+// model "there may be a CLAUDE.md" when the repository has none sends it
+// looking for a document that does not exist.
+func TestBuildClaudeDocGenerationPromptExistingDocRule(t *testing.T) {
+	without := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", false)
+	if strings.Contains(without, "既有 CLAUDE.md") {
+		t.Errorf("the existing-document rule appears although the repo has no CLAUDE.md:\n%s", without)
+	}
+
+	with := BuildClaudeDocGenerationPrompt("NovaWorkbench", "", true)
+	for _, want := range []string{
+		"既有 CLAUDE.md",
+		"不要照抄它",
+		"以代码为准",
+		"必须在仓库中找到依据",
+	} {
+		if !strings.Contains(with, want) {
+			t.Errorf("generation prompt missing %q:\n%s", want, with)
+		}
+	}
+	// The rule must sit BEFORE the section layout, so the model reads it
+	// while it is still deciding what to write — not after it has already
+	// paraphrased the old document.
+	if strings.Index(with, "既有 CLAUDE.md") > strings.Index(with, "## 文档结构") {
+		t.Errorf("the existing-document rule comes after the section layout:\n%s", with)
 	}
 }

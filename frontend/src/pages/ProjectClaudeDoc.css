@@ -169,6 +169,7 @@
 }
 
 .claude-doc-log-error { color: var(--color-error-deep); }
+.claude-doc-log-warning { color: var(--color-warning-deep); }
 .claude-doc-log-phase { color: var(--color-primary); }
 .claude-doc-log-tool_call { color: var(--color-text); }
 .claude-doc-log-done { color: var(--color-success-deep); }

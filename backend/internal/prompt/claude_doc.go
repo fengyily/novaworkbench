@@ -77,13 +77,19 @@ func truncateClaudeDoc(content string) string {
 // BuildClaudeDocGenerationPrompt is the contract for the "生成 CLAUDE.md"
 // run: read the repository, then emit the document itself.
 //
-// Two things matter here:
+// Three things matter here:
 //  1. the run is READ-ONLY — the tool layer already blocks Write/Edit/Bash,
 //     and the prompt repeats it so the model does not spend turns trying;
 //  2. the output is the document body and nothing else — no fence, no
 //     "here is your CLAUDE.md" preamble — because the backend stores the
-//     text verbatim.
-func BuildClaudeDocGenerationPrompt(projectName, focus string) string {
+//     text verbatim;
+//  3. when the repository already ships a CLAUDE.md, the model is told
+//     that the CLI auto-loaded it and that it must NOT be copied.
+//
+// diskDocExists must describe the directory the model will actually see
+// (the generation root), not the user's checkout — that is where the CLI
+// picks the file up from.
+func BuildClaudeDocGenerationPrompt(projectName, focus string, diskDocExists bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("请为项目「%s」生成一份 CLAUDE.md（项目级 AI 开发指南）。\n\n", strings.TrimSpace(projectName)))
 	b.WriteString("## 探索要求\n")
@@ -92,6 +98,9 @@ func BuildClaudeDocGenerationPrompt(projectName, focus string) string {
 	b.WriteString("3. 命令必须来自仓库中真实存在的配置（如 Makefile、package.json、go.mod、CI 配置），不得编造。\n")
 	if f := strings.TrimSpace(focus); f != "" {
 		b.WriteString(fmt.Sprintf("4. 用户额外关注点：%s\n", f))
+	}
+	if diskDocExists {
+		b.WriteString(claudeDocExistingDocRule)
 	}
 	b.WriteString("\n## 文档结构\n")
 	b.WriteString("请按以下小节组织（缺少依据的小节可以省略，不要凭空编造）：\n")
@@ -107,3 +116,27 @@ func BuildClaudeDocGenerationPrompt(projectName, focus string) string {
 	b.WriteString("只输出 CLAUDE.md 的 Markdown 正文本身，不要使用 ``` 代码围栏包裹，不要写任何开场白或结束语。\n")
 	return b.String()
 }
+
+// claudeDocExistingDocRule is the paragraph that keeps the generation from
+// degenerating into a copy of the document that is already on disk.
+//
+// The Claude CLI auto-loads `<repo>/CLAUDE.md` into the session as project
+// memory — it arrives as INSTRUCTIONS, not as a file the model chose to
+// read. Without this rule the model has no reason to prefer the code over
+// that text, and the obvious (cheap) way to satisfy "write a CLAUDE.md" is
+// to paraphrase what it was just handed: a document that looks freshly
+// derived but is really a copy of a possibly-stale one. That defeats the
+// point of the feature — the point is to describe THIS code base.
+//
+// So the rule says three things: the file is a prior version and not a
+// source of truth, every statement must be re-derived from the code, and
+// the code wins on any conflict.
+const claudeDocExistingDocRule = "" +
+	"\n## 既有 CLAUDE.md 的处理（重要）\n" +
+	"本次运行的 Claude CLI 会自动把仓库根目录的 `CLAUDE.md` 读进上下文（你可能已经看到它）。\n" +
+	"它只是**此前的旧版本**，可能已经过时，也可能与当前代码不符：\n" +
+	"- 不要照抄它，也不要把它当作事实来源；\n" +
+	"- 只依据你在代码里核实到的事实（源文件、构建配置、CI 配置）来写这份文档；\n" +
+	"- 旧文档里的每一条命令、路径、分层约定都必须在仓库中找到依据，找不到就不要写；\n" +
+	"- 旧文档与代码冲突时以代码为准，并按代码的实际形态描述；\n" +
+	"- 旧文档中经核实仍然成立的约定可以保留，但要按代码的实际形态重写，不要复述原文。\n"
