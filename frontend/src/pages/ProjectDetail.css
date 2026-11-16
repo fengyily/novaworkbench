@@ -899,11 +899,39 @@
     align-items: stretch;
     gap: 8px;
   }
+  /* The four status chips scroll sideways instead of wrapping onto a
+     second line — on a 320px screen two wrapped rows push the list
+     itself off the screen. Same pattern as .req-kind-chips on the
+     cross-project list. */
   .project-req-filter-chips {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
   }
+  .project-req-filter-chips::-webkit-scrollbar { display: none; }
+  .project-req-chip {
+    flex: 0 0 auto;
+  }
+  /* The search box leaves the flex layout entirely (`flex: none`).
+     In a COLUMN flex container `flex-basis` applies to the vertical
+     axis, so the desktop `flex: 1 1 220px` turned into a 220px-tall
+     box — the giant oval that used to swallow half the phone screen.
+     `flex: none` + an explicit height restores a normal pill. */
   .project-req-search {
+    flex: none;
+    width: 100%;
+    min-width: 0;
     max-width: none;
+    height: 36px;
+  }
+  /* 16px on the input: the global .search-input input is 13px, which
+     makes iOS Safari zoom the whole page on focus — the page then looks
+     like it has a huge search box too. */
+  .project-req-search input {
+    font-size: 16px;
+    padding: 6px 0;
   }
   .project-req-filter-count {
     margin-left: 0;

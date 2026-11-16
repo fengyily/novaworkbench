@@ -35,16 +35,7 @@
   .quick-actions { gap: 8px; }
   .quick-actions.btn-row-2col > .btn { flex-basis: calc(50% - 4px); }
 
-  /* Hide the desktop-only CTA in the section header — the FAB below
-     covers the same action and stays in the thumb zone while the user
-     scrolls. */
-  .desktop-only { display: none !important; }
-}
-
-/* Desktop: hide the mobile-only empty state. The FAB is also hidden by
-   .fab's display:none on desktop. */
-@media (min-width: 769px) {
-  .mobile-only { display: none !important; }
+  /* `.desktop-only` / `.mobile-only` are defined globally in index.css. */
 }
 
 /* Stat-card gets a slightly more distinctive treatment on mobile — a

@@ -114,17 +114,8 @@
   white-space: nowrap;
 }
 
-/* On the mobile card the title gets up to 3 lines (long titles wrap rather
-   than truncate to keep the card readable), so the label relaxes the
-   single-line ellipsis and uses line-clamp instead. */
-.req-card-mobile-title .req-row-title-text-label {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-  word-break: break-word;
-  text-overflow: clip;
-}
+/* The mobile card's title label (line clamp) lives with the card itself,
+   in components/RequirementMobileCard/RequirementMobileCard.css. */
 
 .req-row-title-tags {
   margin-top: 4px;
@@ -364,141 +355,6 @@
 .priority-dot.priority-medium { background: #F59E0B; }
 .priority-dot.priority-low    { background: #10B981; }
 
-/* ── Desktop / mobile visibility helpers ──────────────────────────
-   Mirror the conventions used by Dashboard.tsx — `.desktop-only` is
-   hidden by `.fab`'s display:none rule on phones, and `.mobile-only`
-   is hidden by `.fab-hidden { display: none !important; }`-style
-   rules on desktop. Defined globally so every page can use them. */
-
-@media (max-width: 768px) {
-  .desktop-only { display: none !important; }
-}
-
-@media (min-width: 769px) {
-  .mobile-only { display: none !important; }
-}
-
-/* ── Mobile card list ─────────────────────────────────────────────
-   Renders the same rows as the desktop table but as a vertical stack
-   of cards. Each card is a <button> so it's keyboard- and screen-
-   reader-accessible by default. Tapping the card (anywhere) navigates
-   to the requirement detail page. */
-
-.req-cards-mobile {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.req-card-mobile {
-  /* Reset native button styles so the card looks like a div. */
-  appearance: none;
-  width: 100%;
-  text-align: left;
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: 12px;
-  padding: 12px 14px;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  /* A faint left rail picks up the kind color so the user can scan a
-     list of cards by color without reading the badge. Mirrors the
-     .model-select-card stage-rail pattern. */
-  border-left: 3px solid var(--color-border, #E2E8F0);
-  transition: transform 120ms ease, box-shadow 120ms ease,
-              border-color 120ms ease, background-color 120ms ease;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.req-card-mobile.kind-issue       { border-left-color: #EF4444; }
-.req-card-mobile.kind-requirement { border-left-color: #4F46E5; }
-.req-card-mobile.kind-idea        { border-left-color: #F59E0B; }
-
-.req-card-mobile:hover {
-  background: var(--color-hover, #F1F5F9);
-}
-
-.req-card-mobile:active {
-  /* Tiny press-down so the user gets tactile feedback on tap. */
-  transform: scale(0.985);
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
-}
-
-.req-card-mobile-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.req-card-mobile-head .kind-badge,
-.req-card-mobile-head .status-badge {
-  font-size: 11px;
-  padding: 2px 8px;
-}
-
-.req-card-mobile-title {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.4;
-  color: var(--color-text, #1E293B);
-  /* Inline flex row so mark chips sit on the same line as the title (marked
-     cards stay one row; unmarked cards show only the title). The title text
-     itself stays capped at 3 lines via .req-row-title-text-label so a long
-     title doesn't blow up the card. */
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-.req-card-mobile-foot {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-secondary, #64748B);
-  min-width: 0;
-}
-
-.req-card-mobile-project {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.req-card-mobile-spacer {
-  flex: 0 0 auto;
-  width: 4px;
-}
-
-/* Mobile card chip for the Agent Server. Only rendered when the requirement
-   ran on a remote target (local runs render as the absence of the chip so
-   the tight footer row stays uncluttered). Shares the violet palette with
-   the desktop .agent-server-tag. */
-.req-card-mobile-agent {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: #7C3AED;
-}
-
-.req-card-mobile-time {
-  flex: 0 0 auto;
-  white-space: nowrap;
-  color: var(--color-text-muted, #94A3B8);
-}
-
 /* ── Mobile layout tweaks (≤768px) ─────────────────────────────────
    The filter bar gets tighter, the kind chip row scrolls horizontally
    so it never wraps into 3 lines on a 360px viewport, and the
@@ -569,34 +425,9 @@
     padding: 6px 0;
   }
 
-  /* Sub-requirements (mobile): toggle sits beside the card; children indent
-     12px with a 3px group rail and the card itself picks up the same
-     tinted background as the desktop group block. Same card styling as
-     top-level cards. */
-  .req-card-mobile-wrap {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-  }
-  .req-card-mobile-wrap > .req-card-mobile {
-    flex: 1 1 auto;
-    min-width: 0;
-    width: auto;
-  }
-  .req-card-mobile-wrap > .req-tree-toggle,
-  .req-card-mobile-wrap > .req-tree-spacer {
-    margin-top: 12px;
-  }
-  .req-card-mobile-child {
-    /* wrap 上的轨道：桌面端色轨的移动端对应物 */
-    margin-left: 12px;
-    border-left: 3px solid var(--req-group-rail, var(--color-border, #E2E8F0));
-    padding-left: 8px;
-  }
-  /* tint 落在卡片本体（wrap 会被卡片的不透明白底盖住），
-     但保留卡片自己的 kind 色左边框 */
-  .req-card-mobile-child .req-card-mobile { background: var(--req-group-bg); }
-  .req-card-mobile-child .req-card-mobile:hover { background: var(--req-group-bg-hover); }
+  /* The mobile card list (wrap / child indent / group tint / selected
+     state) now lives with the shared card component, in
+     components/RequirementMobileCard/RequirementMobileCard.css. */
 }
 
 /* ── Master / sub-requirement hierarchy (desktop) ───────────────────── */
@@ -668,29 +499,4 @@
     transition: opacity 150ms ease, max-height 150ms ease, border-color 150ms ease, background 150ms ease;
   }
   .req-row.drop-target { transition: background 120ms ease; }
-}
-
-
-/* ── Mobile card: selection box placement ─────────────────────────
-   The mobile card is a <button>, so its checkbox is a SIBLING inside
-   .req-card-mobile-wrap rather than a descendant of the button (an
-   <input> inside a <button> is invalid HTML, and the button swallows
-   the click). It sits first so masters (which also render the tree
-   cell) and children (which don't) keep the box on one vertical line. */
-@media (max-width: 768px) {
-  .req-card-mobile-wrap > .rb-check {
-    /* The card's first line starts 12px down (padding: 12px 14px), so
-       the box lands on the same line as the kind badge. */
-    margin-top: 12px;
-  }
-  /* Selected card: tint + a primary ring. The card already owns its
-     left edge for the kind colour rail, so the selected state uses a
-     ring rather than a second border that would fight that colour. */
-  .req-card-mobile-wrap.rb-selected .req-card-mobile {
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-    box-shadow: inset 0 0 0 1px var(--color-primary);
-  }
-  .req-card-mobile-wrap.rb-selected .req-card-mobile:hover {
-    background: color-mix(in srgb, var(--color-primary) 13%, transparent);
-  }
 }

@@ -16,7 +16,6 @@ import { useTranslation } from 'react-i18next';
 import {
   requirementsApi, projectsApi,
   statusLabelKeys, kindLabelKeys, kindShortLabelKeys, priorityLabelKeys, kindOf,
-  MARK_PRESETS, parseMarks,
   type Kind, type Project, type Requirement,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
@@ -28,8 +27,10 @@ import {
 import { useRowSelection } from '../components/RequirementBatch/useRowSelection';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
-import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
-import { IconClock } from '../components/icons';
+import RequirementMobileCard, {
+  MarksStrip, ScheduleChip,
+} from '../components/RequirementMobileCard/RequirementMobileCard';
+import { fmtRelative, fmtDateTime } from '../utils/intl';
 import './RequirementsList.css';
 
 // KIND_FILTERS holds translation KEYS for the chip labels (resolved on
@@ -41,37 +42,6 @@ const KIND_FILTERS: { value: Kind; labelKey: string; emoji: string }[] = [
   { value: 'idea', labelKey: 'requirements.list.kindFilters.idea', emoji: '💡' },
   { value: 'wiki', labelKey: 'requirements.list.kindFilters.wiki', emoji: '📚' },
 ];
-
-// MarksStrip renders the preset mark chip strip (重要 / 跟进 / 阻塞 / 风险)
-// INLINE with the requirement title. Empty marks → nothing rendered. Used by
-// both the desktop table row and the mobile card so the inline layout stays
-// in sync across the two surfaces. Returns null when there are no marks so
-// unmarked rows don't pick up extra spacing.
-function MarksStrip({ marks }: { marks: string | undefined }) {
-  const { t } = useTranslation();
-  const rowMarks = parseMarks(marks);
-  if (rowMarks.length === 0) return null;
-  return (
-    <div className="req-row-marks">
-      {rowMarks.map(code => {
-        const p = MARK_PRESETS.find(x => x.code === code);
-        if (!p) return null;
-        const label = t(`requirements.detail2.marksPreset.${p.code}`);
-        return (
-          <span
-            key={code}
-            className={`req-row-mark-tag ${p.code}`}
-            style={{ color: p.color, background: p.bg, borderColor: p.color }}
-            title={label}
-          >
-            <span aria-hidden>{p.icon}</span>
-            <span>{label}</span>
-          </span>
-        );
-      })}
-    </div>
-  );
-}
 
 export default function RequirementsList() {
   const { t } = useTranslation();
@@ -186,31 +156,6 @@ export default function RequirementsList() {
   // their visibility at the 768px breakpoint so each surface is only
   // shown in its lane.
   const openCreate = () => setShowCreate(s => !s);
-
-  // Inline helper for the "has a pending scheduled task" affordance. Renders
-  // nothing when the row has no scheduled_run_at (omitted on the wire); the
-  // hover title combines the absolute time with the same relative countdown
-  // string SchedulesPage uses, so both surfaces speak the same vocabulary.
-  // Wrapped in a small indigo chip (see .schedule-chip in index.css) — the
-  // bare 13px outline icon was easy to miss next to the title text, the
-  // tinted pill makes the "has a schedule" affordance unmissable in dense
-  // cross-project lists.
-  const scheduleClock = (r: Requirement) => {
-    if (!r.scheduled_run_at) return null;
-    return (
-      <span
-        className="schedule-chip"
-        title={t('requirements.list.scheduledTooltip', {
-          time: fmtDateTime(r.scheduled_run_at),
-          rel: fmtRunAtRelative(r.scheduled_run_at),
-        })}
-        aria-label={t('requirements.list.scheduledAria')}
-      >
-        <IconClock size={12} className="schedule-chip-icon" />
-        {fmtRunAtRelative(r.scheduled_run_at)}
-      </span>
-    );
-  };
 
   // ── Hierarchy ──────────────────────────────────────────────────────
   // The API returns a flat list; the tree is assembled here. A child whose
@@ -568,7 +513,7 @@ export default function RequirementsList() {
                   "Sub-requirements 3" chip was eating ~120px of the only
                   column worth protecting — the title. */}
               <MarksStrip marks={r.marks} />
-              {scheduleClock(r)}
+              <ScheduleChip scheduledRunAt={r.scheduled_run_at} />
               <span className="req-row-title-text-label">
                 {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
               </span>
@@ -653,67 +598,37 @@ export default function RequirementsList() {
   };
 
   const renderMobileCard = (r: Requirement, depth: number) => {
-      const k: Kind = kindOf(r);
       const projectName = projectNameOf(r.project_id);
-      const card = (
-        <button
-          type="button"
-          className="req-card-mobile"
-          onClick={() => navigate(`/requirements/${r.id}`)}
-        >
-          <div className="req-card-mobile-head">
-            <span className={`kind-badge kind-${k}`} title={tLabel(t, kindLabelKeys, k)}>
-              {tLabel(t, kindShortLabelKeys, k)}
-            </span>
-            <StatusChips req={r} />
-          </div>
-          {/* Preset marks on mobile: same chip strip as the desktop
-              title column, now rendered INLINE with the title (chip
-              strip → schedule clock → title text) so marked cards
-              stay on a single line. Empty list → nothing rendered
-              (so unmarked cards keep their natural height). Mirrors
-              the design's "mark 比 priority 更显眼 — 因为它直接
-              影响排序" intent. */}
-          <div className="req-card-mobile-title">
-            <MarksStrip marks={r.marks} />
-            {scheduleClock(r)}
-            <span className="req-row-title-text-label">
-              {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
-            </span>
-          </div>
-          <div className="req-card-mobile-foot">
+      return (
+        <RequirementMobileCard
+          key={r.id}
+          req={r}
+          depth={depth}
+          selected={selection.isSelected(r.id)}
+          cardId={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
+          /* Selection box and tree toggle are SIBLINGS of the card, never
+             children: an <input> inside the card would be invalid HTML
+             whose click the card would swallow. First child so the box
+             sits at the same x on masters (which also render the tree
+             cell) and children (which don't). */
+          leading={
+            <>
+              {selectionCheckbox(r)}
+              {depth === 0 && treeToggleInCell(r, depth)}
+            </>
+          }
+          footStart={
             <span className="req-card-mobile-project" title={projectName}>
               📁 {projectName}
             </span>
-            <span className="req-card-mobile-spacer" />
-            {/* Dev-environment chip — mirrors the desktop Agent-server
-                column. DevSourceBadge returns null when the coding
-                stage hasn't run yet, so legacy rows simply render no
-                chip (no local-vs-agent guess). */}
-            <DevSourceBadge req={r} compact />
-            {/* Priority dot was removed from the mobile card — it now
-                lives next to the kind-badge in the card head, alongside
-                the status chips, so users see it without scanning down
-                to the footer. */}
-            <span className="req-card-mobile-time">{fmtRelative(r.updated_at)}</span>
-          </div>
-        </button>
-      );
-      return (
-        <div
-          key={r.id}
-          id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
-          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}${selection.isSelected(r.id) ? ' rb-selected' : ''}`}
-        >
-          {/* Sibling of the card, never a child: the card is a <button>
-              and an <input> nested in one is invalid HTML whose click the
-              button would swallow. First child so the box sits at the same
-              x on masters (which also render the tree cell) and children
-              (which don't). */}
-          {selectionCheckbox(r)}
-          {depth === 0 && treeToggleInCell(r, depth)}
-          {card}
-        </div>
+          }
+          /* Dev-environment chip — mirrors the desktop Agent-server
+             column. DevSourceBadge returns null when the coding
+             stage hasn't run yet, so legacy rows simply render no
+             chip (no local-vs-agent guess). */
+          footExtra={<DevSourceBadge req={r} compact />}
+          onOpen={req => navigate(`/requirements/${req.id}`)}
+        />
       );
   };
 
