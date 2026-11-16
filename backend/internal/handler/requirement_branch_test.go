@@ -485,3 +485,87 @@ func TestStageBaseResolutionBehavior(t *testing.T) {
 			reread.BaseBranch, reread.BaseBranchSource, "feat/req_P", model.BaseSourceParent)
 	}
 }
+
+// TestManualChildInheritsParentBaseEndToEnd pins the whole seam the
+// requirement asks for, from the row the frontend receives to the value the
+// runtime resolver computes.
+//
+// The bug this guards against: a hand-made child requirement carried an EMPTY
+// base_branch, so the frontend seeded its BASE picker with the PROJECT
+// DEFAULT and sent that back on every design / coding run. The resolver read
+// a value that differs from the auto value as "the user deliberately chose
+// this", froze the base as an explicit choice and killed the parent
+// inheritance for good.
+//
+// The fix has two halves that must agree:
+//  1. the create path persists the inherited base (source "parent"), and
+//  2. the read path hands the frontend the EFFECTIVE base, so an untouched
+//     picker echoes the auto value back.
+//
+// This test walks the real service (create → read → resolve) instead of
+// stubbing the pieces, so the two halves cannot drift apart again.
+func TestManualChildInheritsParentBaseEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer d.Close()
+
+	const projID = "proj_1"
+	if _, err := d.Exec(`INSERT INTO projects (id, name, local_path, status, default_branch) VALUES (?, ?, ?, ?, ?)`,
+		projID, "P", "/tmp/p", "ready", "main"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+
+	reqSvc := service.NewRequirementService(d, nil)
+	h := &WizardHandler{reqSvc: reqSvc}
+	proj := &model.Project{ID: projID, DefaultBranch: "main"}
+
+	// The master already developed, so it owns feat/req_<id>.
+	master, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: projID, Title: "master"})
+	if err != nil {
+		t.Fatalf("create master: %v", err)
+	}
+	masterBranch := "feat/req_" + master.ID
+	if err := reqSvc.UpdateWorktree(master.ID, masterBranch, ""); err != nil {
+		t.Fatalf("stamp master branch: %v", err)
+	}
+
+	// The hand-made child inherits the master's development branch.
+	child, err := reqSvc.Create(model.CreateRequirementReq{
+		ProjectID: projID, Title: "child", ParentID: master.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if child.BaseBranch != masterBranch || child.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("child base = (%q, %q), want (%q, %q)",
+			child.BaseBranch, child.BaseBranchSource, masterBranch, model.BaseSourceParent)
+	}
+
+	// The read path hands the frontend the effective base...
+	got, err := reqSvc.Get(child.ID)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if got.BaseBranchEffective != masterBranch {
+		t.Fatalf("base_branch_effective = %q, want %q", got.BaseBranchEffective, masterBranch)
+	}
+
+	// ...and the runtime resolver reads that echoed value as "not an
+	// explicit choice" — the inheritance survives the round-trip.
+	base, source := h.resolveEffectiveBaseFor(got, proj, got.BaseBranchEffective)
+	if base != masterBranch || source != model.BaseSourceParent {
+		t.Fatalf("resolved base = (%q, %q), want (%q, %q)",
+			base, source, masterBranch, model.BaseSourceParent)
+	}
+
+	// A value the user actually edited still wins (tier 1) — the fix must
+	// not change that semantic.
+	base, source = h.resolveEffectiveBaseFor(got, proj, "develop")
+	if base != "develop" || source != model.BaseSourceExplicit {
+		t.Fatalf("edited base = (%q, %q), want (%q, %q)",
+			base, source, "develop", model.BaseSourceExplicit)
+	}
+}

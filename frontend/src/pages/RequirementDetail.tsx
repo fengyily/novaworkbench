@@ -1183,27 +1183,33 @@ export default function RequirementDetail() {
   const branchFetchAbortRef = useRef<AbortController | null>(null);
 
   // Single source of truth for BOTH the design-stage and coding-stage
-  // BASE branch. Seeded once from req.base_branch (when design has
-  // already run on this requirement) → project.default_branch → 'main'
-  // so the picker shows the project's real default instead of being
-  // stuck at 'main' (the previous useState initializer evaluated
-  // project?.default_branch while project was still null on the
-  // async fetch, and the reset effect's `prev || fallback` logic
-  // then refused to overwrite the resulting 'main'). After first
-  // seed, user customisation wins — the effect short-circuits so
-  // mid-session project-metadata edits can't clobber an in-flight
-  // design/coding choice.
+  // BASE branch. Seeded once from req.base_branch_effective (the base the
+  // backend would resolve for this requirement RIGHT NOW — a child
+  // requirement inherits its master's development branch) → req.base_branch
+  // → project.default_branch → 'main'.
+  //
+  // base_branch_effective MUST come first: seeding with the plain
+  // base_branch would show the project default on a child whose inherited
+  // base is the master's branch, and the picker would then send that
+  // project default back on every design / coding run — the backend reads
+  // a value that differs from the auto value as "the user deliberately
+  // chose this" and pins the base, killing the inheritance for good.
+  //
+  // After the first seed, user customisation wins — the effect
+  // short-circuits so mid-session project-metadata edits can't clobber an
+  // in-flight design/coding choice.
   const [baseBranch, setBaseBranch] = useState<string>('');
   const baseBranchSeededRef = useRef(false);
   useEffect(() => {
     if (baseBranchSeededRef.current) return;
-    const seed = req?.base_branch?.trim()
+    const seed = req?.base_branch_effective?.trim()
+      || req?.base_branch?.trim()
       || project?.default_branch?.trim()
       || '';
     if (!seed) return; // project/req not loaded yet — retry on next render
     baseBranchSeededRef.current = true;
     setBaseBranch(seed);
-  }, [project?.default_branch, req?.base_branch]);
+  }, [project?.default_branch, req?.base_branch, req?.base_branch_effective]);
 
   // Mount-time + project-change fetch of the branch list. Aborts the prior
   // request on rapid project switches so stale responses can't leak into the
@@ -7132,7 +7138,7 @@ export default function RequirementDetail() {
           onClose={() => setSplitOpen(false)}
           requirementId={req.id}
           requirementTitle={req.title}
-          baseBranch={req.base_branch || project?.default_branch || ''}
+          baseBranch={req.base_branch_effective?.trim() || req.base_branch?.trim() || project?.default_branch || ''}
           masterBranch={req.branch_name || defaultBranchName(req.id, kindOf(req))}
           branches={availableBranches}
           // The split runs against a model / execution environment the user

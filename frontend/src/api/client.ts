@@ -1216,6 +1216,20 @@ export interface Requirement {
   // 当用户没在 dev 表单重新指定时，回退到这个值（与 wizard_coding.go
   // 里 `reqRow.BaseBranch` 优先链一致）。空 = 未跑过 design。
   base_branch?: string;
+  // base_branch_source records WHERE base_branch came from: 'explicit'
+  // (the user picked it), 'parent' (inherited from the master requirement),
+  // 'requirement' / 'project' / 'default'. Empty = a row written before the
+  // column existed. The UI uses it to tell "the user chose this line" from
+  // "this line just follows somebody else".
+  base_branch_source?: string;
+  // base_branch_effective is the base branch this requirement WOULD use
+  // right now, resolved from the row, the master requirement and the project
+  // default. NOT persisted — recomputed on every read.
+  //
+  // The BASE picker seeds itself with it so an untouched picker echoes the
+  // auto value back; the backend then reads that as "not an explicit choice"
+  // instead of freezing the base and killing the parent inheritance.
+  base_branch_effective?: string;
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
