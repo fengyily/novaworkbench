@@ -42,9 +42,35 @@ CREATE TABLE IF NOT EXISTS project_claude_docs (
 	md_content TEXT NOT NULL DEFAULT '',
 	source TEXT NOT NULL DEFAULT 'generated',
 	generated_at DATETIME,
+	-- manual_edited_at: when a HUMAN last edited the document. It is the
+	-- guard flag for the destructive replaces (an AI regeneration, a disk
+	-- import): while it is set, such a replace needs an explicit
+	-- confirmation from the user. NULL = the current content is purely
+	-- machine-written and may be replaced without asking.
+	manual_edited_at DATETIME,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
+
+-- project_claude_doc_revisions: frozen history of the project-level
+-- CLAUDE.md. Every destructive replace snapshots the OUTGOING document
+-- here first, so a hand-edited version the user has already read is never
+-- lost without a way back. Mirror of code_review_revisions /
+-- design_revisions with owner = project_id.
+--
+-- reason says WHY the snapshot was taken ('regenerate' / 'import' /
+-- 'restore'), so the history reads as a sequence of events.
+CREATE TABLE IF NOT EXISTS project_claude_doc_revisions (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	md_content TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
+	reason TEXT NOT NULL DEFAULT '',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pcd_rev_project ON project_claude_doc_revisions(project_id);
 
 CREATE TABLE IF NOT EXISTS memories (
 	id TEXT PRIMARY KEY,
@@ -1801,6 +1827,17 @@ var alterColumns = []string{
 	// path. Append-only (like every other column here): a fresh install
 	// gets it from this ALTER, an existing one from the same statement.
 	`ALTER TABLE code_reviews ADD COLUMN findings_source TEXT NOT NULL DEFAULT ''`,
+	// manual_edited_at: when a HUMAN last edited the project-level
+	// CLAUDE.md. It is the guard flag for the destructive replaces (an AI
+	// regeneration, a disk import): while it is set, such a replace needs an
+	// explicit confirmation from the user, and the outgoing document is
+	// snapshotted into project_claude_doc_revisions first.
+	//
+	// Append-only (like every other column here): a fresh install gets it
+	// from this ALTER, an existing one from the same statement — the
+	// canonical DDL above carries it too, and migrate() ignores the
+	// resulting "duplicate column" error.
+	`ALTER TABLE project_claude_docs ADD COLUMN manual_edited_at DATETIME`,
 }
 
 var (

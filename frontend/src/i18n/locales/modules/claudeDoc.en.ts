@@ -48,4 +48,20 @@ export const claudeDoc = {
 
   // Editing
   editHint: 'A hand edit does not change the "last generated" time.',
+
+  // Manual-edit protection — a destructive replace (regenerate / import
+  // from disk) has to be confirmed first.
+  manualEdited: 'Hand-edited',
+  overwriteManualConfirm: 'This CLAUDE.md contains hand-edited content and continuing will overwrite it (the old version is kept in the history and can be restored). Continue?',
+
+  // Version history
+  historyShow: 'Version history ({{n}})',
+  historyHide: 'Hide history',
+  historyEmpty: 'No versions yet. Every regeneration / import stores the version it replaced here.',
+  historyRestore: 'Restore this version',
+  restoreConfirm: 'Restore this version? The current version is stored in the history first, so you can restore it back.',
+  restoredOk: 'Version restored ✓',
+  reasonRegenerate: 'Before regeneration',
+  reasonImport: 'Before disk import',
+  reasonRestore: 'Before restore',
 };

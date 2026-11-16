@@ -1850,7 +1850,7 @@ func (s *ProjectService) Purge(id string) error {
 	}
 
 	// Direct children keyed off project_id.
-	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "requirements"}
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements"}
 	for _, tbl := range projScoped {
 		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
 			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)

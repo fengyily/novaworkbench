@@ -3834,10 +3834,28 @@ export interface ProjectClaudeDoc {
   source: ProjectClaudeDocSource;
   /** Last AI generation time. A manual edit does NOT change it. */
   generated_at?: string;
+  /**
+   * When a human last edited the document. While it is set, a destructive
+   * replace (regenerate / import) needs an explicit confirmation — the
+   * backend answers 409 MANUAL_EDIT_PROTECTED without it.
+   */
+  manual_edited_at?: string;
   updated_at?: string;
   bytes: number;
   /** The CLAUDE.md that may already exist in the project directory. */
   disk: ProjectClaudeDocDisk;
+}
+
+/** One frozen version of the project CLAUDE.md. */
+export interface ProjectClaudeDocRevision {
+  id: string;
+  project_id: string;
+  content: string;
+  source: ProjectClaudeDocSource;
+  /** Why the snapshot was taken: regenerate | import | restore. */
+  reason: 'regenerate' | 'import' | 'restore';
+  bytes: number;
+  created_at: string;
 }
 
 export const projectClaudeDocApi = {
@@ -3847,12 +3865,23 @@ export const projectClaudeDocApi = {
     api.put<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc`, { content }),
   remove: (projectId: string) =>
     api.delete<void>(`/api/projects/${projectId}/claude-doc`),
-  generate: (projectId: string, focus?: string) =>
+  /**
+   * overwriteManual is the user's explicit consent to replace a hand-edited
+   * document. Without it the backend refuses with 409 MANUAL_EDIT_PROTECTED.
+   */
+  generate: (projectId: string, focus?: string, overwriteManual?: boolean) =>
     api.post<{ job_id: string }>(`/api/projects/${projectId}/claude-doc/generate`, {
       focus: focus ?? '',
+      overwrite_manual: overwriteManual ?? false,
     }),
-  importFromDisk: (projectId: string) =>
-    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/import`, {}),
+  importFromDisk: (projectId: string, overwriteManual?: boolean) =>
+    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/import`, {
+      overwrite_manual: overwriteManual ?? false,
+    }),
+  listRevisions: (projectId: string) =>
+    api.get<ProjectClaudeDocRevision[]>(`/api/projects/${projectId}/claude-doc/revisions`),
+  restoreRevision: (projectId: string, revId: string) =>
+    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/revisions/${revId}/restore`, {}),
   streamJobUrl: (projectId: string, jobId: string) =>
     `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
 };

@@ -48,6 +48,8 @@ func newClaudeDocTestRig(t *testing.T, localPath string) *claudeDocTestRig {
 	mux.HandleFunc("DELETE /api/projects/{id}/claude-doc", h.Delete)
 	mux.HandleFunc("POST /api/projects/{id}/claude-doc/generate", h.Generate)
 	mux.HandleFunc("POST /api/projects/{id}/claude-doc/import", h.Import)
+	mux.HandleFunc("GET /api/projects/{id}/claude-doc/revisions", h.ListRevisions)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/revisions/{rev_id}/restore", h.RestoreRevision)
 	return &claudeDocTestRig{svc: svc, h: h, mux: mux, proj: proj}
 }
 
@@ -457,4 +459,180 @@ func TestClaudeDocDiskDivergence(t *testing.T) {
 			t.Error("disk.differs = true although there is no file")
 		}
 	})
+}
+
+// TestClaudeDocGenerateRefusesToOverwriteManualEdits is the P0 guard.
+//
+// A hand-edited document is the one thing here a human wrote on purpose.
+// An AI regeneration replaces it wholesale, so the request is refused
+// (409 MANUAL_EDIT_PROTECTED) until the user explicitly confirms — and the
+// version that was there is snapshotted, so even a confirmed overwrite is
+// recoverable.
+func TestClaudeDocGenerateRefusesToOverwriteManualEdits(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	// A hand-edited document.
+	rec := rig.do(t, "PUT", "/api/projects/"+rig.proj+"/claude-doc", `{"content":"# 人工约定"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Regenerate without the confirmation → refused.
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/generate", `{"focus":""}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "MANUAL_EDIT_PROTECTED") {
+		t.Errorf("body = %s, want MANUAL_EDIT_PROTECTED", rec.Body.String())
+	}
+
+	// The document is untouched.
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data := decodeClaudeDocResp(t, rec)
+	if data.Content != "# 人工约定" {
+		t.Errorf("content = %q, want the hand-edited body", data.Content)
+	}
+	if data.ManualEditedAt == nil {
+		t.Error("manual_edited_at is nil although the document was hand-edited")
+	}
+}
+
+// TestClaudeDocImportRefusesToOverwriteManualEdits is the same guard for
+// the other destructive replace: importing the disk copy over a hand-edited
+// managed copy loses the hand edits just the same.
+func TestClaudeDocImportRefusesToOverwriteManualEdits(t *testing.T) {
+	dir := t.TempDir()
+	rig := newClaudeDocTestRig(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# 磁盘版本"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	rec := rig.do(t, "PUT", "/api/projects/"+rig.proj+"/claude-doc", `{"content":"# 人工约定"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/import", `{}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data := decodeClaudeDocResp(t, rec)
+	if data.Content != "# 人工约定" {
+		t.Errorf("content = %q, want the hand-edited body", data.Content)
+	}
+
+	// With the explicit confirmation the import goes through — and the
+	// replaced version is kept.
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/import", `{"overwrite_manual":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data = decodeClaudeDocResp(t, rec)
+	if data.Content != "# 磁盘版本" {
+		t.Errorf("content = %q, want the imported body", data.Content)
+	}
+
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc/revisions", "")
+	var revs []model.ProjectClaudeDocRevision
+	if err := json.Unmarshal(rec.Body.Bytes(), &revs); err != nil {
+		// The endpoint answers with the envelope.
+		var env struct {
+			Success bool                             `json:"success"`
+			Data    []model.ProjectClaudeDocRevision `json:"data"`
+		}
+		if err2 := json.Unmarshal(rec.Body.Bytes(), &env); err2 != nil {
+			t.Fatalf("decode revisions %q: %v", rec.Body.String(), err2)
+		}
+		revs = env.Data
+	}
+	if len(revs) != 1 {
+		t.Fatalf("revisions = %+v, want exactly the replaced version", revs)
+	}
+	if revs[0].Content != "# 人工约定" {
+		t.Errorf("revision content = %q, want the hand-edited body", revs[0].Content)
+	}
+	if revs[0].Reason != model.ProjectClaudeDocRevisionReasonImport {
+		t.Errorf("revision reason = %q, want %q", revs[0].Reason, model.ProjectClaudeDocRevisionReasonImport)
+	}
+}
+
+// TestClaudeDocRestoreRevision pins the recovery path end to end: the
+// version that was replaced can be put back.
+func TestClaudeDocRestoreRevision(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	rec := rig.do(t, "PUT", "/api/projects/"+rig.proj+"/claude-doc", `{"content":"# 人工约定"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	rev, err := rig.svc.SnapshotClaudeDoc(rig.proj, model.ProjectClaudeDocRevisionReasonRegenerate)
+	if err != nil || rev == nil {
+		t.Fatalf("snapshot: %v (rev=%+v)", err, rev)
+	}
+	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# AI 约定", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/revisions/"+rev.ID+"/restore", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data := decodeClaudeDocResp(t, rec)
+	if data.Content != "# 人工约定" {
+		t.Errorf("content = %q, want the restored body", data.Content)
+	}
+	if data.ManualEditedAt == nil {
+		t.Error("the restored document is not marked as hand-edited")
+	}
+
+	// An unknown revision → 404.
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/revisions/pcdr_nope/restore", `{}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestConfirmOverwriteManual pins the guard itself: it lets a replace
+// through when there is nothing human-written to lose, refuses it while the
+// document carries hand edits, and lets it through again once the user
+// confirmed.
+func TestConfirmOverwriteManual(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	proj := &model.Project{ID: rig.proj, Name: "doc project", LocalPath: t.TempDir()}
+
+	// No document at all → allowed.
+	rec := httptest.NewRecorder()
+	if !rig.h.confirmOverwriteManual(rec, proj, false) {
+		t.Errorf("refused without a document: %s", rec.Body.String())
+	}
+
+	// A machine-written document → allowed.
+	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# AI", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	if !rig.h.confirmOverwriteManual(rec, proj, false) {
+		t.Errorf("refused for a machine-written document: %s", rec.Body.String())
+	}
+
+	// A hand-edited document → refused with 409.
+	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 人工", model.ProjectClaudeDocSourceManual, false); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	if rig.h.confirmOverwriteManual(rec, proj, false) {
+		t.Error("allowed a replace of a hand-edited document")
+	}
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "MANUAL_EDIT_PROTECTED") {
+		t.Errorf("body = %s, want MANUAL_EDIT_PROTECTED", rec.Body.String())
+	}
+
+	// The explicit confirmation lets it through.
+	rec = httptest.NewRecorder()
+	if !rig.h.confirmOverwriteManual(rec, proj, true) {
+		t.Errorf("refused despite the confirmation: %s", rec.Body.String())
+	}
 }

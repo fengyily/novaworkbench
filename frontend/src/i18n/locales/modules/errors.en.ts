@@ -29,6 +29,11 @@ export const errors = {
   REVIEW_NOT_FINISHED: 'This Review has not produced its final report yet',
   NOT_AVAILABLE: 'This feature is not enabled in the current environment',
   AI_PARSE_IN_PROGRESS: 'This Review is already being AI-parsed — please wait for it to finish',
+  // Manual-edit protection for the project-level CLAUDE.md: a destructive
+  // replace (regenerate / import from disk) needs a confirmation while the
+  // document carries hand-edited content.
+  MANUAL_EDIT_PROTECTED: 'This CLAUDE.md contains hand-edited content — regenerating or importing would overwrite it. Confirm and retry (the old version is kept in the history and can be restored)',
+  REVISION_NOT_FOUND: 'That version does not exist (or was pruned)',
   NETWORK: 'Network error, please try again later',
 } as const;
 

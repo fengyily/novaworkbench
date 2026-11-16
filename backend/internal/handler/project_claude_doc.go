@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,13 +67,17 @@ func NewProjectClaudeDocHandler(projectSvc *service.ProjectService, llmGateway *
 // content) when the project has no document yet — a 200, not a 404, so the
 // UI can render an empty state without treating it as an error.
 type claudeDocResponse struct {
-	Exists      bool        `json:"exists"`
-	Content     string      `json:"content"`
-	Source      string      `json:"source"`
-	GeneratedAt *time.Time  `json:"generated_at,omitempty"`
-	UpdatedAt   *time.Time  `json:"updated_at,omitempty"`
-	Bytes       int         `json:"bytes"`
-	Disk        diskDocInfo `json:"disk"`
+	Exists      bool       `json:"exists"`
+	Content     string     `json:"content"`
+	Source      string     `json:"source"`
+	GeneratedAt *time.Time `json:"generated_at,omitempty"`
+	// ManualEditedAt is when a human last edited the document. It drives
+	// the "this document carries manual edits" badge and the confirmation
+	// the destructive replaces ask for.
+	ManualEditedAt *time.Time  `json:"manual_edited_at,omitempty"`
+	UpdatedAt      *time.Time  `json:"updated_at,omitempty"`
+	Bytes          int         `json:"bytes"`
+	Disk           diskDocInfo `json:"disk"`
 }
 
 // diskDocInfo describes the CLAUDE.md that may already exist in the project
@@ -149,6 +154,7 @@ func (h *ProjectClaudeDocHandler) Get(w http.ResponseWriter, r *http.Request) {
 		resp.Content = doc.Content
 		resp.Source = doc.Source
 		resp.GeneratedAt = doc.GeneratedAt
+		resp.ManualEditedAt = doc.ManualEditedAt
 		updated := doc.UpdatedAt
 		resp.UpdatedAt = &updated
 		resp.Bytes = doc.Bytes
@@ -238,6 +244,9 @@ func (h *ProjectClaudeDocHandler) Put(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete removes the document. Deleting an absent document is a no-op.
+//
+// The version history is KEPT: the history is the safety net for exactly
+// the case where a user wants the document back.
 func (h *ProjectClaudeDocHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	p := h.authorize(w, r)
 	if p == nil {
@@ -250,11 +259,65 @@ func (h *ProjectClaudeDocHandler) Delete(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"id": p.ID, "deleted": true})
 }
 
+// ListRevisions returns the project's CLAUDE.md version history, newest
+// first. Every destructive replace (an AI regeneration, a disk import)
+// snapshots the outgoing document here, so a hand-edited version the user
+// has already read is never lost without a way back.
+func (h *ProjectClaudeDocHandler) ListRevisions(w http.ResponseWriter, r *http.Request) {
+	p := h.authorize(w, r)
+	if p == nil {
+		return
+	}
+	revs, err := h.projectSvc.ListClaudeDocRevisions(p.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LOOKUP_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, revs)
+}
+
+// RestoreRevision puts a frozen version back as the current document.
+//
+// The version that is currently served is snapshotted first, so a restore
+// is itself undoable.
+func (h *ProjectClaudeDocHandler) RestoreRevision(w http.ResponseWriter, r *http.Request) {
+	p := h.authorize(w, r)
+	if p == nil {
+		return
+	}
+	revID := r.PathValue("rev_id")
+	if revID == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "revision id missing")
+		return
+	}
+	doc, err := h.projectSvc.RestoreClaudeDocRevision(p.ID, revID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "REVISION_NOT_FOUND", "版本不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
 // Import copies an existing CLAUDE.md from the project directory into the
 // DB. The file itself is never modified.
+//
+// The import REPLACES the managed document, so it is a destructive replace
+// like the AI generation: when the current document carries manual edits,
+// the user has to confirm before they are overwritten.
 func (h *ProjectClaudeDocHandler) Import(w http.ResponseWriter, r *http.Request) {
 	p := h.authorize(w, r)
 	if p == nil {
+		return
+	}
+	var body struct {
+		OverwriteManual bool `json:"overwrite_manual"`
+	}
+	if err := decodeJSON(r, &body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
 		return
 	}
 	content, exists, err := h.projectSvc.ReadDiskClaudeDoc(p.LocalPath)
@@ -270,6 +333,14 @@ func (h *ProjectClaudeDocHandler) Import(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "EMPTY_CONTENT", "磁盘上的 CLAUDE.md 是空文件")
 		return
 	}
+	if !h.confirmOverwriteManual(w, p, body.OverwriteManual) {
+		return
+	}
+	// Snapshot the outgoing document BEFORE it is replaced — the manual
+	// edits the user is about to lose stay recoverable.
+	if _, err := h.projectSvc.SnapshotClaudeDoc(p.ID, model.ProjectClaudeDocRevisionReasonImport); err != nil {
+		log.Printf("[claude-doc] failed to snapshot doc for project %s: %v", p.ID, err)
+	}
 	doc, err := h.projectSvc.UpsertClaudeDoc(p.ID, content, model.ProjectClaudeDocSourceImported, false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
@@ -282,6 +353,37 @@ func (h *ProjectClaudeDocHandler) Import(w http.ResponseWriter, r *http.Request)
 // instruction ("重点关注后端分层").
 type GenerateRequest struct {
 	Focus string `json:"focus"`
+	// OverwriteManual is the user's explicit consent to replace a
+	// hand-edited document. Without it the request is refused while the
+	// current document carries manual edits.
+	OverwriteManual bool `json:"overwrite_manual"`
+}
+
+// confirmOverwriteManual guards the destructive replaces.
+//
+// A hand-edited document is the one thing in this feature a human wrote
+// on purpose; an AI regeneration or a disk import replaces it wholesale.
+// The user has to say yes to that — and the old content is snapshotted
+// first, so the "yes" is recoverable.
+//
+// It writes the 409 itself and returns false when the replace must not
+// proceed.
+func (h *ProjectClaudeDocHandler) confirmOverwriteManual(w http.ResponseWriter, p *model.Project, overwrite bool) bool {
+	if overwrite {
+		return true
+	}
+	doc, err := h.projectSvc.ClaudeDoc(p.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LOOKUP_FAILED", err.Error())
+		return false
+	}
+	if doc == nil || doc.ManualEditedAt == nil {
+		return true
+	}
+	writeErrorSuggestion(w, http.StatusConflict, "MANUAL_EDIT_PROTECTED",
+		"当前 CLAUDE.md 含有人工编辑的内容，重新生成/导入会覆盖它们",
+		"确认覆盖后重试（overwrite_manual=true）；旧版本会自动存入历史版本，可随时恢复。")
+	return false
 }
 
 // Generate starts an AI generation run and returns its job id.
@@ -313,12 +415,19 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 			fmt.Sprintf("项目本地目录不可访问：%s", projectPath))
 		return
 	}
+	// The generation REPLACES the document, so a hand-edited one needs the
+	// user's explicit consent first. The check runs BEFORE the CLI probe:
+	// it is a property of the request, not of the host, and answering it
+	// first keeps the 409 the user can act on.
+	if !h.confirmOverwriteManual(w, p, body.OverwriteManual) {
+		return
+	}
 	if h.llm == nil || h.llm.GetBinPath() == "" {
 		writeError(w, http.StatusServiceUnavailable, "CLAUDE_CLI_MISSING", "未找到 claude CLI，无法生成 CLAUDE.md")
 		return
 	}
 	job := h.jobs.Create(p.ID)
-	go h.runGenerate(job, p, projectPath, body.Focus)
+	go h.runGenerate(job, p, projectPath, body.Focus, body.OverwriteManual)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"job_id": job.ID})
 }
 
@@ -328,7 +437,12 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 // fresh generated_at. On failure the PREVIOUS document is left untouched —
 // a failed regeneration must never destroy the asset the project already
 // has.
-func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, projectPath, focus string) {
+//
+// overwriteManual is the user's consent to replace a hand-edited document.
+// The check is repeated HERE, right before the write, because the run takes
+// minutes: the user may have edited the document WHILE the model was
+// reading the repository, and that edit was never confirmed for overwrite.
+func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, projectPath, focus string, overwriteManual bool) {
 	// Sync the base branch BEFORE generating: the document must describe the
 	// latest main-branch code, not a stale local checkout. The commit facts
 	// (branch / SHA / ahead-behind) go to the stream so the user can judge
@@ -366,6 +480,24 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
 		job.Finish(1, store.JobError)
 		return
+	}
+	// Re-check the guard right before the write: the run takes minutes, and
+	// the user may have saved a hand-edit in the meantime. That edit was
+	// never confirmed for overwrite, so it wins — the generated document is
+	// dropped and the manual one stays.
+	cur, err := h.projectSvc.ClaudeDoc(p.ID)
+	if err != nil {
+		log.Printf("[claude-doc] failed to re-read doc for project %s: %v", p.ID, err)
+	} else if cur != nil && cur.ManualEditedAt != nil && !overwriteManual {
+		job.Append(store.LogLine{Type: "error",
+			Content: "⚠️ 生成期间检测到人工编辑，已保留当前内容，未覆盖。如需覆盖请重新生成并确认覆盖人工编辑。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	// Snapshot the OUTGOING document before it is replaced, so a hand-edited
+	// version the user has already read stays recoverable.
+	if _, err := h.projectSvc.SnapshotClaudeDoc(p.ID, model.ProjectClaudeDocRevisionReasonRegenerate); err != nil {
+		log.Printf("[claude-doc] failed to snapshot doc for project %s: %v", p.ID, err)
 	}
 	if _, err := h.projectSvc.UpsertClaudeDoc(p.ID, content, model.ProjectClaudeDocSourceGenerated, true); err != nil {
 		log.Printf("[claude-doc] failed to persist doc for project %s: %v", p.ID, err)

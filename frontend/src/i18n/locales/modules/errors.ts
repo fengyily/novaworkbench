@@ -34,6 +34,10 @@ export const errors = {
   REVIEW_NOT_FINISHED: '本次 Review 尚未产出最终报告，结束后才能解析',
   NOT_AVAILABLE: '该功能在当前环境未启用',
   AI_PARSE_IN_PROGRESS: '本次 Review 正在 AI 解析中，请等待当前解析结束',
+  // 项目级 CLAUDE.md 的人工编辑保护：破坏性替换（重新生成 / 磁盘导入）
+  // 在文档含人工编辑时必须先确认。
+  MANUAL_EDIT_PROTECTED: '当前 CLAUDE.md 含有人工编辑的内容，重新生成/导入会覆盖它们，请确认后重试（旧版本会存入历史版本，可随时恢复）',
+  REVISION_NOT_FOUND: '该历史版本不存在或已被清理',
   NETWORK: '网络错误，请稍后重试',
 } as const;
 
