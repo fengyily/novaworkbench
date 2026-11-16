@@ -1,0 +1,323 @@
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/middleware"
+	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/prompt"
+	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/store"
+)
+
+// claudeDocTestRig is a disposable project + handler for the project-level
+// CLAUDE.md endpoints.
+type claudeDocTestRig struct {
+	svc  *service.ProjectService
+	h    *ProjectClaudeDocHandler
+	mux  *http.ServeMux
+	proj string
+}
+
+func newClaudeDocTestRig(t *testing.T, localPath string) *claudeDocTestRig {
+	t.Helper()
+	d, err := db.Init(db.Config{Driver: string(db.SQLite), SQLitePath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("db.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	svc := service.NewProjectService(d, nil, nil)
+	const proj = "proj_claude_doc_test"
+	if _, err := d.Exec(
+		`INSERT INTO projects (id, name, local_path) VALUES (?, ?, ?)`,
+		proj, "doc project", localPath); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	h := NewProjectClaudeDocHandler(svc, nil, store.NewJobStore(8))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/projects/{id}/claude-doc", h.Get)
+	mux.HandleFunc("PUT /api/projects/{id}/claude-doc", h.Put)
+	mux.HandleFunc("DELETE /api/projects/{id}/claude-doc", h.Delete)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/generate", h.Generate)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/import", h.Import)
+	return &claudeDocTestRig{svc: svc, h: h, mux: mux, proj: proj}
+}
+
+func (r *claudeDocTestRig) do(t *testing.T, method, path string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	req.SetPathValue("id", r.proj)
+	rec := httptest.NewRecorder()
+	r.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// decodeClaudeDocResp unwraps the standard {success,data} envelope.
+func decodeClaudeDocResp(t *testing.T, rec *httptest.ResponseRecorder) claudeDocResponse {
+	t.Helper()
+	var env struct {
+		Success bool                   `json:"success"`
+		Data    claudeDocResponse      `json:"data"`
+		Error   *struct{ Code string } `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	if !env.Success {
+		code := ""
+		if env.Error != nil {
+			code = env.Error.Code
+		}
+		t.Fatalf("request failed with code %q: %s", code, rec.Body.String())
+	}
+	return env.Data
+}
+
+// TestClaudeDocGetWithoutDocument pins the "no document yet" contract: a
+// 200 with exists=false — NOT a 404. The UI renders an empty state with a
+// "生成" button; a 404 would look like a broken endpoint.
+func TestClaudeDocGetWithoutDocument(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	rec := rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	data := decodeClaudeDocResp(t, rec)
+	if data.Exists {
+		t.Errorf("exists = true, want false")
+	}
+	if data.Content != "" {
+		t.Errorf("content = %q, want empty", data.Content)
+	}
+}
+
+// TestClaudeDocPutGetDelete walks the manual-edit lifecycle.
+func TestClaudeDocPutGetDelete(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+
+	rec := rig.do(t, "PUT", "/api/projects/"+rig.proj+"/claude-doc", `{"content":"# 约定\n\n用 Go 1.25。"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data := decodeClaudeDocResp(t, rec)
+	if !data.Exists {
+		t.Fatal("exists = false after a PUT")
+	}
+	if data.Content != "# 约定\n\n用 Go 1.25。" {
+		t.Errorf("content = %q", data.Content)
+	}
+	if data.Source != model.ProjectClaudeDocSourceManual {
+		t.Errorf("source = %q, want %q", data.Source, model.ProjectClaudeDocSourceManual)
+	}
+	if data.Bytes == 0 {
+		t.Error("bytes = 0")
+	}
+
+	rec = rig.do(t, "DELETE", "/api/projects/"+rig.proj+"/claude-doc", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data = decodeClaudeDocResp(t, rec)
+	if data.Exists {
+		t.Error("exists = true after a DELETE")
+	}
+}
+
+// TestClaudeDocPutRejectsEmpty guards against wiping the asset with an
+// accidental empty save.
+func TestClaudeDocPutRejectsEmpty(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	rec := rig.do(t, "PUT", "/api/projects/"+rig.proj+"/claude-doc", `{"content":"   "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestClaudeDocGenerateRequiresProjectPath pins the pre-flight check: a
+// project whose local directory is gone cannot generate anything, and the
+// failure has to be explicit instead of a mysterious CLI error.
+func TestClaudeDocGenerateRequiresProjectPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	rig := newClaudeDocTestRig(t, missing)
+	rec := rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/generate", `{"focus":""}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "PROJECT_PATH_MISSING") {
+		t.Errorf("body = %s, want PROJECT_PATH_MISSING", rec.Body.String())
+	}
+}
+
+// TestClaudeDocImportFromDisk covers the "项目自带 CLAUDE.md" flow.
+func TestClaudeDocImportFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	rig := newClaudeDocTestRig(t, dir)
+
+	// No file on disk yet → 404 DISK_DOC_NOT_FOUND.
+	rec := rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/import", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# 磁盘约定"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	rec = rig.do(t, "POST", "/api/projects/"+rig.proj+"/claude-doc/import", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	rec = rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+	data := decodeClaudeDocResp(t, rec)
+	if data.Content != "# 磁盘约定" {
+		t.Errorf("content = %q", data.Content)
+	}
+	if data.Source != model.ProjectClaudeDocSourceImported {
+		t.Errorf("source = %q, want %q", data.Source, model.ProjectClaudeDocSourceImported)
+	}
+	if !data.Disk.Exists {
+		t.Error("disk.exists = false although the file exists")
+	}
+}
+
+// TestClaudeDocHiddenFromOtherUsers pins the per-project isolation: a user
+// without a user_projects grant must not see (or write) the document.
+func TestClaudeDocHiddenFromOtherUsers(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 约定", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/projects/"+rig.proj+"/claude-doc", nil)
+	req = req.WithContext(middleware.WithUserContext(req.Context(), "usr_other", "other", false, nil))
+	req.SetPathValue("id", rig.proj)
+	rec := httptest.NewRecorder()
+	rig.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestClaudeDocBlockInjection is the injection contract: a project WITH a
+// document gets the block, a project WITHOUT one gets an empty string —
+// and the empty string is what keeps the prompts byte-for-byte identical
+// to the pre-feature behavior.
+func TestClaudeDocBlockInjection(t *testing.T) {
+	rig := newClaudeDocTestRig(t, t.TempDir())
+
+	if got := claudeDocBlock(rig.svc, rig.proj, t.TempDir()); got != "" {
+		t.Errorf("claudeDocBlock without a document = %q, want empty", got)
+	}
+	if got := claudeDocBlock(nil, rig.proj, ""); got != "" {
+		t.Errorf("claudeDocBlock with a nil service = %q, want empty", got)
+	}
+
+	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 约定\n\n分层：handler / service / model。", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+		t.Fatalf("seed doc: %v", err)
+	}
+	block := claudeDocBlock(rig.svc, rig.proj, t.TempDir())
+	if !strings.Contains(block, prompt.ProjectClaudeDocHeading) {
+		t.Errorf("block missing the heading:\n%s", block)
+	}
+	if !strings.Contains(block, "分层：handler / service / model。") {
+		t.Errorf("block missing the content:\n%s", block)
+	}
+	if strings.Contains(block, "以本块为准") {
+		t.Errorf("block claims a disk conflict although the directory has none:\n%s", block)
+	}
+
+	// With a CLAUDE.md in the working directory the block must disambiguate.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# 仓库自带的"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	block = claudeDocBlock(rig.svc, rig.proj, dir)
+	if !strings.Contains(block, "以本块为准") {
+		t.Errorf("block missing the conflict note:\n%s", block)
+	}
+}
+
+// TestClaudeDocBlockNilServiceIsSafe pins that the helper never panics on a
+// partially wired handler (the wizard's projectService is an interface and
+// may be nil in some code paths).
+func TestClaudeDocBlockNilServiceIsSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("claudeDocBlock panicked: %v", r)
+		}
+	}()
+	if got := claudeDocBlock(nil, "", ""); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// TestNormalizeClaudeDocContent pins the cleanup applied to the model's
+// raw answer before it is stored.
+//
+// Two deviations show up in practice:
+//   - the model wraps the answer in a ```markdown fence despite the
+//     contract saying not to;
+//   - the model adds a chat-style lead-in ("This repository is a stub …
+//     Here is a CLAUDE.md:") before the document. That lead-in must not be
+//     stored — the document is injected verbatim into every AI prompt, so a
+//     stray "here you go" paragraph would ride along forever.
+func TestNormalizeClaudeDocContent(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "plain body",
+			in:   "# smoke\n\n## Project Overview\n\nText.",
+			want: "# smoke\n\n## Project Overview\n\nText.",
+		},
+		{
+			name: "fenced",
+			in:   "```markdown\n# smoke\n\n## Project Overview\n```",
+			want: "# smoke\n\n## Project Overview",
+		},
+		{
+			name: "preamble before the title",
+			in:   "This repository is a stub. Here is a CLAUDE.md:\n\n# smoke\n\n## Tech Stack\n\nGo.",
+			want: "# smoke\n\n## Tech Stack\n\nGo.",
+		},
+		{
+			name: "preamble, fenced",
+			in:   "Here you go:\n\n```markdown\n# smoke\n\n## Tech Stack\n```",
+			want: "# smoke\n\n## Tech Stack",
+		},
+		{
+			name: "no title — keep everything",
+			in:   "## Project Overview\n\nText.",
+			want: "## Project Overview\n\nText.",
+		},
+		{
+			name: "a document ending with a code block keeps its fences",
+			in:   "# smoke\n\n## Commands\n\n```sh\nmake build\n```",
+			want: "# smoke\n\n## Commands\n\n```sh\nmake build\n```",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeClaudeDocContent(tc.in); got != tc.want {
+				t.Errorf("normalizeClaudeDocContent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

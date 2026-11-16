@@ -122,6 +122,7 @@ export const projects = {
       review: '代码 Review',
       usage: 'Token 用量',
       weekly: '周报',
+      claudeDoc: '项目 CLAUDE.md',
     },
     activeSuffix: ' ●',
     // Overview — basic info edit form.

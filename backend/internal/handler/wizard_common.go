@@ -38,6 +38,10 @@ type projectService interface {
 	EnsureClonedAndSynced(ctx context.Context, id string, logf func(string)) (service.ProjectSyncResult, error)
 	SyncDesignBase(ctx context.Context, projectID, baseBranch string, timeout time.Duration, logf func(string)) (service.GitSyncResult, error)
 	Get(id string) (*model.Project, error)
+	// ClaudeDoc returns the project-level CLAUDE.md (nil when the project
+	// has none). It is injected into the stages that need the project's
+	// conventions — see claudeDocBlock in project_claude_doc.go.
+	ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error)
 	OriginURL(projectID string) (string, error)
 	DiscoverAndCacheClaudeProjectSlug(id, localPath string) (string, error)
 	UpdateSyncStatus(id, status, commit string)

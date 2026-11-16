@@ -1417,6 +1417,12 @@ func (r *SubTaskRunner) run(
 	if !isReview {
 		prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
 	}
+	// 项目级 CLAUDE.md —— 项目的权威开发约定。子任务（含需求级 Review）都要
+	// 带上：执行者按项目约定写代码，评审者按项目约定判对错。没有文档时
+	// claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
+	if block := claudeDocBlock(r.projectSvc, req.ProjectID, workDir); block != "" {
+		prompt += "\n" + block + "\n"
+	}
 	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
 	// 因此需判空后再追加——未满足时 prompt 与改动前逐字节一致。必须拼到 user prompt
 	// 而非 systemPrompt：bare 模式会把 systemPrompt 强制置空。

@@ -100,6 +100,14 @@ func (s *spyProjectSvc) DiscoverAndCacheClaudeProjectSlug(id, localPath string) 
 
 func (s *spyProjectSvc) UpdateSyncStatus(id, status, commit string) {}
 
+// ClaudeDoc returns no project-level CLAUDE.md. The spy stands in for a
+// project that never generated one, which is exactly the case the injection
+// helper must treat as a no-op (the prompt stays byte-for-byte identical to
+// the pre-feature behavior).
+func (s *spyProjectSvc) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error) {
+	return nil, nil
+}
+
 // runEnsureProjectDir is the shared test body for the four
 // call-site-specific top-level tests. It exercises the helper exactly the
 // way each call-site does:

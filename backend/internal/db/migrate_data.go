@@ -17,6 +17,9 @@ type TableStat struct {
 // (declared ON DELETE CASCADE) are satisfied during the copy.
 var copyOrder = []string{
 	"projects",
+	// Project-level CLAUDE.md — a direct child of projects, so it travels
+	// with them (and before any requirement-scoped table).
+	"project_claude_docs",
 	"memories",
 	"requirements",
 	// Dependency edges between sibling sub-requirements — both endpoints are

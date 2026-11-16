@@ -1541,6 +1541,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// at its head) so the assistant gets one unified "本项目 Git 约定" section
 	// instead of two barely-overlapping rule blocks.
 	prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, reqRow, false) + "\n"
+	// 项目级 CLAUDE.md —— 项目的权威开发约定，与「本项目 Git 约定」同级注入。
+	// 没有文档时 claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
+	if block := claudeDocBlock(h.projectSvc, reqRow.ProjectID, workDir); block != "" {
+		prompt += "\n" + block + "\n"
+	}
 	// Local credential + GPG provisioning shared with the shell push/PR job
 	// (handler/push_pr_shell.go). Extracted so both the coding subprocess and
 	// the shell `git commit`/`git push` carry the same identity / askpass /
@@ -2109,6 +2114,10 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// original AdjustCoding path injected no GitCommitConvention at all, which
 		// is exactly the regression this fix repairs.
 		adjustPrompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
+		// 项目级 CLAUDE.md —— 追加调整轮同样要带上项目约定。
+		if block := claudeDocBlock(h.projectSvc, req.ProjectID, workDir); block != "" {
+			adjustPrompt += "\n" + block + "\n"
+		}
 		// Tail the kind-specific developer block so a resumed Issue session
 		// stays anchored to "最小改动、修复根因" framing on every follow-up
 		// turn. For requirement rows it's a no-op.
@@ -2472,6 +2481,10 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// either, so a "请接着帮我提交推送" follow-up was never going to inherit
 		// the project's commit mode / token-injection env.
 		prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
+		// 项目级 CLAUDE.md —— 续接开发轮同样要带上项目约定。
+		if block := claudeDocBlock(h.projectSvc, req.ProjectID, workDir); block != "" {
+			prompt += "\n" + block + "\n"
+		}
 		// Kind-specific developer tail — keeps an Issue session's framing
 		// ("最小改动、修复根因") present on every continue round.
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {

@@ -122,6 +122,18 @@ func withUser(ctx context.Context, userID, username string, isAdmin bool, perms 
 	return ctx
 }
 
+// WithUserContext attaches an authenticated user to a request context.
+//
+// Exported on purpose: the project-scoped handlers authorize per project
+// (CurrentUser + ProjectService.CanAccess), and their tests need to
+// exercise the "caller may not see this project" branch — which requires
+// putting a non-admin user into the context. The context keys are
+// unexported, so without this helper a test in another package could only
+// ever assert the admin path.
+func WithUserContext(ctx context.Context, userID, username string, isAdmin bool, perms []string) context.Context {
+	return withUser(ctx, userID, username, isAdmin, perms)
+}
+
 // bearerToken extracts the token from "Authorization: Bearer <token>".
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")

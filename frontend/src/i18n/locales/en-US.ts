@@ -17,6 +17,7 @@ import reports from './modules/reports.en';
 import schedules from './modules/schedules.en';
 import settings from './modules/settings.en';
 import components from './modules/components.en';
+import { claudeDoc } from './modules/claudeDoc.en';
 
 const enUS = {
   common,
@@ -35,6 +36,7 @@ const enUS = {
   reports,
   schedules,
   settings,
+  claudeDoc,
 
   components,
 };
