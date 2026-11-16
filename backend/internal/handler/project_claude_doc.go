@@ -329,6 +329,16 @@ func (h *ProjectClaudeDocHandler) Generate(w http.ResponseWriter, r *http.Reques
 // a failed regeneration must never destroy the asset the project already
 // has.
 func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, projectPath, focus string) {
+	// Sync the base branch BEFORE generating: the document must describe the
+	// latest main-branch code, not a stale local checkout. The commit facts
+	// (branch / SHA / ahead-behind) go to the stream so the user can judge
+	// what the document was built from.
+	//
+	// The generation is pinned to the fetched commit in a throwaway
+	// worktree, so the user's working tree is never touched.
+	genRoot, cleanup := h.prepareGenerationRoot(job, p, projectPath)
+	defer cleanup()
+
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在分析项目结构（只读探索，不会修改任何文件）..."})
 
 	promptText := promptpkg.BuildClaudeDocGenerationPrompt(p.Name, focus)
@@ -337,7 +347,7 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:  promptText,
-		WorkDir: projectPath,
+		WorkDir: genRoot,
 		// The document must never end up in the user's working tree.
 		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
 	})
@@ -365,6 +375,58 @@ func (h *ProjectClaudeDocHandler) runGenerate(job *store.Job, p *model.Project, 
 	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ CLAUDE.md 已生成并保存"})
 	job.Finish(0, store.JobDone)
+}
+
+// prepareGenerationRoot syncs the project's base branch and returns the
+// directory the generation must run in, plus a cleanup func.
+//
+// The directory is a throwaway worktree pinned to the freshly fetched
+// origin/<base> commit — that is what makes the document reflect the latest
+// main-branch content while the user's working tree stays untouched. When
+// the sync or the worktree cannot be done (non-git project, unreachable
+// remote, no usable ref), the generation falls back to the local checkout
+// and says so in the stream.
+//
+// Every step reports itself through the job's log lines: the branch, the
+// commit SHA and subject, and how far the checkout is from the pinned ref.
+// The user needs those numbers to judge whether the document is based on the
+// code they expected.
+func (h *ProjectClaudeDocHandler) prepareGenerationRoot(job *store.Job, p *model.Project, projectPath string) (string, func()) {
+	noop := func() {}
+	emit := func(s string) {
+		if job != nil && strings.TrimSpace(s) != "" {
+			job.Append(store.LogLine{Type: "phase", Content: s})
+		}
+	}
+
+	baseBranch := claudeDocBaseBranch(p)
+	emit("🔄 正在同步主分支 " + baseBranch + "（确保 CLAUDE.md 基于最新代码）...")
+
+	var credEnv []string
+	if h.projectSvc != nil {
+		env, credCleanup := h.projectSvc.BuildGitCredentialEnv(context.Background(), p.ID)
+		// The askpass script is a temp file — release it when the sync is
+		// done, whatever the outcome.
+		defer credCleanup()
+		credEnv = env
+	}
+
+	info := syncClaudeDocBase(projectPath, baseBranch, credEnv, emit)
+	if info.Ref == "" {
+		if info.Note == "" {
+			info.Note = "未找到可用的主分支引用，基于当前工作目录生成"
+		}
+		emit("ℹ️ " + info.Note)
+		return projectPath, noop
+	}
+
+	dir, cleanup, err := claudeDocGenerationRoot(projectPath, info.Ref)
+	if err != nil {
+		emit("ℹ️ 创建独立工作区失败，改用当前工作目录生成：" + err.Error())
+		return projectPath, noop
+	}
+	emit("🗂 已在独立工作区基于 " + info.Ref + " @ " + shortSHA(info.RefSHA) + " 生成：" + dir)
+	return dir, cleanup
 }
 
 // stripCodeFence removes a surrounding ```markdown fence if the model added
