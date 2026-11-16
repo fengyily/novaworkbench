@@ -87,6 +87,7 @@ import {
 } from '../utils/designExport';
 import { fmtDateTime, fmtNumber, fmtDate } from '../utils/intl';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
+import { createReplaySkipper } from '../utils/jobStream';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import { ContextUsageBar } from '../components/ContextUsageBar';
 import { SessionContextStrip } from '../components/SessionContextStrip';
@@ -403,7 +404,12 @@ function extractKnowledge(log: LogLine[]) {
       try {
         const kb = JSON.parse(l.content ?? '{}') as { count?: number; items?: KnowledgeEntry[] };
         if (Array.isArray(kb.items)) items = kb.items;
-        empty = (kb.count ?? 0) === 0;
+        // Only the `knowledge` frame carries `count`; `knowledge_result`
+        // carries `total` + per-entry usage. Mirroring the live stream
+        // handler (which only touches the empty flag when `count` is
+        // present) keeps a snapshot restore from claiming "empty" just
+        // because the usage-assessment frame came last.
+        if (kb.count !== undefined) empty = kb.count === 0;
       } catch { /* malformed frame — ignore */ }
     } else {
       // Preserve `at` so the phase timings survive a snapshot replay after a
@@ -1379,6 +1385,9 @@ export default function RequirementDetail() {
   const [conflictFiles, setConflictFiles] = useState<string[] | null>(null);
   const [prLink, setPrLink] = useState('');
   const mergeEsRef = useRef<EventStream | null>(null);
+  // The job id of the merge SSE stream that is currently live — used to tell
+  // "a stream already owns this panel" from "we still need to subscribe".
+  const mergeStreamJobIdRef = useRef<string | null>(null);
 
   // Streaming design state (architect phase)
   const [designLines, setDesignLines] = useState<LogLine[]>([]);
@@ -1395,6 +1404,10 @@ export default function RequirementDetail() {
   // run failed.
   const [designError, setDesignError] = useState(false);
   const designEsRef = useRef<EventStream | null>(null);
+  // The job id of the design SSE stream that is currently live. Used by the
+  // snapshot-restore effect to tell "a stream is already rendering this job"
+  // from "we still need to (re)hydrate + subscribe".
+  const designStreamJobIdRef = useRef<string | null>(null);
 
   // Collapsible "Thinking process" toggle for the architect design stream.
   // While the design job is actively running the panel stays open; once it
@@ -1412,6 +1425,9 @@ export default function RequirementDetail() {
   const [wikiGenerating, setWikiGenerating] = useState(false);
   const [wikiError, setWikiError] = useState(false);
   const wikiEsRef = useRef<EventStream | null>(null);
+  // The job id of the wiki SSE stream that is currently live — same role as
+  // designStreamJobIdRef (see there).
+  const wikiStreamJobIdRef = useRef<string | null>(null);
 
   // Conditional auto-scroll for the three SSE stream panels (design / wiki /
   // coding). Each panel used to be force-scrolled to the bottom on every new
@@ -1983,17 +1999,36 @@ export default function RequirementDetail() {
   // renders. The active job id is persisted on the requirement as design_job_id,
   // so a page refresh reconnects to the running job instead of re-launching it
   // or re-showing the "Start design" button.
-  const streamDesignJob = useCallback((jobId: string) => {
+  const streamDesignJob = useCallback((jobId: string, opts?: { skipFirst?: number }) => {
+    // A live stream for this exact job already owns the panel. The launch path
+    // and the snapshot-restore effect can race on the same job id (the launch
+    // path subscribes right after the POST, the restore effect subscribes
+    // after its snapshot fetch). Reopening the stream would replay the job's
+    // history a second time — the very duplication this panel must not show.
+    if (designEsRef.current && designStreamJobIdRef.current === jobId) return;
     if (designEsRef.current) designEsRef.current.close();
+    designStreamJobIdRef.current = jobId;
     setDesigning(true);
     setDesignError(false);
     // Fresh design run → drop the prior run's usage snapshot so the bar
     // doesn't briefly show a stale percentage before the first turn lands.
     setDesignUsage(undefined);
 
+    // The backend's SSE endpoint REPLAYS the job's whole history on every
+    // subscription (store.Job.Subscribe pre-seeds the channel with all
+    // existing LogLines). When the caller already hydrated the panel from the
+    // durable snapshot (GET /api/wizard/jobs/{id}), those replayed frames are
+    // the SAME lines — rendering them again doubles the entire history.
+    // skipFirst = the snapshot's raw LogLine count, so the replayed prefix is
+    // dropped and only genuinely new lines are appended.
+    const isReplay = createReplaySkipper(opts?.skipFirst ?? 0);
+
     designEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
+        // The replay-skip MUST come first: knowledge / usage frames are
+        // backend LogLines too and are part of the replayed prefix.
+        if (isReplay(evt.type)) return;
         if (evt.type === 'knowledge' || evt.type === 'knowledge_result') {
           // Optional knowledge pre-read: surface the read titles instead of
           // appending the raw line to the design panel. The result event
@@ -2008,6 +2043,7 @@ export default function RequirementDetail() {
         if (evt.type === 'job_done') {
           designEsRef.current?.close();
           designEsRef.current = null;
+          designStreamJobIdRef.current = null;
           setDesigning(false);
           // Keep the stream panel open when the job errored so the red error
           // line stays in view instead of collapsing behind the toggle.
@@ -2044,6 +2080,7 @@ export default function RequirementDetail() {
       },
       () => {
         designEsRef.current = null;
+        designStreamJobIdRef.current = null;
         // The SSE link can drop before the final job_done frame lands (network
         // blip, proxy timeout). Poll the snapshot; if the job has finished
         // server-side, finalize + refresh; otherwise keep designing and let the
@@ -2097,14 +2134,24 @@ export default function RequirementDetail() {
   // (status='designing' keeps the button visible). Final job_done status
   // lands at `designed` once the backend's finalizeWikiRun persists
   // wiki_docs; the refresh() on terminal pulls the new requirement in.
-  const streamWikiJob = useCallback((jobId: string) => {
+  const streamWikiJob = useCallback((jobId: string, opts?: { skipFirst?: number }) => {
+    // A live stream for this exact job already owns the panel — reopening it
+    // would replay the job's history a second time.
+    if (wikiEsRef.current && wikiStreamJobIdRef.current === jobId) return;
     if (wikiEsRef.current) wikiEsRef.current.close();
+    wikiStreamJobIdRef.current = jobId;
     setWikiGenerating(true);
     setWikiError(false);
+
+    // Same replay-dedup contract as the design panel: the SSE endpoint
+    // replays the job's whole history on subscribe, so a panel that already
+    // hydrated from the durable snapshot must skip the replayed prefix.
+    const isReplay = createReplaySkipper(opts?.skipFirst ?? 0);
 
     wikiEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
+        if (isReplay(evt.type)) return;
         if (evt.type === 'knowledge' || evt.type === 'knowledge_result') {
           // Optional knowledge pre-read: surface the read titles just like
           // the design panel does, so the wiki and design UIs read the
@@ -2119,6 +2166,7 @@ export default function RequirementDetail() {
         if (evt.type === 'job_done') {
           wikiEsRef.current?.close();
           wikiEsRef.current = null;
+          wikiStreamJobIdRef.current = null;
           setWikiGenerating(false);
           // Mirror design: keep the stream panel open on failure so the red
           // error line stays in view, and always refresh so the new
@@ -2140,6 +2188,7 @@ export default function RequirementDetail() {
       },
       () => {
         wikiEsRef.current = null;
+        wikiStreamJobIdRef.current = null;
         // SSE link dropped before job_done landed — the backend job may
         // still be running. Poll the snapshot; if the job has finished
         // server-side, refresh; otherwise leave wikiGenerating=true and let
@@ -2190,26 +2239,45 @@ export default function RequirementDetail() {
   // finished (server restarted and the JobStore evicted the slot, or the
   // job_done landed before we connected), healStaleJobs will clear
   // wiki_job_id on the next Get and we drop into the idle state.
+  const restoredWikiJobRef = useRef<string | null>(null);
   useEffect(() => {
     if (!id || !req?.wiki_job_id) return;
     const jobId = req.wiki_job_id;
+    // Already replayed this exact job — don't re-fetch on every req refresh.
+    if (restoredWikiJobRef.current === jobId) return;
+    // A live stream already owns the panel: re-hydrating would overwrite the
+    // live lines with the (older) snapshot, and re-subscribing would replay
+    // the whole history a second time.
+    if (wikiStreamJobIdRef.current) return;
+    restoredWikiJobRef.current = jobId;
     authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
       .then(r => r.json())
       .then(json => {
         if (!json.success) { setWikiGenerating(false); refresh(); return; }
+        // A stream took over while the snapshot was in flight — it owns the
+        // panel now, so leave it alone.
+        if (wikiStreamJobIdRef.current) return;
         const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: LogLine[] };
+        // rawCount = the backend snapshot's total LogLine count (including
+        // knowledge / usage frames the panel doesn't render). The SSE replay
+        // emits exactly that many frames before the first live one, so it's
+        // the replay-skip count.
+        const rawCount = log?.length ?? 0;
         if (log && log.length > 0) {
-          // Rehydrate only non-knowledge frames into wikiLines; knowledge
-          // pre-read events have already been processed by the live stream
-          // (or are stale, and the backend has nothing more to send for
-          // this run anyway). We keep it simple: all log lines are valid
-          // wiki panel content.
-          setWikiLines(prev => coalesceLogLines([...prev, ...log]));
+          // Replace (not append): the snapshot IS the full history of this
+          // job, and the live stream that follows replays the same lines.
+          // Appending here would duplicate them a second time.
+          // knowledge / usage frames are consumed by their own panels (same
+          // rule the live stream applies) — they're not log rows.
+          const kb = extractKnowledge(log);
+          if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
+          const visible = kb.lines.filter(l => l.type !== 'usage');
+          if (visible.length > 0) setWikiLines(coalesceLogLines(visible));
         }
         if (status === 'running') {
           setWikiGenerating(true);
           setWikiError(false);
-          streamWikiJob(jobId);
+          streamWikiJob(jobId, { skipFirst: rawCount });
         } else {
           // Already finished (or evicted from JobStore on server restart).
           // Drop into idle so the user sees the result or the CTA.
@@ -2218,7 +2286,12 @@ export default function RequirementDetail() {
           refresh();
         }
       })
-      .catch(() => setWikiGenerating(false));
+      .catch(() => {
+        // Allow a later attempt to re-fetch (the ref is the "already
+        // restored this job" marker, not a permanent latch).
+        restoredWikiJobRef.current = null;
+        setWikiGenerating(false);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, req?.wiki_job_id]);
 
@@ -2618,23 +2691,66 @@ export default function RequirementDetail() {
   // the job is still running we resume its stream, otherwise (server restarted,
   // job evicted from the in-memory ring buffer) we drop into the idle state so
   // the start button shows again.
+  const restoredDesignJobRef = useRef<string | null>(null);
   useEffect(() => {
     if (!id || !req?.design_job_id) return;
     const jobId = req.design_job_id;
+    // Already replayed this exact job — don't re-fetch on every req refresh.
+    if (restoredDesignJobRef.current === jobId) return;
+    // A live stream already owns the panel: re-hydrating would overwrite the
+    // live lines with the (older) snapshot, and re-subscribing would replay
+    // the whole history a second time. This covers both "the launch path
+    // already subscribed to this job" and "another job took over while the
+    // snapshot was in flight".
+    if (designStreamJobIdRef.current) return;
+    restoredDesignJobRef.current = jobId;
     authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
       .then(r => r.json())
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
+        // A stream took over while the snapshot was in flight — it owns the
+        // panel now, so leave it alone.
+        if (designStreamJobIdRef.current) return;
         const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: LogLine[] };
+        // rawCount = the backend snapshot's total LogLine count (including
+        // knowledge / usage frames the panel doesn't render). The SSE replay
+        // emits exactly that many frames before the first live one, so it's
+        // the replay-skip count.
+        const rawCount = log?.length ?? 0;
+        // The usage frames are consumed by the usage bar, never rendered as
+        // rows (same rule the live stream applies) — but the LAST one is
+        // needed to seed the bar after a refresh, since the replayed usage
+        // frames are skipped below.
+        let restoredUsage: UsageInfo | undefined;
         if (log && log.length > 0) {
           const kb = extractKnowledge(log);
           if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
-          if (kb.lines.length > 0) setDesignLines(coalesceLogLines(kb.lines));
+          const visible = kb.lines.filter(l => l.type !== 'usage');
+          if (visible.length > 0) setDesignLines(coalesceLogLines(visible));
+          const lastUsage = [...kb.lines].reverse().find(l => l.type === 'usage');
+          if (lastUsage) {
+            try {
+              const parsed = JSON.parse(lastUsage.content ?? '{}') as UsageInfo;
+              const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
+              const cw = parsed.context_window || 200000;
+              const pct = cw > 0 ? (used / cw) * 100 : 0;
+              restoredUsage = { ...parsed, used, pct };
+            } catch { /* malformed payload — ignore */ }
+          }
         }
-        if (status === 'running') streamDesignJob(jobId);
+        if (status === 'running') streamDesignJob(jobId, { skipFirst: rawCount });
         else { setDesigning(false); setDesignError(status === 'error' || exit_code !== 0); refresh(); }
+        // Seeded AFTER the stream starts: streamDesignJob resets the usage
+        // snapshot (a fresh run must not show the previous run's bar), so
+        // the restored value has to land after that reset.
+        if (restoredUsage) setDesignUsage(restoredUsage);
       })
-      .catch(() => setDesigning(false));
+      .catch(() => {
+        // Allow a later attempt to re-fetch (the ref is the "already
+        // restored this job" marker, not a permanent latch).
+        restoredDesignJobRef.current = null;
+        setDesigning(false);
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, req?.design_job_id]);
 
@@ -2669,24 +2785,16 @@ export default function RequirementDetail() {
     // Skip counter is captured per-stream — each new createEventStream call
     // resets it, so multiple reconnects within the same component lifetime
     // work correctly.
-    let seenCount = 0;
-    const skip = opts?.skipFirst ?? 0;
+    const isReplay = createReplaySkipper(opts?.skipFirst ?? 0);
 
     esRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
-        // job_done is terminal — never skip it, even if it lands within the
-        // replay window (it carries status/exit_code we need to act on).
-        if (evt.type !== 'job_done') {
-          // knowledge / message / tool_call / phase / error / done are all
-          // subject to the replay-skip: they correspond 1:1 to backend LogLines
-          // counted in `skip`.
-          if (seenCount < skip) {
-            seenCount++;
-            return;
-          }
-          seenCount++;
-        }
+        // The replay-skip comes first: knowledge / usage / message / tool_call
+        // / phase / error frames correspond 1:1 to the backend LogLines
+        // counted in skipFirst, and job_done is never skipped (it carries the
+        // status/exit_code we need to act on).
+        if (isReplay(evt.type)) return;
         if (evt.type === 'knowledge') {
           // Optional knowledge pre-read: surface the read titles instead of
           // appending the raw line to the coding panel.
@@ -3079,11 +3187,23 @@ export default function RequirementDetail() {
   // applyMergeSignals. The active job id is persisted to localStorage (same
   // pattern as the coding job) so a page refresh can reload the finished log
   // from the durable job_logs store.
-  const streamMergeJob = useCallback((jobId: string) => {
+  const streamMergeJob = useCallback((jobId: string, opts?: { skipFirst?: number }) => {
+    // A live stream for this exact job already owns the panel — reopening it
+    // would replay the job's history a second time.
+    if (mergeEsRef.current && mergeStreamJobIdRef.current === jobId) return;
     if (mergeEsRef.current) mergeEsRef.current.close();
+    mergeStreamJobIdRef.current = jobId;
     setMerging(true);
     setConflictFiles(null);
     if (id) localStorage.setItem(`merge_job_${id}`, jobId);
+
+    // The SSE endpoint replays the job's whole history on subscribe. When the
+    // caller already hydrated mergeLines from the durable snapshot, the
+    // replayed prefix must not be rendered a second time. The frames are
+    // still ACCUMULATED below (acc drives conflict detection) — only the
+    // rendering is skipped, otherwise a replayed conflict line would be
+    // missed and the conflict panel would never pop.
+    const isReplay = createReplaySkipper(opts?.skipFirst ?? 0);
 
     let acc: LogLine[] = [];
     mergeEsRef.current = createEventStream(
@@ -3092,6 +3212,7 @@ export default function RequirementDetail() {
         if (evt.type === 'job_done') {
           mergeEsRef.current?.close();
           mergeEsRef.current = null;
+          mergeStreamJobIdRef.current = null;
           setMerging(false);
           const exitOk = evt.status === 'done' || evt.exit_code === 0;
           if (id) localStorage.setItem(`merge_job_${id}`, `done:${jobId}`);
@@ -3108,10 +3229,11 @@ export default function RequirementDetail() {
         // Coalesce consecutive "Claude thinking… (N tokens)" phase lines into one
         // updatable row instead of stacking one per heartbeat.
         acc = appendLogLine(acc, line);
-        setMergeLines(prev => appendLogLine(prev, line));
+        if (!isReplay(evt.type)) setMergeLines(prev => appendLogLine(prev, line));
       },
       () => {
         mergeEsRef.current = null;
+        mergeStreamJobIdRef.current = null;
         setMerging(false);
       },
     );
@@ -3222,10 +3344,21 @@ export default function RequirementDetail() {
           return;
         }
         const { status, log } = json.data as { status: string; log: LogLine[] };
-        if (!log || log.length === 0) return;
-        setMergeLines(coalesceLogLines(log));
-        applyMergeSignals(log);
-        if (status === 'running') streamMergeJob(savedJobId);
+        const lines = log ?? [];
+        if (lines.length > 0) setMergeLines(coalesceLogLines(lines));
+        // The SSE endpoint replays the whole history on subscribe — skip the
+        // replayed prefix so the hydrated lines aren't rendered twice. A
+        // running job with no log lines yet still gets subscribed (otherwise
+        // the panel would stay frozen until the next manual action).
+        if (status === 'running') {
+          streamMergeJob(savedJobId, { skipFirst: lines.length });
+          // Applied AFTER the subscribe: streamMergeJob resets the conflict
+          // state on entry, so applying the signals first would wipe the
+          // conflict the snapshot already reported.
+          if (lines.length > 0) applyMergeSignals(lines);
+        } else if (lines.length > 0) {
+          applyMergeSignals(lines);
+        }
       })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3266,7 +3399,10 @@ export default function RequirementDetail() {
         const rawCount = log.length;
         const kb = extractKnowledge(log);
         if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
-        if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
+        // usage frames feed the usage bar, they're never rendered as rows —
+        // same rule the live stream applies.
+        const visible = kb.lines.filter(l => l.type !== 'usage');
+        if (visible.length > 0) setCodingLines(coalesceLogLines(visible));
         if (status === 'running') streamJob(jobId, { skipFirst: rawCount });
       })
       .catch(() => {});
