@@ -153,6 +153,24 @@ export default function ProjectClaudeDoc({ projectId }: { projectId: string }) {
   const exists = !!doc?.exists;
   const content = doc?.content ?? '';
 
+  // The disk-vs-managed hint has three states (see the render block below).
+  // The divergent one is the important one: the user edited the file on
+  // disk, the managed copy stayed behind, and every later stage kept
+  // injecting the stale conventions — invisible from the panel otherwise.
+  // The disk mtime is a separate fragment so the sentence stays intact when
+  // the timestamp is unavailable (an omitted field would otherwise leave a
+  // dangling empty parenthesis in the middle of the hint).
+  const diskAt = doc?.disk?.modified_at
+    ? t('claudeDoc.diskModifiedAt', { time: fmtDateTime(doc.disk.modified_at) })
+    : '';
+  const diskHint = !doc
+    ? ''
+    : doc.disk?.exists
+      ? (doc.disk.differs
+          ? t('claudeDoc.diskDiffers', { at: diskAt })
+          : t('claudeDoc.diskExists'))
+      : (exists ? t('claudeDoc.diskMissing') : '');
+
   return (
     <div className="claude-doc-panel">
       {error && <div className="claude-doc-error">{error}</div>}
@@ -174,11 +192,20 @@ export default function ProjectClaudeDoc({ projectId }: { projectId: string }) {
       </div>
 
       {/* Disk hint — the CLI auto-loads a CLAUDE.md that sits in the project
-          directory, so the user has to know that there are two documents. */}
-      {doc?.disk?.exists && (
-        <div className="claude-doc-disk">
-          <span>{t('claudeDoc.diskExists')}</span>
-          <button className="btn btn-sm" onClick={handleImport}>{t('claudeDoc.importFromDisk')}</button>
+          directory, so the user has to know that there are two documents.
+
+          Three states, because "the disk copy and the managed copy drifted
+          apart" is the one the user cannot see on their own: they edited
+          the file on disk, the managed copy stayed as it was, and every
+          later stage kept injecting the stale conventions. The reverse
+          state (a managed copy but no file on disk) gets its own line so
+          the panel never implies a disk file that isn't there. */}
+      {diskHint && (
+        <div className={`claude-doc-disk${doc?.disk?.differs ? ' claude-doc-disk-changed' : ''}`}>
+          <span>{diskHint}</span>
+          {doc?.disk?.exists && (
+            <button className="btn btn-sm" onClick={handleImport}>{t('claudeDoc.importFromDisk')}</button>
+          )}
         </div>
       )}
 

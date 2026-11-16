@@ -66,6 +66,14 @@
   color: var(--color-text-secondary);
 }
 
+/* The on-disk copy drifted from the managed one — the injected conventions
+   are the stale ones until the user imports the disk version. */
+.claude-doc-disk.claude-doc-changed {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+}
+
 /* ── Empty state ───────────────────────────────────────────────────── */
 .claude-doc-empty {
   padding: 32px 16px;

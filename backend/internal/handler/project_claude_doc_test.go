@@ -193,6 +193,11 @@ func TestClaudeDocImportFromDisk(t *testing.T) {
 	if !data.Disk.Exists {
 		t.Error("disk.exists = false although the file exists")
 	}
+	// Importing is the remedy for a diverged pair — after it the two copies
+	// must compare equal, otherwise the panel would keep warning.
+	if data.Disk.Differs {
+		t.Error("disk.differs = true right after importing the disk version")
+	}
 }
 
 // TestClaudeDocHiddenFromOtherUsers pins the per-project isolation: a user
@@ -362,4 +367,94 @@ func TestNormalizeClaudeDocContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClaudeDocDiskDivergence covers the "the two copies drifted apart" case.
+//
+// The managed (DB) copy is what every AI stage injects, while the on-disk
+// CLAUDE.md is what the user edits and what the Claude CLI auto-loads. When
+// they diverge, the user keeps injecting stale conventions without any
+// visible sign — the panel used to render the same neutral "a CLAUDE.md
+// exists on disk" line in both the identical and the diverged case.
+func TestClaudeDocDiskDivergence(t *testing.T) {
+	const diskContent = "# 磁盘版本\n\n分层：handler / service / model。\n"
+
+	t.Run("disk file differs from the managed copy", func(t *testing.T) {
+		dir := t.TempDir()
+		rig := newClaudeDocTestRig(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(diskContent), 0o644); err != nil {
+			t.Fatalf("write CLAUDE.md: %v", err)
+		}
+		// A managed copy that says something else (e.g. an older generation).
+		if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 旧版本\n", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+			t.Fatalf("seed doc: %v", err)
+		}
+
+		rec := rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+		data := decodeClaudeDocResp(t, rec)
+		if !data.Disk.Exists {
+			t.Fatal("disk.exists = false although the file exists")
+		}
+		if !data.Disk.Differs {
+			t.Error("disk.differs = false although the two copies differ")
+		}
+		if data.Disk.ModifiedAt == nil {
+			t.Error("disk.modified_at is nil although the file exists")
+		}
+	})
+
+	t.Run("disk file matches the managed copy", func(t *testing.T) {
+		dir := t.TempDir()
+		rig := newClaudeDocTestRig(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(diskContent), 0o644); err != nil {
+			t.Fatalf("write CLAUDE.md: %v", err)
+		}
+		// Exactly what an import stores.
+		if _, err := rig.svc.UpsertClaudeDoc(rig.proj, diskContent, model.ProjectClaudeDocSourceImported, false); err != nil {
+			t.Fatalf("seed doc: %v", err)
+		}
+
+		rec := rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+		data := decodeClaudeDocResp(t, rec)
+		if !data.Disk.Exists {
+			t.Fatal("disk.exists = false although the file exists")
+		}
+		if data.Disk.Differs {
+			t.Error("disk.differs = true although the two copies are identical")
+		}
+	})
+
+	t.Run("no managed copy yet", func(t *testing.T) {
+		dir := t.TempDir()
+		rig := newClaudeDocTestRig(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(diskContent), 0o644); err != nil {
+			t.Fatalf("write CLAUDE.md: %v", err)
+		}
+
+		rec := rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+		data := decodeClaudeDocResp(t, rec)
+		if !data.Disk.Exists {
+			t.Fatal("disk.exists = false although the file exists")
+		}
+		// Nothing to diverge from — the file is simply not imported yet.
+		if data.Disk.Differs {
+			t.Error("disk.differs = true although there is no managed copy")
+		}
+	})
+
+	t.Run("managed copy without a disk file", func(t *testing.T) {
+		rig := newClaudeDocTestRig(t, t.TempDir())
+		if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 托管副本\n", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+			t.Fatalf("seed doc: %v", err)
+		}
+
+		rec := rig.do(t, "GET", "/api/projects/"+rig.proj+"/claude-doc", "")
+		data := decodeClaudeDocResp(t, rec)
+		if data.Disk.Exists {
+			t.Error("disk.exists = true although there is no file")
+		}
+		if data.Disk.Differs {
+			t.Error("disk.differs = true although there is no file")
+		}
+	})
 }

@@ -3821,6 +3821,10 @@ export interface ProjectClaudeDocDisk {
   exists: boolean;
   path: string;
   bytes: number;
+  /** mtime of the on-disk file — it says which of the two copies is newer. */
+  modified_at?: string;
+  /** True when the on-disk file no longer matches the managed (DB) copy. */
+  differs: boolean;
 }
 
 export interface ProjectClaudeDoc {

@@ -81,6 +81,18 @@ type diskDocInfo struct {
 	Exists bool   `json:"exists"`
 	Path   string `json:"path"`
 	Bytes  int    `json:"bytes"`
+	// ModifiedAt is the on-disk file's mtime. It is what lets the user
+	// judge WHICH of the two copies is the newer one.
+	ModifiedAt *time.Time `json:"modified_at,omitempty"`
+	// Differs is true when the on-disk CLAUDE.md does not match the
+	// managed (DB) copy — the two have diverged.
+	//
+	// It is only meaningful when a managed copy exists: without one there
+	// is nothing to diverge from, and the disk file is simply not imported
+	// yet. The UI turns this into the "磁盘版本已变更，可导入" hint —
+	// without it the user keeps injecting stale conventions while their
+	// edits on disk sit unnoticed.
+	Differs bool `json:"differs"`
 }
 
 // authorize resolves the project behind the {id} path value and checks that
@@ -141,6 +153,12 @@ func (h *ProjectClaudeDocHandler) Get(w http.ResponseWriter, r *http.Request) {
 		resp.UpdatedAt = &updated
 		resp.Bytes = doc.Bytes
 	}
+	// Has the on-disk copy diverged from the managed one? The comparison
+	// needs a managed copy to compare against — with none, the disk file is
+	// simply "not imported yet", not "outdated".
+	if resp.Disk.Exists && resp.Exists && strings.TrimSpace(resp.Content) != "" {
+		resp.Disk.Differs = !diskContentMatches(p.LocalPath, resp.Content)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -158,7 +176,35 @@ func (h *ProjectClaudeDocHandler) diskInfo(projectPath string) diskDocInfo {
 	}
 	info.Exists = true
 	info.Bytes = int(st.Size())
+	mod := st.ModTime()
+	info.ModifiedAt = &mod
 	return info
+}
+
+// diskContentMatches reports whether the on-disk CLAUDE.md is byte-identical
+// to the managed copy.
+//
+// The size check comes first so a diverged document — the common case, and
+// the reason this function exists — is never read from disk. Only a
+// same-sized file is read, and that file is bounded by the size of the
+// managed copy we already hold in memory.
+func diskContentMatches(projectPath, managed string) bool {
+	if strings.TrimSpace(projectPath) == "" {
+		return false
+	}
+	path := filepath.Join(projectPath, "CLAUDE.md")
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	if st.Size() != int64(len(managed)) {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return string(data) == managed
 }
 
 // Put saves a hand-edited document.

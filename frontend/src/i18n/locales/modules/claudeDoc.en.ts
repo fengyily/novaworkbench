@@ -17,9 +17,12 @@ export const claudeDoc = {
   neverGenerated: 'Never generated',
   sizeLabel: '{{n}} bytes',
 
-  // Disk hint
+  // Disk hint — the on-disk CLAUDE.md and the managed copy are two documents,
+  // and the user can only see the managed one from this panel.
   diskExists: 'A CLAUDE.md already exists in the repository directory and the Claude CLI loads it automatically; the version on this panel wins.',
-  diskMissing: 'There is no CLAUDE.md in the repository directory.',
+  diskDiffers: 'The CLAUDE.md on disk no longer matches the managed copy{{at}}; the managed copy is still what gets injected — import the disk version to update it.',
+  diskModifiedAt: ' (disk version: {{time}})',
+  diskMissing: 'There is no CLAUDE.md in the repository directory; the managed copy is what gets injected.',
   importFromDisk: 'Import from disk',
 
   // Actions

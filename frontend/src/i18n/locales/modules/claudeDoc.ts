@@ -20,9 +20,12 @@ export const claudeDoc = {
   neverGenerated: '尚未生成过',
   sizeLabel: '{{n}} 字节',
 
-  // Disk hint
+  // Disk hint — the on-disk CLAUDE.md and the managed copy are two documents,
+  // and the user can only see the managed one from this panel.
   diskExists: '仓库目录中已存在 CLAUDE.md，Claude CLI 会自动加载它；本面板的版本为准。',
-  diskMissing: '仓库目录中没有 CLAUDE.md。',
+  diskDiffers: '磁盘上的 CLAUDE.md 与托管副本不一致{{at}}；当前注入的仍是托管副本，可导入磁盘版本。',
+  diskModifiedAt: '（磁盘版本：{{time}}）',
+  diskMissing: '仓库目录中没有 CLAUDE.md；当前注入的是托管副本。',
   importFromDisk: '从磁盘导入',
 
   // Actions
