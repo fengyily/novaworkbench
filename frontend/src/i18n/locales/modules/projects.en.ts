@@ -123,6 +123,7 @@ export const projects = {
       review: 'Code Review',
       usage: 'Token usage',
       weekly: 'Weekly report',
+      claudeDoc: 'Project CLAUDE.md',
     },
     activeSuffix: ' ●',
     basicTitle: 'Basic info',

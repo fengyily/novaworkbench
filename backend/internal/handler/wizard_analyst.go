@@ -227,7 +227,13 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				len(readFiles), len(docBlock), len(treeSummary), len(desc))
 			base := buildAnalystFirstPrompt(requirement, desc, analysis, req.UserMessage, docBlock, treeSummary)
 			if block := promptpkg.AnalystBlock(requirement.Kind, requirement); block != "" {
-				return base + "\n\n" + block
+				base += "\n\n" + block
+			}
+			// 项目级 CLAUDE.md —— 只在首轮注入：续轮沿用同一个会话，文档
+			// 已经在上下文里了，重复注入只是白烧 token。没有文档时
+			// claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
+			if block := claudeDocBlock(h.projectSvc, requirement.ProjectID, workDir); block != "" {
+				base += "\n\n" + block
 			}
 			return base
 		}

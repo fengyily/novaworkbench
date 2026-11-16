@@ -1226,6 +1226,14 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 		prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
 			p.Req.DesignContextSummary + "\n\n" + prompt
 	}
+	// 项目级 CLAUDE.md —— 项目的权威开发约定。放在三个分支之后（与
+	// ParentBlock / ReferencedBlock 同一个追加点），所以方案设计的三条路径
+	// （续接分析会话 / 跳过分析全新会话 / 带压缩摘要）都会带上它，而且只改
+	// 这一处。本地与远端共用 p.Prompt，Agent Server 执行同样覆盖。
+	// 没有文档时 claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
+	if block := claudeDocBlock(h.projectSvc, p.Req.ProjectID, workDir); block != "" {
+		prompt += "\n\n" + block
+	}
 	// Sub-requirement: append the master-requirement context (its settled
 	// description / plan / attachment manifest) plus the 「主需求关联上下文」
 	// output contract. Placed here, after all three prompt branches

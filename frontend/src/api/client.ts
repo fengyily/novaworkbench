@@ -3808,3 +3808,47 @@ export const issueMonitorApi = {
   listActive: () =>
     api.get<{ items: IssueMonitor[] }>(`/api/issue-monitors/active`),
 };
+
+// ── Project-level CLAUDE.md ───────────────────────────────────────────────
+//
+// The managed, project-scoped AI guide. It lives in the DB (never in the
+// user's working tree) and is injected into the analysis / design / coding
+// / sub-task stages, so the model stops re-discovering the project layout
+// on every requirement.
+export type ProjectClaudeDocSource = 'generated' | 'manual' | 'imported';
+
+export interface ProjectClaudeDocDisk {
+  exists: boolean;
+  path: string;
+  bytes: number;
+}
+
+export interface ProjectClaudeDoc {
+  /** False when the project has no document yet — the endpoint answers 200. */
+  exists: boolean;
+  content: string;
+  source: ProjectClaudeDocSource;
+  /** Last AI generation time. A manual edit does NOT change it. */
+  generated_at?: string;
+  updated_at?: string;
+  bytes: number;
+  /** The CLAUDE.md that may already exist in the project directory. */
+  disk: ProjectClaudeDocDisk;
+}
+
+export const projectClaudeDocApi = {
+  get: (projectId: string) =>
+    api.get<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc`),
+  save: (projectId: string, content: string) =>
+    api.put<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc`, { content }),
+  remove: (projectId: string) =>
+    api.delete<void>(`/api/projects/${projectId}/claude-doc`),
+  generate: (projectId: string, focus?: string) =>
+    api.post<{ job_id: string }>(`/api/projects/${projectId}/claude-doc/generate`, {
+      focus: focus ?? '',
+    }),
+  importFromDisk: (projectId: string) =>
+    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/import`, {}),
+  streamJobUrl: (projectId: string, jobId: string) =>
+    `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
+};

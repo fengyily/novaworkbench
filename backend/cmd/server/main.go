@@ -592,6 +592,22 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/issue-monitor/test", issueMonH.Test)
 	mux.HandleFunc("GET /api/issue-monitors/active", issueMonH.ListActive)
 
+	// Project-level CLAUDE.md — the managed project asset that is injected
+	// into the analysis / design / coding / sub-task stages. Six routes:
+	//   GET    /api/projects/{id}/claude-doc                → the document (200 even when absent)
+	//   PUT    /api/projects/{id}/claude-doc                → manual save
+	//   DELETE /api/projects/{id}/claude-doc                → drop it
+	//   POST   /api/projects/{id}/claude-doc/generate       → AI generation (async job)
+	//   POST   /api/projects/{id}/claude-doc/import         → import the on-disk CLAUDE.md
+	//   GET    /api/projects/{id}/claude-doc/jobs/{job_id}/stream → SSE progress
+	claudeDocH := handler.NewProjectClaudeDocHandler(projectSvc, llmGateway, sharedJobs)
+	mux.HandleFunc("GET /api/projects/{id}/claude-doc", claudeDocH.Get)
+	mux.HandleFunc("PUT /api/projects/{id}/claude-doc", claudeDocH.Put)
+	mux.HandleFunc("DELETE /api/projects/{id}/claude-doc", claudeDocH.Delete)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/generate", claudeDocH.Generate)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/import", claudeDocH.Import)
+	mux.HandleFunc("GET /api/projects/{id}/claude-doc/jobs/{job_id}/stream", claudeDocH.StreamJob)
+
 	// Run sessions (docker compose)
 	mux.HandleFunc("POST /api/projects/{id}/run/start", runnerH.Start)
 	mux.HandleFunc("POST /api/projects/{id}/run/stop", runnerH.Stop)

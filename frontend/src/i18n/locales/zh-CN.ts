@@ -18,6 +18,7 @@ import reports from './modules/reports';
 import schedules from './modules/schedules';
 import settings from './modules/settings';
 import components from './modules/components';
+import { claudeDoc } from './modules/claudeDoc';
 
 
 const zhCN = {
@@ -37,6 +38,7 @@ const zhCN = {
   reports,
   schedules,
   settings,
+  claudeDoc,
 
   components,
 };

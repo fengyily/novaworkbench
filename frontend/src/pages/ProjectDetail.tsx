@@ -24,6 +24,7 @@ import { useRowSelection } from '../components/RequirementBatch/useRowSelection'
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
+import ProjectClaudeDoc from './ProjectClaudeDoc';
 import ProjectCodeReview from './ProjectCodeReview';
 import { IconChat, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
@@ -34,7 +35,7 @@ import './KnowledgePage.css';
 import { errorMessage as errMsg } from '../utils/errMsg';
 import { Breadcrumb } from '../components/Breadcrumb';
 
-type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor';
+type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor' | 'claudeDoc';
 
 // Columns the requirements table allows the user to sort by clicking the
 // header. Each value maps to one logical comparator in `compareRequirements`
@@ -1968,6 +1969,9 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'issueMonitor' ? ' active' : ''}`} onClick={() => setTab('issueMonitor')}>
           {t('settings.issueMonitor.title')}
         </button>
+        <button className={`tab-btn${tab === 'claudeDoc' ? ' active' : ''}`} onClick={() => setTab('claudeDoc')}>
+          {t('projects.detail.tabs.claudeDoc')}
+        </button>
       </div>
 
       {/* ── Overview ── */}
@@ -2946,6 +2950,13 @@ export default function ProjectDetail() {
       {tab === 'issueMonitor' && id && (
         <div className="tab-content">
           <ProjectIssueMonitor projectId={id} />
+        </div>
+      )}
+
+      {/* ── Project-level CLAUDE.md ── */}
+      {tab === 'claudeDoc' && id && (
+        <div className="tab-content">
+          <ProjectClaudeDoc projectId={id} />
         </div>
       )}
 

@@ -28,6 +28,24 @@ CREATE TABLE IF NOT EXISTS projects (
 	description_hash TEXT NOT NULL DEFAULT ''
 );
 
+-- Project-level CLAUDE.md (the "项目级约定" asset). Stored in the DB on
+-- purpose: the document is a managed asset of the platform, not a file in
+-- the user's repository — it must work for non-git projects too, and it
+-- must never dirty a working tree.
+--
+-- One row per project (project_id is UNIQUE). md_content is MEDIUMTEXT on
+-- MySQL (see mysqlMediumTextCol) because a CLAUDE.md can exceed the 64KB
+-- TEXT ceiling. The injection side truncates at 32KB anyway.
+CREATE TABLE IF NOT EXISTS project_claude_docs (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL UNIQUE,
+	md_content TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT 'generated',
+	generated_at DATETIME,
+	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS memories (
 	id TEXT PRIMARY KEY,
 	project_id TEXT NOT NULL,
@@ -1800,12 +1818,17 @@ var (
 	// part of its UNIQUE(requirement_id, depends_on_id) constraint).
 	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
+	// md_content holds a whole CLAUDE.md, which routinely exceeds MySQL's
+	// 64KB TEXT ceiling → MEDIUMTEXT (16MB). Applied BEFORE mysqlTextDefault
+	// so the literal default is rewritten for the new type as well.
+	mysqlMediumTextCol = regexp.MustCompile(`(?m)^(\s*)md_content(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)
 	mysqlKeyCol = regexp.MustCompile(`(?m)^(\s*)key(\s+)TEXT\b`)
 	// MySQL forbids plain literal defaults on TEXT; the expression form
-	// DEFAULT ('...') is allowed since 8.0.13.
-	mysqlTextDefault = regexp.MustCompile(`\bTEXT(\s+NOT NULL)?\s+DEFAULT\s+('[^']*')`)
+	// DEFAULT ('...') is allowed since 8.0.13. MEDIUMTEXT is covered too —
+	// mysqlMediumTextCol may have rewritten the type before this runs.
+	mysqlTextDefault = regexp.MustCompile(`\b(TEXT|MEDIUMTEXT)(\s+NOT NULL)?\s+DEFAULT\s+('[^']*')`)
 )
 
 // fixupSchema translates the canonical SQLite-flavored DDL for the dialect.
@@ -1817,7 +1840,8 @@ func fixupSchema(dialect Dialect, schema string) string {
 		s := mysqlIndexedCol.ReplaceAllString(schema, "${1}${2}${3}VARCHAR(64)")
 		s = mysqlLocalPathCol.ReplaceAllString(s, "${1}local_path${2}VARCHAR(512)")
 		s = mysqlKeyCol.ReplaceAllString(s, "${1}`key`${2}VARCHAR(191)")
-		s = mysqlTextDefault.ReplaceAllString(s, "TEXT$1 DEFAULT ($2)")
+		s = mysqlMediumTextCol.ReplaceAllString(s, "${1}md_content${2}MEDIUMTEXT")
+		s = mysqlTextDefault.ReplaceAllString(s, "${1}$2 DEFAULT ($3)")
 		// MySQL has no CREATE INDEX IF NOT EXISTS — drop the clause and rely
 		// on ignoring "Duplicate key name" (1061) on subsequent boots.
 		s = strings.ReplaceAll(s, "CREATE INDEX IF NOT EXISTS", "CREATE INDEX")
