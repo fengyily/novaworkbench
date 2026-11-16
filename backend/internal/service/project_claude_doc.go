@@ -33,10 +33,11 @@ func (s *ProjectService) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, e
 	}
 	var d model.ProjectClaudeDoc
 	var generatedAt sql.NullTime
+	var manualEditedAt sql.NullTime
 	err := s.db.QueryRow(
-		`SELECT id, project_id, md_content, source, generated_at, updated_at
+		`SELECT id, project_id, md_content, source, generated_at, manual_edited_at, updated_at
 		 FROM project_claude_docs WHERE project_id = ?`, projectID).
-		Scan(&d.ID, &d.ProjectID, &d.Content, &d.Source, &generatedAt, &d.UpdatedAt)
+		Scan(&d.ID, &d.ProjectID, &d.Content, &d.Source, &generatedAt, &manualEditedAt, &d.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -46,6 +47,10 @@ func (s *ProjectService) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, e
 	if generatedAt.Valid {
 		t := generatedAt.Time
 		d.GeneratedAt = &t
+	}
+	if manualEditedAt.Valid {
+		t := manualEditedAt.Time
+		d.ManualEditedAt = &t
 	}
 	d.Bytes = len(d.Content)
 	return &d, nil
@@ -60,12 +65,24 @@ func (s *ProjectService) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, e
 //     previous value. The badge answers "when was this last machine
 //     written", and a manual edit must not fake a fresh generation.
 //
+// The content is treated as HAND-EDITED exactly when it comes from a human
+// (source=manual): that stamps manual_edited_at, the guard flag the
+// destructive replaces check before they overwrite a document.
+//
 // The previous stamp is READ first and then written back as a plain value,
 // rather than being referenced from the conflict clause. That keeps the
 // statement portable: an unqualified column reference inside
 // ON CONFLICT DO UPDATE is ambiguous on PostgreSQL (SQLSTATE 42702), and
 // the table-qualified form is not accepted the same way on every dialect.
 func (s *ProjectService) UpsertClaudeDoc(projectID, content, source string, markGenerated bool) (*model.ProjectClaudeDoc, error) {
+	return s.upsertClaudeDoc(projectID, content, source, markGenerated, source == model.ProjectClaudeDocSourceManual)
+}
+
+// upsertClaudeDoc is the single write path. manualEdited is passed
+// explicitly because a RESTORED version keeps the source it was created
+// with, while still counting as human-managed content (the user put it
+// back on purpose).
+func (s *ProjectService) upsertClaudeDoc(projectID, content, source string, markGenerated, manualEdited bool) (*model.ProjectClaudeDoc, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return nil, sql.ErrNoRows
 	}
@@ -82,14 +99,18 @@ func (s *ProjectService) UpsertClaudeDoc(projectID, content, source string, mark
 			genVal = *existing.GeneratedAt
 		}
 	}
+	var manualVal any
+	if manualEdited {
+		manualVal = now
+	}
 	id := util.NewID("pcd")
 	_, err := s.db.Exec(
-		`INSERT INTO project_claude_docs (id, project_id, md_content, source, generated_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`+
+		`INSERT INTO project_claude_docs (id, project_id, md_content, source, generated_at, updated_at, manual_edited_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`+
 			s.db.OnConflict(s.db.Ident("project_id"),
-				`md_content = ?, source = ?, generated_at = ?, updated_at = ?`),
-		id, projectID, content, source, genVal, now,
-		content, source, genVal, now)
+				`md_content = ?, source = ?, generated_at = ?, updated_at = ?, manual_edited_at = ?`),
+		id, projectID, content, source, genVal, now, manualVal,
+		content, source, genVal, now, manualVal)
 	if err != nil {
 		return nil, err
 	}

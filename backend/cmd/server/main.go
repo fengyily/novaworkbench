@@ -607,6 +607,11 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/claude-doc/generate", claudeDocH.Generate)
 	mux.HandleFunc("POST /api/projects/{id}/claude-doc/import", claudeDocH.Import)
 	mux.HandleFunc("GET /api/projects/{id}/claude-doc/jobs/{job_id}/stream", claudeDocH.StreamJob)
+	// Version history — every destructive replace (an AI regeneration, a disk
+	// import) snapshots the outgoing document, so a hand-edited version the
+	// user has already read can be restored.
+	mux.HandleFunc("GET /api/projects/{id}/claude-doc/revisions", claudeDocH.ListRevisions)
+	mux.HandleFunc("POST /api/projects/{id}/claude-doc/revisions/{rev_id}/restore", claudeDocH.RestoreRevision)
 
 	// Run sessions (docker compose)
 	mux.HandleFunc("POST /api/projects/{id}/run/start", runnerH.Start)

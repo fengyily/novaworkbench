@@ -1593,6 +1593,30 @@ func gitRunPlain(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// BuildGitCredentialEnv exposes the project's bound platform token as
+// GIT_ASKPASS env pairs, so callers outside the service layer can
+// authenticate a `git fetch` against a private HTTPS remote.
+//
+// The project CLAUDE.md generator uses it to fetch the base branch before
+// generating a document from the latest main-branch content.
+//
+// The returned cleanup func releases the temporary askpass script and is
+// never nil. A project without a bound token, with an SSH remote, or without
+// a remote at all degrades to ambient credentials: an empty env, no error.
+func (s *ProjectService) BuildGitCredentialEnv(ctx context.Context, projectID string) ([]string, func()) {
+	noop := func() {}
+	if s == nil || s.gitCredSvc == nil || strings.TrimSpace(projectID) == "" {
+		return nil, noop
+	}
+	env, cleanup, err := s.gitCredSvc.BuildEnv(ctx, projectID)
+	if err != nil || cleanup == nil {
+		// BuildEnv already logged the precise reason; degrade silently to
+		// ambient credentials.
+		return nil, noop
+	}
+	return env, cleanup
+}
+
 // EnsureClonedAndSynced is the wizard prologue for every architect / coding
 // / analyst stage: it makes sure the project's local checkout is either
 // cloned from origin (when missing) or freshly fetched from origin/<base>
@@ -1826,7 +1850,7 @@ func (s *ProjectService) Purge(id string) error {
 	}
 
 	// Direct children keyed off project_id.
-	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "requirements"}
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements"}
 	for _, tbl := range projScoped {
 		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
 			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)

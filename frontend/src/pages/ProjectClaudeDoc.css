@@ -66,6 +66,14 @@
   color: var(--color-text-secondary);
 }
 
+/* The on-disk copy drifted from the managed one — the injected conventions
+   are the stale ones until the user imports the disk version. */
+.claude-doc-disk.claude-doc-changed {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+}
+
 /* ── Empty state ───────────────────────────────────────────────────── */
 .claude-doc-empty {
   padding: 32px 16px;
@@ -161,6 +169,7 @@
 }
 
 .claude-doc-log-error { color: var(--color-error-deep); }
+.claude-doc-log-warning { color: var(--color-warning-deep); }
 .claude-doc-log-phase { color: var(--color-primary); }
 .claude-doc-log-tool_call { color: var(--color-text); }
 .claude-doc-log-done { color: var(--color-success-deep); }
@@ -184,3 +193,55 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* ── Manual-edit badge ────────────────────────────────────────────────── */
+.claude-doc-badge-manual {
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+}
+
+/* ── Version history ──────────────────────────────────────────────────── */
+.claude-doc-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.claude-doc-history-list {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.claude-doc-history-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.claude-doc-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.claude-doc-history-row:last-child { border-bottom: none; }
+
+.claude-doc-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.claude-doc-history-time { font-family: var(--font-mono); }
+
+.claude-doc-history-reason { color: var(--color-text-muted); }
+
+.claude-doc-history-size { color: var(--color-text-muted); }
