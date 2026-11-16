@@ -2137,6 +2137,18 @@ function isLongSummary(raw: string | undefined): boolean {
   return lines > 12 || chars > 1200;
 }
 
+// The legal range of the auto-iteration round budget. It mirrors the
+// backend's own range (handler/review_auto_iterate.go): the input is
+// clamped so a half-typed value never reaches the API, and the backend
+// still rejects an out-of-range pick rather than silently correcting it.
+const AUTO_ITERATE_MIN_ROUNDS = 1;
+const AUTO_ITERATE_MAX_ROUNDS = 10;
+
+function clampAutoRounds(n: number): number {
+  if (!Number.isFinite(n)) return AUTO_ITERATE_MIN_ROUNDS;
+  return Math.min(AUTO_ITERATE_MAX_ROUNDS, Math.max(AUTO_ITERATE_MIN_ROUNDS, Math.round(n)));
+}
+
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [], allowReview = false }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
@@ -2215,6 +2227,22 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // that decision inside a state updater (which React may run twice).
   const reviewGoalRef = useRef(reviewGoal);
   useEffect(() => { reviewGoalRef.current = reviewGoal; }, [reviewGoal]);
+  // ── auto-iteration ───────────────────────────────────────────────────────
+  // The user can ask the backend to run the whole "fix -> re-review" loop by
+  // itself: it creates the round's P0/P1 fix sub-tasks, waits for them, and
+  // starts the next round — until the code is clean or the round budget runs
+  // out.
+  //
+  // The round budget counts the EXTRA rounds (the first one always runs), so
+  // the default of 1 means "one more round after this one". The backend
+  // rejects anything outside 1..10 rather than silently correcting it, so
+  // the input mirrors that range.
+  const [reviewAutoIterate, setReviewAutoIterate] = useState(false);
+  // The round budget is kept as TEXT so a half-typed value (an empty box)
+  // does not jump back to the minimum under the user's cursor. The numeric
+  // budget is derived from it and clamped on blur / on submit.
+  const [reviewAutoRoundsText, setReviewAutoRoundsText] = useState('1');
+  const reviewAutoRounds = clampAutoRounds(Number(reviewAutoRoundsText));
 
   // --- Screenshot ingestion (paste / drop / file picker) -----------------
   // Parity with the create-requirement form's RichDescriptionEditor: any
@@ -2836,6 +2864,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           role_key: reviewRoleKey || DEFAULT_REVIEW_ROLE_KEY,
           ...(createModel ? { model: createModel } : {}),
           ...(createConfigId ? { claude_config_id: createConfigId } : {}),
+          // Auto-iteration: the backend then drives the "fix -> re-review"
+          // loop itself. The round budget counts the EXTRA rounds (the
+          // first one always runs). The field is only sent when the switch
+          // is on — an off switch must leave the backend's behaviour
+          // exactly as it was.
+          ...(reviewAutoIterate
+            ? { auto_iterate: true, auto_iterate_rounds: reviewAutoRounds }
+            : {}),
           // Reasoning-effort tier (claude CLI --effort). A Review grades
           // other people's work → the 'other' stage default. Sent ONLY when
           // the user actually picked one: an unpicked run leaves the field
@@ -2900,7 +2936,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, reviewEffort, requirementId, loadList, t, reset]);
+  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, reviewEffort, reviewAutoIterate, reviewAutoRounds, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -3600,6 +3636,56 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onChange={setReviewEffort}
             disabled={!effortDefaults.enabled || submitting || reSplitBusy}
           />
+        </div>
+        )}
+        {/* Auto-iteration — the switch that hands the whole
+            "fix -> re-review" loop to the backend. It sits right under the
+            reasoning picker because it is the same kind of control: it
+            decides how THIS review behaves, not what it looks at.
+
+            The round input counts the EXTRA rounds (the first one always
+            runs), so the default of 1 means "one more round after this
+            one" — i.e. the backend runs a fix round and then re-reviews
+            the result on its own. */}
+        {composerMode === 'review' && (
+        <div className="sub-session-mode">
+          <span className="sub-session-mode-label" id="sub-review-auto-iterate-label">
+            {t('components.subTaskPanel.reviewAutoIterateLabel')}
+          </span>
+          <div className="sub-session-mode-segments" role="group" aria-labelledby="sub-review-auto-iterate-label">
+            <label className={`sub-session-mode-option${reviewAutoIterate ? ' is-active' : ''}`}>
+              <input
+                type="checkbox"
+                checked={reviewAutoIterate}
+                onChange={(e) => setReviewAutoIterate(e.target.checked)}
+                disabled={submitting || reSplitBusy}
+              />
+              <span className="sub-session-mode-option-text">
+                {t('components.subTaskPanel.reviewAutoIterateCheckbox')}
+              </span>
+            </label>
+            <label className="sub-session-mode-option">
+              <span className="sub-session-mode-option-text">
+                {t('components.subTaskPanel.reviewAutoRoundsLabel')}
+              </span>
+              <input
+                type="number"
+                className="form-input"
+                value={reviewAutoRoundsText}
+                min={AUTO_ITERATE_MIN_ROUNDS}
+                max={AUTO_ITERATE_MAX_ROUNDS}
+                onChange={(e) => setReviewAutoRoundsText(e.target.value)}
+                // Selecting the content on focus lets a fresh value REPLACE
+                // the pre-filled one instead of being appended to it.
+                onFocus={(e) => e.currentTarget.select()}
+                onBlur={() => setReviewAutoRoundsText(String(reviewAutoRounds))}
+                disabled={!reviewAutoIterate || submitting || reSplitBusy}
+              />
+            </label>
+          </div>
+          <span className="sub-session-mode-desc" role="note">
+            {t('components.subTaskPanel.reviewAutoIterateHint')}
+          </span>
         </div>
         )}
         {uploads.length > 0 && (

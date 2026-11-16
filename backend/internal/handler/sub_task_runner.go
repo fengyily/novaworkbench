@@ -874,6 +874,40 @@ func (r *SubTaskRunner) Run(
 	parentSourceSID string,
 	reportMode string,
 ) {
+	r.RunFix(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride,
+		adjust, fork, freshSession, bare, parentSourceSID, reportMode, nil)
+}
+
+// RunFix executes an implementation sub-task and reports its terminal state
+// to a caller-supplied hook.
+//
+// It is Run with exactly ONE addition: the onFinished callback, which fires
+// after the terminal state has been persisted (the same moment the Review
+// path's report write-back fires). The requirement-level Review's
+// auto-iteration chain needs it — the chain advances when ALL of a round's
+// fix sub-tasks are done, and the hook is how the chain learns that without
+// polling.
+//
+// Every other parameter is identical to Run's, and Run delegates here, so the
+// manual path and the automatic path can never drift into running the same
+// fix differently.
+func (r *SubTaskRunner) RunFix(
+	req *model.Requirement,
+	st *model.SubTask,
+	job *store.Job,
+	newSID string,
+	sourceSID string,
+	body string,
+	modelOverride string,
+	configIDOverride string,
+	adjust bool,
+	fork bool,
+	freshSession bool,
+	bare bool,
+	parentSourceSID string,
+	reportMode string,
+	onFinished func(st *model.SubTask, out claudeStreamOutcome, artifactBody string),
+) {
 	r.run(req, st, job, newSID, sourceSID, subTaskRunSpec{
 		body:             body,
 		modelOverride:    modelOverride,
@@ -885,6 +919,7 @@ func (r *SubTaskRunner) Run(
 		parentSourceSID:  parentSourceSID,
 		reportMode:       reportMode,
 		taskKind:         model.SubTaskKindCode,
+		onFinished:       onFinished,
 	})
 }
 

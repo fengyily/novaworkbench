@@ -135,6 +135,13 @@ export const components = {
     reviewScanBusy: 'Scanning…',
     reviewScanEmpty: 'The static checks reported nothing.',
     reviewLocalOnlyHint: 'Requirement-level Review v1 runs locally only: a re-review has to see the uncommitted fixes in the working tree.',
+    // Auto-iteration: the backend drives the whole "fix → re-review" loop
+    // by itself. The round count is the number of EXTRA rounds after the
+    // first one (the first round always runs).
+    reviewAutoIterateLabel: 'Auto-iteration',
+    reviewAutoIterateCheckbox: 'Auto-iterate',
+    reviewAutoRoundsLabel: 'Extra rounds',
+    reviewAutoIterateHint: 'When on, the backend creates the fix sub-tasks and starts the next round by itself, until P0/P1 are clear or the round budget runs out. The count is the extra rounds after the first one.',
     reviewNotDoneHint: 'A Review does not wait for the requirement to be marked "done" — it grades the branch as it stands (committed + uncommitted); whether that is good enough is your call.',
     reviewSubmitBtn: '🔍 Start Review',
     loading: 'Loading…',
@@ -291,6 +298,21 @@ export const components = {
     reviewCreateFixes: 'Create fix sub-tasks ({{n}})',
     reviewCreateFixesBusy: 'Creating…',
     reviewCreateFixesHint: 'Turn the checked findings into fix sub-tasks (nested under this Review), then re-review once they are done.',
+    // The auto-iteration chain's badge: the round progress, the chain's
+    // state, and the reason it stopped.
+    reviewAutoChip: 'Auto-iterate · round {{round}}/{{total}}',
+    reviewAutoChipHint: 'This round belongs to an auto-iteration chain: the backend creates the fix sub-tasks and starts the next round by itself',
+    reviewAutoStateCurrent: 'running',
+    reviewAutoStateWaitingFix: 'waiting for the fix sub-tasks',
+    reviewAutoStateAdvanced: 'advanced to the next round',
+    reviewAutoStateConverged: 'finished · P0/P1 cleared',
+    reviewAutoStateStopped: 'stopped',
+    reviewAutoNoteConverged: 'P0/P1 cleared',
+    reviewAutoNoteMaxRounds: 'the round budget ran out',
+    reviewAutoNoteFixFailed: 'a fix sub-task did not finish',
+    reviewAutoNoteNoFindings: 'the Review produced no structured findings',
+    reviewAutoNoteReviewFailed: 'the Review round failed',
+    reviewAutoBusyHint: 'The auto-iteration chain is running and the backend advances it by itself — wait for this round to finish, or stop the fix sub-tasks first.',
     reviewRecheck: '🔁 Re-review',
     reviewRecheckBusy: 'Starting…',
     reviewRecheckHint: 'Start another Review round (round +1) over the current working tree, to confirm the fixes worked.',
