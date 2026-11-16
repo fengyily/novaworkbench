@@ -170,7 +170,7 @@ export function RequirementChildrenPanel({
                 </div>
                 <div className="req-child-meta">
                   <span className="req-child-meta-item">
-                    {t('requirements.split.baseFollows', { base: c.base_branch || 'main' })}
+                    {t('requirements.split.baseFollows', { base: c.base_branch_effective || c.base_branch || 'main' })}
                   </span>
                   {deps.length > 0 && (
                     <span className="req-child-meta-item req-child-meta-dep">

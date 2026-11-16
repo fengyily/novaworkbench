@@ -117,7 +117,7 @@ type SplitCreateOpts struct {
 	// 「无分析会话」分支本来就只在 !skipAnalysis 时才要求会话存在）。
 	SkipAnalysis *bool
 	// BaseBranch — 子需求共同继承的基线（堆叠 PR 的栈底，即主需求的开发
-	// 分支 feat/req_<master>）。留空则由 splitBaseBranch 按主需求自身的
+	// 分支 feat/req_<master>）。留空则由 inheritedBaseBranch 按主需求自身的
 	// 分支 / 基线 / 项目默认推导。
 	//
 	// 调用方（handler）在拆分时已经把这个分支创建出来并推送到了远端，
@@ -169,7 +169,7 @@ func (s *RequirementService) CreateChildren(
 
 	base := strings.TrimSpace(opts.BaseBranch)
 	if base == "" {
-		base = s.splitBaseBranch(parent)
+		base = s.inheritedBaseBranch(parent)
 	}
 
 	batchID := strings.TrimSpace(opts.BatchID)
@@ -257,33 +257,6 @@ func (s *RequirementService) CreateChildren(
 		out = append(out, row)
 	}
 	return out, nil
-}
-
-// splitBaseBranch resolves the base branch every child inherits.
-//
-// The mapping is the identity on the master's DEVELOPMENT branch: every
-// requirement that enters development lands on feat/req_<id>, and a split
-// master keeps that branch as the stack bottom its children branch off.
-// Fallbacks: master development branch → master base → project default →
-// "main".
-//
-// The source is ALWAYS model.BaseSourceParent — never explicit. "explicit"
-// means "the user picked this on THIS requirement", and the user did not:
-// they picked it on the master, and the child merely follows.
-func (s *RequirementService) splitBaseBranch(parent *model.Requirement) string {
-	if b := strings.TrimSpace(parent.BranchName); b != "" {
-		return b
-	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
-		return b
-	}
-	var projectDefault string
-	if err := s.db.QueryRow("SELECT default_branch FROM projects WHERE id = ?", parent.ProjectID).Scan(&projectDefault); err == nil {
-		if b := strings.TrimSpace(projectDefault); b != "" {
-			return b
-		}
-	}
-	return "main"
 }
 
 // buildSplitDescription assembles a child's description **deterministically**
