@@ -301,6 +301,9 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 	s.attachAgentServerNames(items)
 	s.attachScheduledRunAt(items)
+	// Fill the effective base branch (not persisted — recomputed on every
+	// read) so the list rows carry the same value the detail page shows.
+	s.attachEffectiveBase(items)
 	return items, nil
 }
 
@@ -543,11 +546,20 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	_ = s.db.QueryRow(
 		"SELECT completed_at FROM sub_tasks WHERE requirement_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1", id,
 	).Scan(&r.DevEndedAt)
-	// Resolve the agent server display name (no-op for local rows).
+	// Resolve the agent server display name (no-op for local rows) and the
+	// effective base branch the requirement would use right now.
+	//
+	// BaseBranchEffective is NOT persisted — it is recomputed on every read
+	// from the row, the parent row and the project default. The frontend
+	// seeds its BASE picker with it, so an untouched picker echoes the auto
+	// value back and the resolver does not mistake it for an explicit choice
+	// (which would freeze the base and kill the parent inheritance).
 	one := []model.Requirement{r}
 	s.attachAgentServerNames(one)
+	s.attachEffectiveBase(one)
 	r.AgentServerName = one[0].AgentServerName
 	r.DesignAgentServerName = one[0].DesignAgentServerName
+	r.BaseBranchEffective = one[0].BaseBranchEffective
 	return &r, nil
 }
 
@@ -640,16 +652,36 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 		return nil, err
 	}
 
-	// Columns (25) = VALUES list (25). split_batch_id / dev_delegated are
+	// A hand-made child inherits the parent's base branch — the SAME rule the
+	// split path applies (inheritedBaseBranch). Without it the child row
+	// carried an empty base_branch, so:
+	//   - the child panel showed the project default instead of the parent's
+	//     development branch, and
+	//   - the merge stage (which reads the persisted column, not the runtime
+	//     resolver) pushed the child's PR at the project default, collapsing
+	//     the stacked-PR stack.
+	//
+	// The source is ALWAYS "parent", never "explicit": the user did not pick
+	// a base on THIS requirement — they are following the master. A later
+	// explicit pick still wins (tier 2 of the resolution chain).
+	baseBranch, baseSource := "", ""
+	if strings.TrimSpace(req.ParentID) != "" {
+		if parent := s.inheritedParentRow(req.ParentID); parent != nil {
+			baseBranch = s.inheritedBaseBranch(parent)
+			baseSource = model.BaseSourceParent
+		}
+	}
+
+	// Columns (27) = VALUES list (27). split_batch_id / dev_delegated are
 	// written explicitly (rather than left to their DEFAULT) so the generic
 	// create path can stamp a split-produced row without a second UPDATE.
 	// PromoteFromIdea below has its own INSERT and needs no change — the
 	// column defaults keep those rows at '' / 0.
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated,base_branch,base_branch_source) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, sourceReviewID, skipAnalysis, skipDesign, now, now,
 		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID,
-		req.SplitBatchID, req.DevDelegated)
+		req.SplitBatchID, req.DevDelegated, baseBranch, baseSource)
 	if err != nil {
 		return nil, err
 	}
@@ -2036,7 +2068,52 @@ func (s *RequirementService) SetParent(id, parentID string) (*model.Requirement,
 	if _, err := s.db.Exec("UPDATE requirements SET parent_id=?, updated_at=? WHERE id=?", parentID, time.Now(), id); err != nil {
 		return nil, err
 	}
+	// Re-home the base branch along with the parent link: a requirement that
+	// follows its master must follow the NEW master's branch.
+	//
+	// Two guards keep this from rewriting a base the user owns or a base the
+	// code already sits on:
+	//   - an explicit base is the user's own choice — never touched;
+	//   - a requirement that already developed has a worktree cut from its
+	//     old base; moving the base now would desync the working tree from
+	//     the PR target.
+	s.recomputeInheritedBase(self, parentID)
 	return s.Get(id)
+}
+
+// recomputeInheritedBase re-derives a requirement's base branch from its
+// (new) parent and persists it with the "parent" source.
+//
+// It is a no-op when the row has already developed (branch_name / worktree
+// present), when the stored base is an explicit user choice, or when the
+// parent cannot be read. Detaching (parentID == "") never rewrites the base:
+// the code already sits on that line, so moving the target would break the
+// PR rather than fix it.
+func (s *RequirementService) recomputeInheritedBase(self *model.Requirement, parentID string) {
+	if self == nil {
+		return
+	}
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return
+	}
+	if strings.TrimSpace(self.BranchName) != "" || strings.TrimSpace(self.WorktreePath) != "" {
+		return
+	}
+	if self.BaseBranchSource == model.BaseSourceExplicit {
+		return
+	}
+	parent := s.inheritedParentRow(parentID)
+	if parent == nil {
+		return
+	}
+	base := s.inheritedBaseBranch(parent)
+	if base == "" {
+		return
+	}
+	if err := s.UpdateBaseBranchWithSource(self.ID, base, model.BaseSourceParent); err != nil {
+		log.Printf("[requirement] recompute inherited base for %s failed: %v", self.ID, err)
+	}
 }
 
 // validateParentTarget checks that parentID may be used as the master of a

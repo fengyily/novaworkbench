@@ -193,3 +193,97 @@ func TestListQATurnCount(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateChildInheritsParentBase pins the base-branch inheritance of a
+// HAND-MADE child requirement.
+//
+// A child requirement must develop on top of the branch its master develops
+// on (feat/req_<master>) — that is the stack bottom of the stacked-PR model
+// and the reason the child's PR targets the master's branch instead of the
+// project default.
+//
+// The source marker is ALWAYS "parent", never "explicit": the user never
+// picked a base on THIS requirement, they are following the master. An
+// explicit pick later still wins (tier 2 of the resolution chain).
+func TestCreateChildInheritsParentBase(t *testing.T) {
+	d := newTestDB(t)
+	seedProject(t, d, "proj_a", "proj_a", "/tmp/proj_a")
+	s := NewRequirementService(d, nil)
+
+	// A master that already developed owns feat/req_<id>.
+	master := mkReq(t, s, "proj_a", "master")
+	masterBranch := "feat/req_" + master.ID
+	if err := s.UpdateWorktree(master.ID, masterBranch, ""); err != nil {
+		t.Fatalf("stamp master branch: %v", err)
+	}
+
+	child, err := s.Create(model.CreateRequirementReq{
+		ProjectID:   "proj_a",
+		Title:       "child",
+		Description: "child body",
+		ParentID:    master.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if child.BaseBranch != masterBranch {
+		t.Fatalf("child base_branch = %q, want %q", child.BaseBranch, masterBranch)
+	}
+	if child.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("child base_branch_source = %q, want %q", child.BaseBranchSource, model.BaseSourceParent)
+	}
+	// The read path must hand the frontend the very same value, so an
+	// untouched picker echoes it back and is NOT read as an explicit choice.
+	if child.BaseBranchEffective != masterBranch {
+		t.Fatalf("child base_branch_effective = %q, want %q", child.BaseBranchEffective, masterBranch)
+	}
+
+	// A master that has NOT developed yet has no branch of its own: the
+	// child inherits the master's base instead.
+	freshMaster := mkReq(t, s, "proj_a", "fresh master")
+	if err := s.UpdateBaseBranchWithSource(freshMaster.ID, "develop", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("stamp master base: %v", err)
+	}
+	child2, err := s.Create(model.CreateRequirementReq{
+		ProjectID: "proj_a",
+		Title:     "child2",
+		ParentID:  freshMaster.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child2: %v", err)
+	}
+	if child2.BaseBranch != "develop" {
+		t.Fatalf("child2 base_branch = %q, want %q", child2.BaseBranch, "develop")
+	}
+	if child2.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("child2 base_branch_source = %q, want %q", child2.BaseBranchSource, model.BaseSourceParent)
+	}
+
+	// A master with neither a branch nor a base: the child falls back to the
+	// project default — but the source still says "parent", because the
+	// value was derived from the master, not picked by the user.
+	bareMaster := mkReq(t, s, "proj_a", "bare master")
+	child3, err := s.Create(model.CreateRequirementReq{
+		ProjectID: "proj_a",
+		Title:     "child3",
+		ParentID:  bareMaster.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child3: %v", err)
+	}
+	if child3.BaseBranch != "main" {
+		t.Fatalf("child3 base_branch = %q, want %q", child3.BaseBranch, "main")
+	}
+	if child3.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("child3 base_branch_source = %q, want %q", child3.BaseBranchSource, model.BaseSourceParent)
+	}
+
+	// A TOP-LEVEL requirement inherits nothing: no base, no source. The
+	// resolver then falls back to the project default, which keeps following
+	// projects.default_branch.
+	top := mkReq(t, s, "proj_a", "top")
+	if top.BaseBranch != "" || top.BaseBranchSource != "" {
+		t.Fatalf("top-level row: base_branch=%q source=%q, want both empty",
+			top.BaseBranch, top.BaseBranchSource)
+	}
+}

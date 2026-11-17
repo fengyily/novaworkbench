@@ -20,6 +20,8 @@ var copyOrder = []string{
 	// Project-level CLAUDE.md — a direct child of projects, so it travels
 	// with them (and before any requirement-scoped table).
 	"project_claude_docs",
+	// …and its version history, which is a child of the same project.
+	"project_claude_doc_revisions",
 	"memories",
 	"requirements",
 	// Dependency edges between sibling sub-requirements — both endpoints are

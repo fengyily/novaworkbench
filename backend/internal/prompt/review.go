@@ -122,6 +122,19 @@ type ReviewPromptInput struct {
 	// Leaving it empty keeps the project-level Review's prompt byte-for-byte
 	// identical to what it has always been.
 	ScopeBlock string
+	// ProjectContext carries the project-level CLAUDE.md block (the
+	// 「项目级约定」 the platform manages for the project).
+	//
+	// The reviewer needs it: the checklist asks whether the change is
+	// consistent with 「与项目既有约定是否一致」, and a reviewer that never
+	// saw the conventions cannot answer that. It is rendered with the other
+	// context material — BEFORE the operation steps and the output
+	// contract — because the conventions are context for the review, not
+	// another contract the model has to satisfy.
+	//
+	// Empty (the requirement-level Review gets the same block through the
+	// sub-task prompt) leaves the prompt byte-for-byte unchanged.
+	ProjectContext string
 }
 
 // BuildReviewPrompt assembles the review task prompt (Chinese, per the
@@ -166,6 +179,12 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 	}
 	if in.HasAttachments {
 		b.WriteString(reviewAttachmentDirective)
+	}
+	// The project-level CLAUDE.md — the project's own conventions, which the
+	// checklist's 「与项目既有约定是否一致」 dimension is graded against.
+	if strings.TrimSpace(in.ProjectContext) != "" {
+		b.WriteString(strings.TrimSpace(in.ProjectContext))
+		b.WriteString("\n\n")
 	}
 
 	// The scope block replaces BOTH the diff-range line above and the
@@ -575,6 +594,12 @@ type RegeneratePromptInput struct {
 	// that silently stopped consulting the uploaded log would quietly
 	// downgrade every goal_check that cited it.
 	HasAttachments bool
+	// ProjectContext carries the project-level CLAUDE.md block — the same
+	// conventions the first review was graded against. A regenerated report
+	// is a NEW report the user reads on its own, so it has to obey the same
+	// conventions; the self-contained (non-resumed) form in particular
+	// rebuilds the whole context from scratch.
+	ProjectContext string
 }
 
 // BuildRegeneratePrompt assembles the task prompt for 「基于追问对话重新生成」.
@@ -627,6 +652,14 @@ func BuildRegeneratePrompt(in RegeneratePromptInput) string {
 		if in.HasAttachments {
 			b.WriteString(reviewAttachmentDirective)
 		}
+	}
+
+	// The project-level CLAUDE.md — the same conventions the first review
+	// was graded against. A regenerated report replaces the old one in front
+	// of the user, so it has to obey the same rules.
+	if strings.TrimSpace(in.ProjectContext) != "" {
+		b.WriteString(strings.TrimSpace(in.ProjectContext))
+		b.WriteString("\n\n")
 	}
 
 	if len(in.History) > 0 {

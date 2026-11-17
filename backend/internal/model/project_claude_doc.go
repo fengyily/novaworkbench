@@ -22,11 +22,50 @@ type ProjectClaudeDoc struct {
 	// manual edit does NOT touch it — the badge answers "when was this
 	// last machine-written", not "when did a human last save".
 	GeneratedAt *time.Time `json:"generated_at,omitempty"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// ManualEditedAt is when a HUMAN last edited the document.
+	//
+	// It is the guard flag for the destructive replaces: while it is set,
+	// an AI regeneration or a disk import must not silently replace the
+	// content — the user has to confirm, and the outgoing document is
+	// snapshotted into ProjectClaudeDocRevision first. nil = the current
+	// content is purely machine-written and may be replaced without
+	// asking.
+	ManualEditedAt *time.Time `json:"manual_edited_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 	// Bytes is the size of Content in bytes (not runes) — a cheap hint for
 	// the UI and for the injection-side budget check.
 	Bytes int `json:"bytes"`
 }
+
+// ProjectClaudeDocRevision is one frozen version of a project-level
+// CLAUDE.md.
+//
+// Every destructive replace (an AI regeneration, a disk import, a restore)
+// snapshots the OUTGOING document here first, so a hand-edited version the
+// user has already read is never lost without a way back. The current
+// document always lives in ProjectClaudeDoc; this table only holds the
+// history behind it.
+type ProjectClaudeDocRevision struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	// Content is the frozen document body.
+	Content string `json:"content"`
+	// Source is where that body came from (generated / manual / imported).
+	Source string `json:"source"`
+	// Reason says why the snapshot was taken: "regenerate" (an AI run
+	// replaced it), "import" (the disk copy replaced it) or "restore" (a
+	// version was rolled back).
+	Reason    string    `json:"reason"`
+	Bytes     int       `json:"bytes"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Reasons for ProjectClaudeDocRevision.Reason.
+const (
+	ProjectClaudeDocRevisionReasonRegenerate = "regenerate"
+	ProjectClaudeDocRevisionReasonImport     = "import"
+	ProjectClaudeDocRevisionReasonRestore    = "restore"
+)
 
 // Sources for ProjectClaudeDoc.Source.
 const (

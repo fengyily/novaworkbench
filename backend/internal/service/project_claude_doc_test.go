@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"os"
 	"testing"
 	"time"
@@ -168,5 +169,120 @@ func TestReadDiskClaudeDoc(t *testing.T) {
 	}
 	if DiskClaudeDocExists(t.TempDir()) {
 		t.Error("DiskClaudeDocExists = true for a directory without CLAUDE.md")
+	}
+}
+
+// TestClaudeDocManualEditFlag pins the guard flag the destructive replaces
+// check: a hand-edited document is marked, a machine-written one is not.
+//
+// Without the flag the AI regeneration silently replaces what the user
+// wrote by hand — the exact P0 the review reported.
+func TestClaudeDocManualEditFlag(t *testing.T) {
+	d := newServiceTestDB(t)
+	svc := NewProjectService(d, nil, nil)
+	const proj = "proj_doc_manual"
+	seedClaudeDocProject(t, svc, proj)
+
+	// AI-generated → not hand-edited.
+	doc, err := svc.UpsertClaudeDoc(proj, "ai", model.ProjectClaudeDocSourceGenerated, true)
+	if err != nil {
+		t.Fatalf("upsert (generated): %v", err)
+	}
+	if doc.ManualEditedAt != nil {
+		t.Errorf("manual_edited_at = %v, want nil for a generated document", doc.ManualEditedAt)
+	}
+
+	// Hand edit → marked.
+	doc, err = svc.UpsertClaudeDoc(proj, "human", model.ProjectClaudeDocSourceManual, false)
+	if err != nil {
+		t.Fatalf("upsert (manual): %v", err)
+	}
+	if doc.ManualEditedAt == nil {
+		t.Fatal("manual_edited_at is nil after a hand edit")
+	}
+
+	// A regeneration that was explicitly confirmed clears the flag again —
+	// the human content is gone, so nothing is protected anymore.
+	doc, err = svc.UpsertClaudeDoc(proj, "ai again", model.ProjectClaudeDocSourceGenerated, true)
+	if err != nil {
+		t.Fatalf("upsert (regenerated): %v", err)
+	}
+	if doc.ManualEditedAt != nil {
+		t.Errorf("manual_edited_at = %v, want nil after a confirmed regeneration", doc.ManualEditedAt)
+	}
+}
+
+// TestClaudeDocRevisionSnapshotAndRestore is the recovery path: the
+// version that was replaced must still be there afterwards, and restoring
+// it must bring the content back.
+func TestClaudeDocRevisionSnapshotAndRestore(t *testing.T) {
+	d := newServiceTestDB(t)
+	svc := NewProjectService(d, nil, nil)
+	const proj = "proj_doc_rev"
+	seedClaudeDocProject(t, svc, proj)
+
+	// Nothing to snapshot yet.
+	rev, err := svc.SnapshotClaudeDoc(proj, model.ProjectClaudeDocRevisionReasonRegenerate)
+	if err != nil {
+		t.Fatalf("snapshot (empty): %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("snapshot of an absent document = %+v, want nil", rev)
+	}
+
+	// The user writes something by hand…
+	if _, err := svc.UpsertClaudeDoc(proj, "# 人工约定", model.ProjectClaudeDocSourceManual, false); err != nil {
+		t.Fatalf("upsert (manual): %v", err)
+	}
+	// …and the AI replaces it.
+	rev, err = svc.SnapshotClaudeDoc(proj, model.ProjectClaudeDocRevisionReasonRegenerate)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("snapshot returned nil for an existing document")
+	}
+	if rev.Content != "# 人工约定" {
+		t.Errorf("snapshot content = %q, want the hand-edited body", rev.Content)
+	}
+	if rev.Source != model.ProjectClaudeDocSourceManual {
+		t.Errorf("snapshot source = %q, want %q", rev.Source, model.ProjectClaudeDocSourceManual)
+	}
+	if _, err := svc.UpsertClaudeDoc(proj, "# AI 约定", model.ProjectClaudeDocSourceGenerated, true); err != nil {
+		t.Fatalf("upsert (generated): %v", err)
+	}
+
+	// The history lists the replaced version.
+	revs, err := svc.ListClaudeDocRevisions(proj)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	if len(revs) != 1 || revs[0].ID != rev.ID {
+		t.Fatalf("revisions = %+v, want exactly the snapshot %s", revs, rev.ID)
+	}
+
+	// Restoring brings the hand-edited body back — and the version it
+	// replaced is snapshotted on the way, so the restore is undoable.
+	restored, err := svc.RestoreClaudeDocRevision(proj, rev.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if restored.Content != "# 人工约定" {
+		t.Errorf("restored content = %q", restored.Content)
+	}
+	if restored.ManualEditedAt == nil {
+		t.Error("restored document is not marked as hand-edited — the next regeneration would overwrite it silently")
+	}
+	revs, err = svc.ListClaudeDocRevisions(proj)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("revisions = %d, want 2 (the restore snapshots what it replaced)", len(revs))
+	}
+
+	// An unknown revision is a not-found, not a silent no-op.
+	if _, err := svc.RestoreClaudeDocRevision(proj, "pcdr_nope"); err != sql.ErrNoRows {
+		t.Errorf("restore of an unknown revision: err = %v, want sql.ErrNoRows", err)
 	}
 }

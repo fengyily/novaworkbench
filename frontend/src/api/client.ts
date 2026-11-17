@@ -1237,6 +1237,20 @@ export interface Requirement {
   // 当用户没在 dev 表单重新指定时，回退到这个值（与 wizard_coding.go
   // 里 `reqRow.BaseBranch` 优先链一致）。空 = 未跑过 design。
   base_branch?: string;
+  // base_branch_source records WHERE base_branch came from: 'explicit'
+  // (the user picked it), 'parent' (inherited from the master requirement),
+  // 'requirement' / 'project' / 'default'. Empty = a row written before the
+  // column existed. The UI uses it to tell "the user chose this line" from
+  // "this line just follows somebody else".
+  base_branch_source?: string;
+  // base_branch_effective is the base branch this requirement WOULD use
+  // right now, resolved from the row, the master requirement and the project
+  // default. NOT persisted — recomputed on every read.
+  //
+  // The BASE picker seeds itself with it so an untouched picker echoes the
+  // auto value back; the backend then reads that as "not an explicit choice"
+  // instead of freezing the base and killing the parent inheritance.
+  base_branch_effective?: string;
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
@@ -3856,6 +3870,10 @@ export interface ProjectClaudeDocDisk {
   exists: boolean;
   path: string;
   bytes: number;
+  /** mtime of the on-disk file — it says which of the two copies is newer. */
+  modified_at?: string;
+  /** True when the on-disk file no longer matches the managed (DB) copy. */
+  differs: boolean;
 }
 
 export interface ProjectClaudeDoc {
@@ -3865,10 +3883,28 @@ export interface ProjectClaudeDoc {
   source: ProjectClaudeDocSource;
   /** Last AI generation time. A manual edit does NOT change it. */
   generated_at?: string;
+  /**
+   * When a human last edited the document. While it is set, a destructive
+   * replace (regenerate / import) needs an explicit confirmation — the
+   * backend answers 409 MANUAL_EDIT_PROTECTED without it.
+   */
+  manual_edited_at?: string;
   updated_at?: string;
   bytes: number;
   /** The CLAUDE.md that may already exist in the project directory. */
   disk: ProjectClaudeDocDisk;
+}
+
+/** One frozen version of the project CLAUDE.md. */
+export interface ProjectClaudeDocRevision {
+  id: string;
+  project_id: string;
+  content: string;
+  source: ProjectClaudeDocSource;
+  /** Why the snapshot was taken: regenerate | import | restore. */
+  reason: 'regenerate' | 'import' | 'restore';
+  bytes: number;
+  created_at: string;
 }
 
 export const projectClaudeDocApi = {
@@ -3878,12 +3914,23 @@ export const projectClaudeDocApi = {
     api.put<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc`, { content }),
   remove: (projectId: string) =>
     api.delete<void>(`/api/projects/${projectId}/claude-doc`),
-  generate: (projectId: string, focus?: string) =>
+  /**
+   * overwriteManual is the user's explicit consent to replace a hand-edited
+   * document. Without it the backend refuses with 409 MANUAL_EDIT_PROTECTED.
+   */
+  generate: (projectId: string, focus?: string, overwriteManual?: boolean) =>
     api.post<{ job_id: string }>(`/api/projects/${projectId}/claude-doc/generate`, {
       focus: focus ?? '',
+      overwrite_manual: overwriteManual ?? false,
     }),
-  importFromDisk: (projectId: string) =>
-    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/import`, {}),
+  importFromDisk: (projectId: string, overwriteManual?: boolean) =>
+    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/import`, {
+      overwrite_manual: overwriteManual ?? false,
+    }),
+  listRevisions: (projectId: string) =>
+    api.get<ProjectClaudeDocRevision[]>(`/api/projects/${projectId}/claude-doc/revisions`),
+  restoreRevision: (projectId: string, revId: string) =>
+    api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/revisions/${revId}/restore`, {}),
   streamJobUrl: (projectId: string, jobId: string) =>
     `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
 };
