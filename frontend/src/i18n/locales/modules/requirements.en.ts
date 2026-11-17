@@ -53,6 +53,19 @@ export const requirements = {
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: 'Scheduled · {{time}} · {{rel}}',
     scheduledAria: 'Has a scheduled task',
+    // Inline mark interaction (the mark strip inside requirement rows).
+    // Preset names stay in detail2.marksPreset.* — only the list-side
+    // wording lives here.
+    marksAdd: 'Add mark',
+    // The "+" button's title / aria-label. Kept apart from marksAdd:
+    // marksAdd is the popover heading, marksAddTitle is the button's
+    // accessible name.
+    marksAddTitle: 'Add mark',
+    // {{code}} is the preset's DISPLAY NAME (e.g. "Important"), not the
+    // raw code string.
+    marksRemoveTitle: 'Click to remove mark "{{code}}"',
+    marksMenuLabel: 'Choose marks',
+    marksFail: 'Failed to update mark: {{msg}}',
   },
   // Batch select + delete, shared by both requirement lists (cross-project
   // /requirements and the project detail tab) so one action keeps one name.

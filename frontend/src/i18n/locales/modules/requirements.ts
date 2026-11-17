@@ -53,6 +53,16 @@ export const requirements = {
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: '定时执行 · {{time}} · {{rel}}',
     scheduledAria: '有定时执行计划',
+    // 行内标记交互（需求列表里的标记条）。预设名继续复用
+    // detail2.marksPreset.*，这里只放列表侧自己的措辞。
+    marksAdd: '添加标记',
+    // "＋" 按钮的 title / aria-label。与 marksAdd 分开是因为语义不同：
+    // marksAdd 是浮层里的分组标题，marksAddTitle 是按钮的可访问名。
+    marksAddTitle: '添加标记',
+    // {{code}} 传的是预设显示名（如「重要」），不是 code 字符串。
+    marksRemoveTitle: '点击取消标记「{{code}}」',
+    marksMenuLabel: '选择标记',
+    marksFail: '标记更新失败：{{msg}}',
   },
   // 批量选择与删除。两个需求列表（跨项目 /requirements 与项目详情的需求页）
   // 共用同一套文案——同一个动作在同一个产品里只能有一种说法。
