@@ -25,6 +25,7 @@ import { tLabel } from '../../i18n/label';
 import { StatusChips } from '../StatusChips';
 import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../../utils/intl';
 import { IconClock } from '../icons';
+import RequirementMarkChips from '../RequirementMarkChips/RequirementMarkChips';
 import './RequirementMobileCard.css';
 
 /**
@@ -102,6 +103,12 @@ export interface RequirementMobileCardProps {
   selected?: boolean;
   // Called when the card body itself is activated (tap / Enter / Space).
   onOpen?: (req: Requirement) => void;
+  // Called after a preset mark was toggled inside the card and the server
+  // confirmed the change. The host patches its own list row so the desktop
+  // table — which renders the SAME requirement — stays in sync with the
+  // card. Both surfaces mount their own copy of the strip, so neither can
+  // see the other's optimistic state.
+  onMarkChange?: (updated: Requirement) => void;
   // Sibling rendered BEFORE the card (selection checkbox, tree toggle).
   // Deliberately not a child of the card — see the note at the top.
   leading?: ReactNode;
@@ -140,6 +147,7 @@ export default function RequirementMobileCard({
   depth = 0,
   selected = false,
   onOpen,
+  onMarkChange,
   leading,
   headLeading,
   headExtra,
@@ -218,9 +226,17 @@ export default function RequirementMobileCard({
           ) : null}
         </div>
         {/* Preset marks + schedule chip render inline with the title so a
-            marked card stays on one line. Empty marks → nothing rendered. */}
+            marked card stays on one line. The mark strip is INTERACTIVE
+            here (tap a chip to remove it, "＋" to add one) — the same
+            shared component the desktop table rows use, so the two
+            surfaces cannot drift apart. */}
         <div className={`req-card-mobile-title${titleExtra ? ' has-extra' : ''}`}>
-          <MarksStrip marks={req.marks} />
+          <RequirementMarkChips
+            reqId={req.id}
+            marks={req.marks}
+            status={req.status}
+            onChange={onMarkChange}
+          />
           <ScheduleChip scheduledRunAt={req.scheduled_run_at} />
           <span className="req-row-title-text-label">{title}</span>
           {titleExtra ? <span className="req-card-mobile-title-extra">{titleExtra}</span> : null}
