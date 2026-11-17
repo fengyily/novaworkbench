@@ -510,6 +510,11 @@ func main() {
 		reqSvc, projectSvc, subTaskSvc, codeReviewSvc, codeReviewRevisionSvc,
 		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs,
 	)
+	// 需求级 Review 的「自动迭代」链的兜底巡检：链的正常驱动是事件钩子
+	//（本轮结束 → 建修复子任务 → 修复完成 → 发起下一轮），但后端重启会
+	// 杀掉驱动它的 goroutine，链就会永远停在这里。巡检按 20s 的节奏读
+	// 落库的链状态，把断在半路的链接上。
+	go reqReviewH.StartAutoIterateReconciler(context.Background())
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)

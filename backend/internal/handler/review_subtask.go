@@ -33,6 +33,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -153,6 +154,18 @@ type StartRequirementReviewReq struct {
 	// the 「其他任务」 stage default. A Review grades other people's work,
 	// so it belongs to 「其他任务」 rather than 「开发实现」.
 	Effort string `json:"effort"`
+	// AutoIterate turns the manual 「修复 → 回归 Review」 loop into an
+	// automatic one: when it is on, the backend creates the P0/P1 fix
+	// sub-tasks of every round on its own and starts the next round as soon
+	// as they are done, until the code is clean or the budget runs out.
+	//
+	// Off (the default) the behaviour is EXACTLY what it was before this
+	// flag existed: one round, nothing automatic.
+	AutoIterate bool `json:"auto_iterate"`
+	// AutoIterateRounds is how many EXTRA rounds to run after the first
+	// one. 1 (the default) means "one more round after this one", so the
+	// chain runs at most 2 rounds. Legal range: 1..10.
+	AutoIterateRounds int `json:"auto_iterate_rounds"`
 }
 
 // StartReview creates the review session + its sub-task and starts the run.
@@ -184,6 +197,31 @@ func (h *RequirementReviewHandler) StartReview(w http.ResponseWriter, r *http.Re
 	if roleKey == "" {
 		roleKey = reviewerRoleKey
 	}
+	// The auto-iteration configuration. The round budget is validated here
+	// rather than silently clamped: a silently corrected pick would make the
+	// user believe they got more rounds than they did.
+	autoRounds := 1
+	autoState := ""
+	if body.AutoIterate {
+		rounds, ok := normalizeAutoIterateRounds(body.AutoIterateRounds)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "AUTO_ITERATE_ROUNDS_INVALID",
+				fmt.Sprintf("自动迭代轮次必须在 1..%d 之间（收到 %d）", autoIterateMaxRounds, body.AutoIterateRounds))
+			return
+		}
+		// A requirement whose code only exists on an Agent Server cannot run
+		// an auto-iteration chain: the fix tasks would run on the server,
+		// while the next round's Review only sees the LOCAL working tree —
+		// so the chain would re-review the same unfixed code until the
+		// budget ran out, burning tokens for nothing. Refuse it up front.
+		if strings.TrimSpace(req.WorktreePath) == "" && strings.TrimSpace(req.AgentServerID) != "" {
+			writeError(w, http.StatusBadRequest, "REMOTE_NOT_SUPPORTED",
+				"该需求在 Agent Server 上开发，无法开启自动迭代 —— 修复任务在远端执行，下一轮 Review 只看得到本地工作区，链永远收敛不了。请改为本地执行或手动逐轮推进。")
+			return
+		}
+		autoRounds = rounds
+		autoState = autoIterateStateCurrent
+	}
 	persona, modelName, configID, err := h.resolveReviewIdentity(roleKey, body.Model, body.ClaudeConfigID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
@@ -212,7 +250,12 @@ func (h *RequirementReviewHandler) StartReview(w http.ResponseWriter, r *http.Re
 		Model:          modelName,
 		Effort:         resolveEffort(h.gateway(), body.Effort, llm.StageOther),
 		ClaudeConfigID: configID,
-		CreatedBy:      currentUserID(r),
+		// The chain's configuration. autoState stays empty when the user did
+		// not ask for auto-iteration, which is what makes the chain's state
+		// the single source of truth for "this row is part of a chain".
+		AutoIterateRounds: autoRounds,
+		AutoIterateState:  autoState,
+		CreatedBy:         currentUserID(r),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
@@ -265,8 +308,13 @@ type ReviewRound struct {
 	Title       string     `json:"title"`
 	Model       string     `json:"model"`
 	RoleKey     string     `json:"role_key"`
-	CreatedAt   time.Time  `json:"created_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	// The auto-iteration chain's state of this round. Empty state = the
+	// round is not part of a chain (the ordinary, manual Review).
+	AutoIterateRounds int        `json:"auto_iterate_rounds"`
+	AutoIterateState  string     `json:"auto_iterate_state"`
+	AutoIterateNote   string     `json:"auto_iterate_note"`
+	CreatedAt         time.Time  `json:"created_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 }
 
 // ListReviews returns the requirement's Review rounds, newest first.
@@ -298,8 +346,11 @@ func (h *RequirementReviewHandler) ListReviews(w http.ResponseWriter, r *http.Re
 			Title:       rv.Title,
 			Model:       rv.Model,
 			RoleKey:     rv.RoleKey,
-			CreatedAt:   rv.CreatedAt,
-			FinishedAt:  rv.FinishedAt,
+			AutoIterateRounds: rv.AutoIterateRounds,
+			AutoIterateState:  rv.AutoIterateState,
+			AutoIterateNote:   rv.AutoIterateNote,
+			CreatedAt:         rv.CreatedAt,
+			FinishedAt:        rv.FinishedAt,
 		}
 		// The sub-task row carries the round number and the link back to the
 		// card. A review row without a sub-task (e.g. created by an older
@@ -398,6 +449,37 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	created, err := h.createFixTasks(req, rv, parentID, items, body.Effort, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"sub_task_ids": created})
+}
+
+// createFixTasks turns findings into fix sub-tasks under parentID.
+//
+// It is the shared body of the manual 「生成修复子任务」 button and the
+// auto-iteration chain: the rows, the prompts, the session mode and the
+// dispatch are IDENTICAL in both paths — only the terminal hook differs (the
+// chain has to learn when its fix tasks are done so it can start the next
+// round).
+//
+// The rows are DISPATCHED, not merely inserted. A pending row without a
+// job_id belongs to no dispatcher: the orchestration tick only claims
+// batch-scoped rows and the manual path only runs on an explicit user
+// action, so such a row would sit at 「排队中」 forever.
+func (h *RequirementReviewHandler) createFixTasks(
+	req *model.Requirement,
+	rv *model.CodeReview,
+	parentID string,
+	items []findingToIssue,
+	effortPick string,
+	onChildFinished func(st *model.SubTask, out claudeStreamOutcome, artifactBody string),
+) ([]string, error) {
+	if h.runner == nil {
+		return nil, fmt.Errorf("子任务执行器未初始化")
+	}
 	// The fixer inherits the DEVELOPER's session, not the reviewer's: it
 	// needs to know how the code was written in order to fix it, while the
 	// reviewer's opinion would only add noise.
@@ -443,16 +525,14 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 		// and the manual path only runs on an explicit user action, so such a
 		// row would sit at "排队中" forever. Creating the job here is what
 		// makes the row dispatchable.
-		st, job, newSID, cerr := h.runner.NewPendingSubTask(reqID, title, fixPrompt, rv.Model,
+		st, job, newSID, cerr := h.runner.NewPendingSubTask(req.ID, title, fixPrompt, rv.Model,
 			sourceSID, fixAgentServerID, model.SubTaskSessionModeFork, parentID, model.SubTaskReportModeAuto)
 		if cerr != nil {
-			writeError(w, http.StatusInternalServerError, "CREATE_FAILED",
-				fmt.Sprintf("为 %s 建修复子任务失败: %v", it.ref, cerr))
-			return
+			return created, fmt.Errorf("为 %s 建修复子任务失败: %w", it.ref, cerr)
 		}
 		// A fix writes code → 「开发实现」 stage, even though the finding it
 		// answers came from a Review.
-		stampSubTaskEffort(h.gateway(), h.subTaskSvc, st, body.Effort, llm.StageCoding)
+		stampSubTaskEffort(h.gateway(), h.subTaskSvc, st, effortPick, llm.StageCoding)
 		created = append(created, st.ID)
 		// Dispatch it. The runner takes the per-project admission gate first
 		// and only flips the row to 'running' once it wins a slot, so several
@@ -461,10 +541,11 @@ func (h *RequirementReviewHandler) CreateFixes(w http.ResponseWriter, r *http.Re
 		//
 		// fork=true → --resume <sourceSID> --fork-session: the fixer starts
 		// from the developer's conversation, not a blank slate.
-		go h.runner.Run(req, st, job, newSID, sourceSID, fixPrompt, modelOverride, "",
-			false /*adjust*/, true /*fork*/, false /*freshSession*/, false /*bare*/, "", model.SubTaskReportModeAuto)
+		go h.runner.RunFix(req, st, job, newSID, sourceSID, fixPrompt, modelOverride, "",
+			false /*adjust*/, true /*fork*/, false /*freshSession*/, false /*bare*/, "", model.SubTaskReportModeAuto,
+			onChildFinished)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"sub_task_ids": created})
+	return created, nil
 }
 
 // RecheckReq is the body of POST /api/requirements/{id}/reviews/{rid}/recheck.
@@ -535,16 +616,160 @@ func (h *RequirementReviewHandler) Recheck(w http.ResponseWriter, r *http.Reques
 	if effortPick == "" {
 		effortPick = strings.TrimSpace(prev.Effort)
 	}
+
+	// The chain's critical section. It is taken HERE (and not inside
+	// startNextRoundLocked) so the "is the chain busy?" check and the
+	// creation of the new round are atomic with respect to the automatic
+	// advancement — otherwise a manual 回归 Review and the chain could each
+	// mint a "round N+1" and fork the chain in two.
+	var rv *model.CodeReview
+	var st *model.SubTask
+	var job *store.Job
+	var startErr error
+	withChainLock(reqID, func() {
+		// A manual 回归 Review while the automatic chain is still waiting
+		// for its fix sub-tasks would run two rounds in parallel. Refuse it
+		// explicitly — the user can wait, or stop the fix sub-tasks (which
+		// stops the chain).
+		busy, berr := h.chainBusy(reqID)
+		if berr != nil {
+			startErr = &reviewStartError{http.StatusInternalServerError, "LIST_FAILED", berr.Error()}
+			return
+		}
+		if busy {
+			startErr = &reviewStartError{http.StatusConflict, "REVIEW_CHAIN_BUSY",
+				"自动迭代链正在进行中（正在等待本轮修复子任务完成），请等它结束，或先停止相关修复子任务。"}
+			return
+		}
+		rv, st, job, startErr = h.startNextRoundLocked(req, prev, roleKey, pickedModel, pickedConfig, effortPick)
+	})
+	if startErr != nil {
+		h.writeStartError(w, startErr)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+		"review_id":   rv.ID,
+	})
+}
+
+// chainBusy reports whether the requirement's auto-iteration chain is
+// currently waiting for its fix sub-tasks to finish.
+//
+// It is the guard behind the manual 回归 Review button: while the chain is
+// in that state, a manual round would run next to the automatic one.
+func (h *RequirementReviewHandler) chainBusy(reqID string) (bool, error) {
+	tip, tipSub, err := h.latestReviewRound(reqID)
+	if err != nil {
+		return false, err
+	}
+	if tip == nil || tipSub == nil {
+		return false, nil
+	}
+	if tip.AutoIterateState != autoIterateStateCurrent {
+		return false, nil
+	}
+	children, err := h.subTaskSvc.ListChildren(tipSub.ID)
+	if err != nil {
+		return false, err
+	}
+	for i := range children {
+		switch children[i].Status {
+		case model.SubTaskStatusPending, model.SubTaskStatusRunning:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// reviewStartError is a failure that happened while preparing a Review
+// round. It carries the HTTP status + the stable error code the API answers
+// with, so the manual path and the automatic path report the same thing.
+type reviewStartError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *reviewStartError) Error() string { return e.message }
+
+// writeStartError maps a start-round failure onto the API envelope.
+func (h *RequirementReviewHandler) writeStartError(w http.ResponseWriter, err error) {
+	var se *reviewStartError
+	if errors.As(err, &se) {
+		writeError(w, se.status, se.code, se.message)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
+}
+
+// startNextRoundLocked creates AND launches the next Review round.
+//
+// It is the ONE implementation of "start another round", shared by the
+// manual 「回归 Review」 button and the auto-iteration chain: both need the
+// same thing — a fresh code_reviews row + a fresh review sub-task parented
+// to the chain's tip, with the diff scope resolved AGAIN (the fixes changed
+// the working tree, so reusing the previous round's scope would re-grade
+// the pre-fix code).
+//
+// The chain's configuration is INHERITED from the chain's tip: the tip is
+// the round that carries the chain's live configuration, and the round the
+// user clicked may be an older one. A manual round on a chain that is not
+// running (it never was, or it already stopped) is an ordinary manual round.
+//
+// The caller must hold the requirement's chain lock.
+func (h *RequirementReviewHandler) startNextRoundLocked(
+	req *model.Requirement,
+	prev *model.CodeReview,
+	roleKey, pickedModel, pickedConfig, effortPick string,
+) (*model.CodeReview, *model.SubTask, *store.Job, error) {
+	// The new round hangs off the LATEST round's sub-task, so the chain is
+	// walkable from the sub-task tree.
+	//
+	// "Latest", not "the round the user clicked": the re-check button is
+	// rendered on every round card, and anchoring a new round to an OLD one
+	// would mint a DUPLICATE round number (round 2 twice) and fork the chain
+	// in two. The chain therefore always grows at its tip.
+	latest, latestSub, err := h.latestReviewRound(req.ID)
+	if err != nil {
+		return nil, nil, nil, &reviewStartError{http.StatusInternalServerError, "LIST_FAILED", err.Error()}
+	}
+	if latest != nil && (latest.Status == model.ReviewStatusRunning || latest.Status == model.ReviewStatusDraft) {
+		return nil, nil, nil, &reviewStartError{http.StatusConflict, "REVIEW_RUNNING",
+			"上一轮 Review 还在运行中，请等它结束后再发起回归 Review"}
+	}
+	parentID := ""
+	round := 1
+	if latestSub != nil {
+		parentID = latestSub.ID
+		round = latestSub.ReviewRound + 1
+		if round < 1 {
+			round = 1
+		}
+	}
+	// The chain configuration is inherited from the chain's tip.
+	chainRounds := 1
+	chainState := ""
+	if latest != nil {
+		chainRounds = latest.AutoIterateRounds
+		if latest.AutoIterateState == autoIterateStateCurrent {
+			chainState = autoIterateStateCurrent
+		}
+	}
+	if chainRounds < 1 {
+		chainRounds = 1
+	}
+
 	persona, modelName, configID, err := h.resolveReviewIdentity(roleKey, pickedModel, pickedConfig)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
+		return nil, nil, nil, &reviewStartError{http.StatusBadRequest, "BAD_REQUEST", err.Error()}
 	}
 
 	workDir, branch, base, scope, err := h.resolveScope(req, prev.BaseBranch)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "SCOPE_FAILED", err.Error())
-		return
+		return nil, nil, nil, &reviewStartError{http.StatusBadRequest, "SCOPE_FAILED", err.Error()}
 	}
 
 	rv, err := h.reviewSvc.Create(&model.CodeReview{
@@ -559,50 +784,23 @@ func (h *RequirementReviewHandler) Recheck(w http.ResponseWriter, r *http.Reques
 		Model:          modelName,
 		Effort:         resolveEffort(h.gateway(), effortPick, llm.StageOther),
 		ClaudeConfigID: configID,
-		CreatedBy:      currentUserID(r),
+		// The chain's configuration is inherited, so a manual 回归 Review
+		// does not break an automatic chain, and a chain's next round keeps
+		// the same budget.
+		AutoIterateRounds: chainRounds,
+		AutoIterateState:  chainState,
+		CreatedBy:         prev.CreatedBy,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
-		return
+		return nil, nil, nil, &reviewStartError{http.StatusInternalServerError, "CREATE_FAILED", err.Error()}
 	}
 
-	// The new round hangs off the LATEST round's sub-task, so the chain is
-	// walkable from the sub-task tree.
-	//
-	// "Latest", not "the round the user clicked": the re-check button is
-	// rendered on every round card, and anchoring a new round to an OLD one
-	// would mint a DUPLICATE round number (round 2 twice) and fork the chain
-	// in two. The chain therefore always grows at its tip.
-	latest, latestSub, err := h.latestReviewRound(reqID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
-		return
-	}
-	if latest != nil && (latest.Status == model.ReviewStatusRunning || latest.Status == model.ReviewStatusDraft) {
-		writeError(w, http.StatusConflict, "REVIEW_RUNNING", "上一轮 Review 还在运行中，请等它结束后再发起回归 Review")
-		return
-	}
-	parentID := ""
-	round := 1
-	if latestSub != nil {
-		parentID = latestSub.ID
-		round = latestSub.ReviewRound + 1
-		if round < 1 {
-			round = 1
-		}
-	}
 	st, job, newSID, err := h.createReviewSubTask(req, rv, model.SubTaskSessionModeWithContext, "", modelName, round, parentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
-		return
+		return nil, nil, nil, &reviewStartError{http.StatusInternalServerError, "CREATE_FAILED", err.Error()}
 	}
 	h.launchReview(req, st, job, newSID, "", rv, persona, modelName, configID, scope, workDir, model.SubTaskSessionModeWithContext)
-
-	writeJSON(w, http.StatusOK, map[string]string{
-		"job_id":      job.ID,
-		"sub_task_id": st.ID,
-		"review_id":   rv.ID,
-	})
+	return rv, st, job, nil
 }
 
 // ── internals ───────────────────────────────────────────────────────────────
@@ -838,6 +1036,14 @@ func (h *RequirementReviewHandler) launchReview(
 	}
 	spec.onFinished = func(st *model.SubTask, out claudeStreamOutcome, artifactBody string) {
 		h.persistReviewOutcome(rv, st, out, outcome, artifactBody)
+		// The auto-iteration chain advances from here: the round is over,
+		// the report is on the row, so the chain can decide whether to
+		// create this round's fix sub-tasks or to stop.
+		//
+		// It runs in its own goroutine because the advancement may resolve
+		// a git scope (a `git fetch` against a slow remote), and that must
+		// not hold the round's SSE stream open.
+		go h.onReviewRoundFinished(rv, st)
 	}
 
 	if scope.Warning != "" {

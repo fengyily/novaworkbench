@@ -107,6 +107,34 @@ type CodeReview struct {
 	// sub-task) because the persona is a property of the review session, and
 	// the same session can be re-run / resumed / regenerated with it.
 	RoleKey string `json:"role_key"`
+	// AutoIterateRounds is how many EXTRA rounds the user asked the
+	// auto-iteration chain to run AFTER the first one ("自动迭代 · N 轮").
+	// 1 means "run one more round after this one". The chain's total round
+	// count is therefore 1 + AutoIterateRounds.
+	//
+	// It is stored on EVERY row (default 1) so a chain round can be
+	// reconstructed from the row alone; whether a row PARTICIPATES in a
+	// chain is decided by AutoIterateState, not by this column.
+	AutoIterateRounds int `json:"auto_iterate_rounds"`
+	// AutoIterateState is this round's state inside the auto-iteration
+	// chain:
+	//
+	//   ""         — the row is not part of an auto-iteration chain (the
+	//                ordinary, purely manual Review);
+	//   "current"  — the chain's tip: this round is in flight, or it has
+	//                finished and is waiting for its fix sub-tasks;
+	//   "advanced" — this round handed over to the next round;
+	//   "converged"— the chain ended because P0/P1 were cleared;
+	//   "stopped"  — the chain ended; AutoIterateNote says why.
+	//
+	// The state lives on the round rows rather than in an in-memory
+	// registry so the chain survives a backend restart.
+	AutoIterateState string `json:"auto_iterate_state"`
+	// AutoIterateNote is the machine-readable reason a chain stopped:
+	// "converged" | "max_rounds" | "fix_failed" | "no_findings" |
+	// "review_failed". The frontend maps it to a localized sentence; the
+	// backend never writes a localized string here.
+	AutoIterateNote string `json:"auto_iterate_note"`
 	// Verdict is a NON-PERSISTED verdict for the round chain: "pass" |
 	// "fail" | "pending" | "error". It is computed from p0/p1 at read time
 	// rather than stored, so it can never drift from the counts the report

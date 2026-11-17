@@ -734,6 +734,18 @@ export interface ReviewRound {
   title: string;
   model: string;
   role_key: string;
+  /**
+   * The auto-iteration chain this round belongs to.
+   *
+   * `auto_iterate_state` is '' for an ordinary, purely manual Review — the
+   * backend never joins a review into a chain the user did not ask for.
+   * Otherwise it is 'current' (the chain's tip), 'advanced' (handed over to
+   * the next round), 'converged' (P0/P1 cleared) or 'stopped' (the chain
+   * ended — `auto_iterate_note` says why).
+   */
+  auto_iterate_rounds?: number;
+  auto_iterate_state?: string;
+  auto_iterate_note?: string;
   created_at: string;
   finished_at?: string;
 }
@@ -913,6 +925,13 @@ export const requirementReviewsApi = {
   // agent_server_id is local-only for now: a remote host only sees origin, so
   // it cannot see the uncommitted fixes and a re-check would re-grade stale
   // code. The backend refuses a remote pick explicitly.
+  //
+  // auto_iterate turns the manual "fix -> re-review" loop into an automatic
+  // one: the backend creates the round's P0/P1 fix sub-tasks and starts the
+  // next round by itself, until the code is clean or the budget runs out.
+  // auto_iterate_rounds is how many EXTRA rounds to run after the first one
+  // (default 1, legal range 1..10) — the backend rejects an out-of-range pick
+  // rather than silently correcting it.
   start: (
     requirementId: string,
     data: {
@@ -924,6 +943,8 @@ export const requirementReviewsApi = {
       base_branch?: string;
       session_mode?: 'fork' | 'with_context';
       effort?: string;
+      auto_iterate?: boolean;
+      auto_iterate_rounds?: number;
     },
   ) =>
     api.post<{ job_id: string; sub_task_id: string; review_id: string }>(
@@ -2443,6 +2464,20 @@ export interface CodeReview {
    * (older rows, or a run that never reported a session).
    */
   claude_session_id: string;
+  /**
+   * The auto-iteration chain's configuration and state for this round.
+   *
+   * `auto_iterate_rounds` is how many EXTRA rounds the chain runs after the
+   * first one (the total is 1 + rounds). `auto_iterate_state` is '' for a
+   * review that is not part of a chain, otherwise 'current' | 'advanced' |
+   * 'converged' | 'stopped'. `auto_iterate_note` is the machine-readable
+   * reason a chain stopped ('converged' | 'max_rounds' | 'fix_failed' |
+   * 'no_findings' | 'review_failed') — the UI maps it to a localized
+   * sentence.
+   */
+  auto_iterate_rounds?: number;
+  auto_iterate_state?: string;
+  auto_iterate_note?: string;
   created_by: string;
   created_at: string;
   updated_at: string;

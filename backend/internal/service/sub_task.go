@@ -586,6 +586,52 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 	return out, nil
 }
 
+// ListChildren returns the DIRECT children of parentID — the sub-task rows
+// whose parent_subtask_id = parentID — oldest first.
+//
+// It exists for the requirement-level Review's auto-iteration chain: the
+// chain has to know the fix sub-tasks of ONE round (and only that round's)
+// to decide whether the chain may advance. Subtree would drag in every
+// descendant — including the NEXT round's own fix children — which is
+// exactly the wrong set.
+//
+// The column list mirrors List / Get, and the cursor is closed before the
+// follow-up reads (SQLite runs MaxOpenConns == 1, so an overlapping cursor
+// would deadlock).
+func (s *SubTaskService) ListChildren(parentID string) ([]model.SubTask, error) {
+	if strings.TrimSpace(parentID) == "" {
+		return []model.SubTask{}, nil
+	}
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds,
+		created_at, updated_at, completed_at, started_at,
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode, retry_count,
+		report_mode,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted,
+		task_kind, review_id, review_round, effort
+		FROM sub_tasks WHERE parent_subtask_id = ? ORDER BY created_at ASC, id ASC`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.SubTask{}
+	for rows.Next() {
+		st, err := scanSubTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeleteByIDs removes the given sub_task rows in a single statement. The caller
 // is responsible for validating the set beforehand (target is 'error', no
 // active rows in the subtree). token_usage rows and in-memory JobStore jobs are

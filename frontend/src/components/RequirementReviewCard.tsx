@@ -229,10 +229,57 @@ export default function RequirementReviewCard({
 
   const round = st.review_round || 1;
 
+  // ── the auto-iteration chain ────────────────────────────────────────────
+  // The chain's state is read off the code_reviews row (the authoritative
+  // source). An empty state means the review is NOT part of a chain — the
+  // ordinary, purely manual Review — and then nothing at all is rendered
+  // here, so that surface is unchanged for everyone who never asked for
+  // auto-iteration.
+  const chainState = review?.auto_iterate_state || '';
+  const chainActive = chainState === 'current';
+  // The chain's total round budget: the first round plus the extra rounds
+  // the user asked for.
+  const chainTotal = 1 + (review?.auto_iterate_rounds || 1);
+  // A chain that is waiting for its fix sub-tasks has already finished the
+  // round itself — that is a different message from "the round is running".
+  const chainWaitingFix = chainActive && review?.status === 'done';
+
+  // The reason a chain stopped, as a localized sentence. The backend stores
+  // a machine-readable code; the UI owns the wording.
+  const chainNoteKey = (() => {
+    switch (review?.auto_iterate_note) {
+      case 'converged': return 'components.subTaskCard.reviewAutoNoteConverged';
+      case 'max_rounds': return 'components.subTaskCard.reviewAutoNoteMaxRounds';
+      case 'fix_failed': return 'components.subTaskCard.reviewAutoNoteFixFailed';
+      case 'no_findings': return 'components.subTaskCard.reviewAutoNoteNoFindings';
+      case 'review_failed': return 'components.subTaskCard.reviewAutoNoteReviewFailed';
+      default: return '';
+    }
+  })();
+
   return (
     <section className={`sub-review-card sub-review-${verdict}`}>
       <header className="sub-review-head">
         <span className="sub-review-badge">🔍 {t('components.subTaskCard.reviewBadge', { round })}</span>
+        {chainState && (
+          <span
+            className="sub-review-chip"
+            title={t('components.subTaskCard.reviewAutoChipHint')}
+          >
+            {t('components.subTaskCard.reviewAutoChip', { round, total: chainTotal })}
+            {' · '}
+            {chainWaitingFix
+              ? t('components.subTaskCard.reviewAutoStateWaitingFix')
+              : chainState === 'current'
+                ? t('components.subTaskCard.reviewAutoStateCurrent')
+                : chainState === 'advanced'
+                  ? t('components.subTaskCard.reviewAutoStateAdvanced')
+                  : chainState === 'converged'
+                    ? t('components.subTaskCard.reviewAutoStateConverged')
+                    : t('components.subTaskCard.reviewAutoStateStopped')}
+            {chainState === 'stopped' && chainNoteKey && ` · ${t(chainNoteKey)}`}
+          </span>
+        )}
         {review?.model && <span className="sub-review-chip">🪙 {review.model}</span>}
         {review?.role_key && (
           <span className="sub-review-chip" title={t('components.subTaskCard.reviewIdentityChipHint')}>
@@ -419,8 +466,12 @@ export default function RequirementReviewCard({
             type="button"
             className="btn btn-sm btn-primary"
             onClick={onCreateFixes}
-            disabled={fixBusy || selectedRefs.length === 0}
-            title={t('components.subTaskCard.reviewCreateFixesHint')}
+            // While the chain is running it creates the fix sub-tasks on
+            // its own — a manual batch would duplicate them.
+            disabled={fixBusy || chainActive || selectedRefs.length === 0}
+            title={chainActive
+              ? t('components.subTaskCard.reviewAutoBusyHint')
+              : t('components.subTaskCard.reviewCreateFixesHint')}
           >
             {fixBusy
               ? t('components.subTaskCard.reviewCreateFixesBusy')
@@ -432,8 +483,12 @@ export default function RequirementReviewCard({
             type="button"
             className="btn btn-sm"
             onClick={onRecheck}
-            disabled={recheckBusy}
-            title={t('components.subTaskCard.reviewRecheckHint')}
+            // The chain starts the next round by itself; a manual round
+            // next to it would fork the chain into two parallel branches.
+            disabled={recheckBusy || chainActive}
+            title={chainActive
+              ? t('components.subTaskCard.reviewAutoBusyHint')
+              : t('components.subTaskCard.reviewRecheckHint')}
           >
             {recheckBusy
               ? t('components.subTaskCard.reviewRecheckBusy')

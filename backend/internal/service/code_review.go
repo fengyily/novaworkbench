@@ -41,6 +41,7 @@ const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_num
 	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
 	model, effort, claude_config_id,
 	agent_server_id, claude_session_id, requirement_id, role_key,
+	auto_iterate_rounds, auto_iterate_state, auto_iterate_note,
 	created_by, created_at, updated_at, finished_at`
 
 // Create inserts a draft session. branch is required for branch reviews;
@@ -68,17 +69,27 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 	}
 	id := util.NewID("crv")
 	now := time.Now().UTC()
+	// The auto-iteration round budget is clamped to >= 1 here so a row can
+	// never carry a nonsensical value; whether the row PARTICIPATES in a
+	// chain is decided by auto_iterate_state, not by this column.
+	rounds := rv.AutoIterateRounds
+	if rounds < 1 {
+		rounds = 1
+	}
 	_, err := s.db.Exec(`INSERT INTO code_reviews (
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
 		p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
 		model, effort, claude_config_id,
 		agent_server_id, claude_session_id, requirement_id, role_key,
+		auto_iterate_rounds, auto_iterate_state, auto_iterate_note,
 		created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
-		rv.Model, llm.NormalizeEffort(rv.Effort), rv.ClaudeConfigID, rv.AgentServerID, rv.RequirementID, rv.RoleKey,
+		rv.Model, llm.NormalizeEffort(rv.Effort), rv.ClaudeConfigID, rv.AgentServerID,
+		rv.RequirementID, rv.RoleKey,
+		rounds, rv.AutoIterateState, rv.AutoIterateNote,
 		rv.CreatedBy, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert code_review: %w", err)
@@ -281,6 +292,53 @@ func (s *CodeReviewService) SetClaudeSessionID(id, sessionID string) error {
 	return err
 }
 
+// MarkAutoIterateState writes the auto-iteration chain state of one round.
+//
+// It is the ONLY way the chain's state changes, so the state machine has a
+// single writer: the round either handed over to the next one ("advanced"),
+// ended because P0/P1 were cleared ("converged"), or ended for one of the
+// stop reasons in note ("stopped").
+//
+// note is a machine-readable reason code ("" for the states that need no
+// explanation). The frontend maps it to a localized sentence; the backend
+// never stores a localized string.
+func (s *CodeReviewService) MarkAutoIterateState(id, state, note string) error {
+	_, err := s.db.Exec(`UPDATE code_reviews
+		SET auto_iterate_state = ?, auto_iterate_note = ?, updated_at = ?
+		WHERE id = ?`,
+		state, note, time.Now().UTC(), id)
+	return err
+}
+
+// ListAutoIterateCurrent returns the requirement-level Review rows that are
+// the CURRENT tip of an auto-iteration chain.
+//
+// It is the reconcile tick's query: the chain's state lives in the database
+// (not in an in-memory registry), so a backend restart can pick the chain up
+// where it left off instead of leaving it stranded forever.
+//
+// Only requirement-level rows are considered — a project-level Review has no
+// chain, and its auto_iterate_state is always empty anyway.
+func (s *CodeReviewService) ListAutoIterateCurrent() ([]model.CodeReview, error) {
+	rows, err := s.db.Query(`SELECT `+codeReviewCols+`
+		FROM code_reviews
+		WHERE review_type = ? AND auto_iterate_state = ?
+		ORDER BY created_at ASC, id ASC`, model.ReviewTypeRequirement, "current")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.CodeReview{}
+	for rows.Next() {
+		rv, err := scanCodeReview(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rv)
+	}
+	return out, rows.Err()
+}
+
 // ReviewOutcome is the terminal payload written by the stream tail.
 type ReviewOutcome struct {
 	Status       string // model.ReviewStatusDone | ReviewStatusError
@@ -413,6 +471,7 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
 		&rv.Model, &rv.Effort, &rv.ClaudeConfigID,
 		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.RequirementID, &rv.RoleKey,
+		&rv.AutoIterateRounds, &rv.AutoIterateState, &rv.AutoIterateNote,
 		&rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err

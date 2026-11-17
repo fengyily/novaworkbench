@@ -271,6 +271,17 @@
   cursor: pointer;
   accent-color: var(--color-primary);
 }
+/* The auto-iteration round input rides inside a segment of the segmented
+   control, so it needs its own metrics: the rule above sizes EVERY input in
+   a segment to a 14px checkbox, and .form-input would otherwise stretch it
+   to the full segment width. */
+.sub-session-mode-option input[type='number'] {
+  width: 56px;
+  height: 24px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: text;
+}
 .sub-session-mode-option-text {
   /* One line per segment — the segment row must never wrap. Length is kept
      in check on the i18n side (labels are short; explanations moved to

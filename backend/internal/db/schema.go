@@ -1838,6 +1838,16 @@ var alterColumns = []string{
 	// canonical DDL above carries it too, and migrate() ignores the
 	// resulting "duplicate column" error.
 	`ALTER TABLE project_claude_docs ADD COLUMN manual_edited_at DATETIME`,
+	// 自动迭代链（需求级 Review）：auto_iterate_rounds 是首轮之外还要再迭代
+	// 几轮（默认 1，总轮数 = 1 + rounds）；auto_iterate_state 是链状态
+	// （''|current|advanced|converged|stopped）；auto_iterate_note 是中止原因码
+	// （converged|max_rounds|fix_failed|no_findings|review_failed）。
+	//
+	// 三列都带默认值 ⇒ 存量行是「未参与自动迭代」的语义，行为逐字不变；
+	// 链状态落在 code_reviews 上而不是内存注册处 ⇒ 后端重启后链能续上。
+	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_rounds INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_state TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_note TEXT NOT NULL DEFAULT ''`,
 }
 
 var (
