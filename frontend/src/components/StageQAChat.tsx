@@ -141,6 +141,9 @@ export default function StageQAChat({
   const [turns, setTurns] = useState<RequirementQATurn[]>([]);
   const [loading, setLoading] = useState(true);
   const [asking, setAsking] = useState(false);
+  // The failed turn whose question is being asked again — only THAT button
+  // shows the "retrying" label; the others stay quiet.
+  const [retryingId, setRetryingId] = useState('');
   const [question, setQuestion] = useState('');
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
@@ -372,6 +375,12 @@ export default function StageQAChat({
     },
     [asking, requirementId, stage, model, claudeConfigId, qaEffortValue, subscribe, viewMode],
   );
+
+  // The "retrying" label belongs to the run, not to the button: drop it
+  // once the turn is done (or failed again).
+  useEffect(() => {
+    if (!asking) setRetryingId('');
+  }, [asking]);
 
   // Keep the newest turn in view — but only when the reader is actually
   // parked at the bottom (or a turn was just added / the panel was just
@@ -863,6 +872,27 @@ export default function StageQAChat({
                       {turn.model && <span>{turn.model}</span>}
                       {turn.status === 'done' && !turn.resumed && (
                         <span className="qa-turn-fresh">{t('requirements.qaChat.freshBadge')}</span>
+                      )}
+                      {/* A failed turn is dead-ended by itself: the thread only
+                          grows, nothing re-runs an old question. Offer the
+                          same question again — the backend now degrades a
+                          broken fork by itself, but a user-triggered retry
+                          is still the fastest way past a transient failure. */}
+                      {turn.status === 'error' && (
+                        <button
+                          type="button"
+                          className="btn btn-sm qa-turn-retry"
+                          onClick={() => {
+                            setRetryingId(turn.id);
+                            void ask(turn.question);
+                          }}
+                          disabled={asking}
+                          title={t('requirements.qaChat.retryTitle')}
+                        >
+                          {retryingId === turn.id
+                            ? t('requirements.qaChat.retrying')
+                            : t('requirements.qaChat.retry')}
+                        </button>
                       )}
                     </div>
                   </article>

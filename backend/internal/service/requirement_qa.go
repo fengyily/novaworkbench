@@ -35,7 +35,7 @@ func NewRequirementQAService(database *db.DB) *RequirementQAService {
 }
 
 const qaTurnCols = `id, requirement_id, stage, question, answer, status, job_id,
-	model, session_id, source_session_id, resumed, created_by,
+	model, session_id, source_session_id, resumed, error_kind, created_by,
 	created_at, updated_at, finished_at`
 
 // Create inserts a turn already in `running`: the question is submitted and
@@ -138,16 +138,21 @@ func (s *RequirementQAService) LatestAnsweredTurn(requirementID, stage string) (
 // bookkeeping — they differ from the pre-minted values when the run degraded
 // to a fresh session (source becomes "") or when the CLI reported a session id
 // other than the one we asked for.
-func (s *RequirementQAService) MarkFinished(id, status, answer, modelName, sessionID, sourceSessionID string, resumed bool) error {
+//
+// errorKind classifies a failed run (empty-result / empty-result-after-
+// fallback / stale-session / fork-guard / cli-crash / timeout). It is empty
+// on success. It exists so the next occurrence of the same symptom can be
+// told apart from the log alone.
+func (s *RequirementQAService) MarkFinished(id, status, answer, modelName, sessionID, sourceSessionID string, resumed bool, errorKind string) error {
 	if status == "" {
 		status = model.QAStatusDone
 	}
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`UPDATE requirement_qa_turns
 		SET status = ?, answer = ?, model = ?, session_id = ?, source_session_id = ?,
-		    resumed = ?, finished_at = ?, updated_at = ?
+		    resumed = ?, error_kind = ?, finished_at = ?, updated_at = ?
 		WHERE id = ?`,
-		status, answer, modelName, sessionID, sourceSessionID, boolToInt(resumed), now, now, id)
+		status, answer, modelName, sessionID, sourceSessionID, boolToInt(resumed), errorKind, now, now, id)
 	return err
 }
 
@@ -197,7 +202,7 @@ func scanQATurn(row rowScanner) (*model.RequirementQATurn, error) {
 	var finishedAt sql.NullTime
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(&t.ID, &t.RequirementID, &t.Stage, &t.Question, &t.Answer, &t.Status,
-		&t.JobID, &t.Model, &t.SessionID, &t.SourceSessionID, &resumed, &t.CreatedBy,
+		&t.JobID, &t.Model, &t.SessionID, &t.SourceSessionID, &resumed, &t.ErrorKind, &t.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err
 	}

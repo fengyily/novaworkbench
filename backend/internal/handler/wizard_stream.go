@@ -85,6 +85,13 @@ const (
 	// stage ctx was cancelled. Distinct from killReasonWatchdog (the
 	// handler's stall watchdog) because the two have different windows.
 	killReasonIdleTimeout = "idle-timeout"
+	// killReasonPostResult means WE killed the leftover process group AFTER
+	// the CLI had already delivered its result event. The CLI may still hold
+	// stdout open (the proxy kept the connection), so we terminate the group
+	// to unblock cmd.Wait() — and the CLI's SIGTERM handler then exits with
+	// 143. That exit code is entirely OURS; presenting it as "Claude 异常退出"
+	// is exactly the lie this constant exists to prevent.
+	killReasonPostResult = "post-result"
 )
 
 const (
@@ -232,11 +239,36 @@ func terminationDiagnostics(o claudeStreamOutcome, exitCode int, stderrTrim stri
 	if reasonPart == "" {
 		reasonPart = "none"
 	}
+	// The result-event fields are APPENDED, never inserted: the existing
+	// field order is greppable across runs and downstream log alerts key off
+	// it. The two new fields answer the question the old line could not —
+	// "did the CLI hand us a result at all, and did the model ever get
+	// asked?" (结果子类型 / 模型轮次).
 	return fmt.Sprintf(
-		"诊断：耗时=%s 事件数=%d stream事件数=%d 最后事件类型=%s stdout结束=%s stderr=%s 退出码=%d 终止原因=%s",
+		"诊断：耗时=%s 事件数=%d stream事件数=%d 最后事件类型=%s stdout结束=%s stderr=%s 退出码=%d 终止原因=%s 结果子类型=%s 模型轮次=%d",
 		o.elapsed.Round(time.Millisecond), o.eventCount, o.streamEventCount, emptyAsDash(o.lastEventType),
 		emptyAsDash(o.stdoutEnded), stderrPart, exitCode, reasonPart,
+		emptyAsDash(o.resultSubtype), o.numTurns,
 	)
+}
+
+// emptyResultMessage builds the user-facing error for a run in which the CLI
+// DID deliver its terminal result event but the result carried no text.
+//
+// This is NOT a crash and NOT a model failure: the CLI reported success
+// (subtype=success) with an empty body — the classic signature of a turn
+// that was consumed by an inherited system notification BEFORE the model was
+// ever asked (a forked session inheriting an unfinished background command).
+// The exit code that comes with it (143) is the one WE produced by
+// terminating the process group during teardown, so the message must say so
+// instead of blaming the CLI.
+func emptyResultMessage(o claudeStreamOutcome, exitCode int, stderrTrim string) string {
+	msg := "Claude 已结束本轮但没有产出回答（模型请求未发出 / 返回为空）；不是 Claude 崩溃，" +
+		"退出码是 NovaWorkbench 收尾时终止进程组产生的。"
+	if o.numTurns == 0 && o.resultSubtype != "" {
+		msg += fmt.Sprintf("（结果子类型=%s，模型往返次数=0）", o.resultSubtype)
+	}
+	return msg + "\n\n" + terminationDiagnostics(o, exitCode, stderrTrim)
 }
 
 // emptyAsDash renders an empty string as "-" so the diagnostic line keeps a
@@ -783,7 +815,31 @@ type claudeStreamOutcome struct {
 	// i.e. the model was actually reached. A run that fails without it
 	// never got a model response.
 	sawAssistant bool
-	planContent  string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// sawAssistantMsg is true only when an ACTUAL assistant message event
+	// arrived. sawAssistant cannot answer "did the model speak?" because the
+	// result branch sets it too — a run whose result event carried an empty
+	// body sets sawAssistant while the model was never actually reached.
+	// This field is the honest signal.
+	sawAssistantMsg bool
+	// resultEventSeen is true when the CLI delivered its terminal "result"
+	// event. Together with emptyResult it distinguishes "the CLI never got
+	// to a verdict" from "the CLI said success but with nothing in it".
+	resultEventSeen bool
+	// resultSubtype is the result event's subtype (success / error_…).
+	resultSubtype string
+	// numTurns is the result event's num_turns — how many model round-trips
+	// the CLI performed. 0 with subtype=success means the turn was consumed
+	// before the model was ever asked (an inherited system notification ate
+	// it) — the exact failure the Q&A path now self-heals.
+	numTurns int
+	// resultStopReason is the result event's stop_reason / terminal_reason.
+	resultStopReason string
+	// emptyResult is true when the CLI delivered a successful result event
+	// whose body was empty. It is NOT a crash: the CLI said "success" and
+	// produced nothing. Handlers use it to pick the honest message and to
+	// decide whether a degraded re-run is worth attempting.
+	emptyResult bool
+	planContent string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// streamText accumulates every text fragment the assistant emits via
 	// stream_event text_delta or assistant-event text blocks. Populated as
 	// text lands so a plan-mode run whose model streamed the plan but did
@@ -1309,6 +1365,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			// "the request never left the machine" from "it was sent and the
 			// reply never came".
 			out.sawAssistant = true
+			// The HONEST signal: only an assistant message proves the model
+			// actually produced something. sawAssistant is also set by the
+			// result branch, so it cannot answer that question.
+			out.sawAssistantMsg = true
 			// The "assistant" event is a batched summary of the full turn. When the
 			// model supports streaming (stream_event/content_block_delta), text is
 			// already delivered incrementally and we skip it here. When the model
@@ -1426,7 +1486,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			tk.endTurn()
 		case "result":
 			out.sawAssistant = true
+			out.resultEventSeen = true
 			subtype, _ := evt["subtype"].(string)
+			out.resultSubtype = subtype
+			if v, ok := evt["num_turns"].(float64); ok {
+				out.numTurns = int(v)
+			}
 			// The CLI sometimes emits subtype:"success" even when the upstream
 			// proxy rejected the request — it carries api_error_status (a number),
 			// is_error:true, terminal_reason:"api_error", and a "result" of
@@ -1438,10 +1503,25 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			}
 			isErr, _ := evt["is_error"].(bool)
 			terminalReason, _ := evt["terminal_reason"].(string)
+			out.resultStopReason = terminalReason
+			if out.resultStopReason == "" {
+				out.resultStopReason, _ = evt["stop_reason"].(string)
+			}
 			realSuccess := subtype == "success" && !isErr &&
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
 				out.finalResult, _ = evt["result"].(string)
+				if out.finalResult == "" {
+					// The CLI said "success" and produced NOTHING. This is
+					// the shape of a turn that was eaten by an inherited
+					// system notification before the model was ever asked
+					// (a forked session inheriting an unfinished background
+					// command). Log the RAW event — it is the only evidence
+					// of what the CLI actually reported, and it used to be
+					// dropped on the floor (only the failure branch logged).
+					out.emptyResult = true
+					log.Printf("[%s] claude result event (empty result): %s", scope, truncateStr(line, 800))
+				}
 			} else {
 				out.errMsg = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, stderrBuf.String()) {
@@ -1574,6 +1654,14 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	//     if it is still alive do we terminate it — and then we say so.
 	var waitErr error
 	if gotResult {
+		// The CLI already handed us its verdict; it may still be alive
+		// (the proxy kept the connection open) and tool/MCP grandchildren
+		// may still hold the stdout pipe open, so we terminate the group to
+		// unblock cmd.Wait(). That kill is OURS: the CLI's SIGTERM handler
+		// exits 143, and reporting that as "Claude 异常退出" blamed the CLI
+		// for our own signal. Recording the reason keeps the diagnostic
+		// honest (终止原因=post-result).
+		killReason.set(killReasonPostResult)
 		killProcessGroup(cmd)
 		waitErr = cmd.Wait()
 	} else {
@@ -1605,10 +1693,11 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 
 	if waitErr != nil {
 		stderrTrim := out.stderrText
-		log.Printf("[%s] claude exited: %v stderr=%s | elapsed=%s events=%d last=%s stdout=%s killReason=%s scanErr=%s assistant=%t",
+		log.Printf("[%s] claude exited: %v stderr=%s | elapsed=%s events=%d last=%s stdout=%s killReason=%s scanErr=%s assistant=%t empty=%t subtype=%s turns=%d",
 			scope, waitErr, stderrTrim, out.elapsed.Round(time.Millisecond), out.streamEventCount,
 			emptyAsDash(out.lastEventType), emptyAsDash(out.stdoutEnded),
-			emptyAsDash(out.killReason), emptyAsDash(out.scanErr), out.sawAssistant)
+			emptyAsDash(out.killReason), emptyAsDash(out.scanErr), out.sawAssistant,
+			out.emptyResult, emptyAsDash(out.resultSubtype), out.numTurns)
 		// A non-zero exit is only fatal if we never got a result; some error
 		// events still carry a usable result field. The wording distinguishes
 		// "we terminated it" from "it died on its own", so the UI can show a
@@ -1636,6 +1725,14 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				}
 			}
 			switch {
+			case gotResult && out.emptyResult:
+				// The CLI delivered its terminal result event and the event
+				// said "success" — with an EMPTY body. That is not a crash:
+				// the turn was consumed before the model was ever asked (an
+				// inherited system notification ate it), and the exit code
+				// that comes along is the one WE produced by terminating the
+				// process group during teardown.
+				out.errMsg = emptyResultMessage(out, exitCodeOf(waitErr), stderrTrim)
 			case ctxIdle:
 				killReason.set(killReasonIdleTimeout)
 				out.killReason = killReason.get()
@@ -1676,6 +1773,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				}
 			}
 		}
+	}
+	// The CLI can also exit CLEANLY (code 0) after an empty result event. The
+	// block above only runs when waitErr != nil, so cover that shape here:
+	// an empty result is still "no answer", never "the CLI crashed".
+	if out.finalResult == "" && out.errMsg == "" && out.emptyResult {
+		out.errMsg = emptyResultMessage(out, exitCodeOf(waitErr), out.stderrText)
 	}
 	// Re-check staleness against stderr in case the CLI printed the error there
 	// instead of emitting a result event.
@@ -1804,6 +1907,8 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 				}
 			}
 		case "assistant":
+			out.sawAssistant = true
+			out.sawAssistantMsg = true
 			msg, _ := evt["message"].(map[string]interface{})
 			if m, ok := msg["model"].(string); ok {
 				out.actualModel = m
@@ -1861,16 +1966,25 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 			tk.endTurn()
 		case "result":
 			subtype, _ := evt["subtype"].(string)
+			out.resultEventSeen = true
+			out.resultSubtype = subtype
+			if v, ok := evt["num_turns"].(float64); ok {
+				out.numTurns = int(v)
+			}
 			apiErrStatus := 0.0
 			if v, ok := evt["api_error_status"].(float64); ok {
 				apiErrStatus = v
 			}
 			isErr, _ := evt["is_error"].(bool)
 			terminalReason, _ := evt["terminal_reason"].(string)
+			out.resultStopReason = terminalReason
 			realSuccess := subtype == "success" && !isErr &&
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
 				out.finalResult, _ = evt["result"].(string)
+				if out.finalResult == "" {
+					out.emptyResult = true
+				}
 			} else {
 				out.errMsg = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, "") {
@@ -1944,26 +2058,33 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 	scanErr := scanner.Err()
 	idleTimeoutHit := ctx != nil && ctx.Err() == context.Canceled && out.streamEventCount > 0
 	if out.finalResult == "" && out.errMsg == "" {
-		var summary string
-		if idleTimeoutHit {
-			summary = fmt.Sprintf("远程 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时（context.Canceled）；最后事件类型=%q", out.streamEventCount, out.lastEventType)
-			out.IdleTimeoutHit = true
-		} else if out.streamEventCount == 0 {
-			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件（system/init 也未出现），最后类型=%q", out.eventCount, out.lastEventType)
+		if out.emptyResult {
+			// The remote CLI delivered a terminal result event with an
+			// empty body — not a stream interruption. Say so instead of
+			// blaming the network.
+			out.errMsg = emptyResultMessage(out, 0, "")
 		} else {
-			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件，含 %d 个 stream_event（Claude 在输出文本/工具过程中断），最后类型=%q", out.eventCount, out.streamEventCount, out.lastEventType)
+			var summary string
+			if idleTimeoutHit {
+				summary = fmt.Sprintf("远程 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时（context.Canceled）；最后事件类型=%q", out.streamEventCount, out.lastEventType)
+				out.IdleTimeoutHit = true
+			} else if out.streamEventCount == 0 {
+				summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件（system/init 也未出现），最后类型=%q", out.eventCount, out.lastEventType)
+			} else {
+				summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件，含 %d 个 stream_event（Claude 在输出文本/工具过程中断），最后类型=%q", out.eventCount, out.streamEventCount, out.lastEventType)
+			}
+			if len(firstNonJSON) > 0 {
+				summary += "；非 JSON 前导输出: " + strings.Join(firstNonJSON, " | ")
+			}
+			if scanErr != nil {
+				summary += "；scanner 错误: " + scanErr.Error()
+			}
+			closer := "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
+			if idleTimeoutHit {
+				closer = "）。可能原因：Agent 服务器侧 claude 进程输出阻塞；调高 NOVA_AGENT_IDLE_TIMEOUT 或 NOVA_AGENT_MAX_TOTAL_TIMEOUT。"
+			}
+			out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + closer
 		}
-		if len(firstNonJSON) > 0 {
-			summary += "；非 JSON 前导输出: " + strings.Join(firstNonJSON, " | ")
-		}
-		if scanErr != nil {
-			summary += "；scanner 错误: " + scanErr.Error()
-		}
-		closer := "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
-		if idleTimeoutHit {
-			closer = "）。可能原因：Agent 服务器侧 claude 进程输出阻塞；调高 NOVA_AGENT_IDLE_TIMEOUT 或 NOVA_AGENT_MAX_TOTAL_TIMEOUT。"
-		}
-		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + closer
 	}
 	tk.finish(&out)
 	return out

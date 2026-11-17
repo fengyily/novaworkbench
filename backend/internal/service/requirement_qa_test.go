@@ -96,7 +96,7 @@ func TestRequirementQAService_CreateListMarkFinished(t *testing.T) {
 		t.Fatalf("len(coding list) = %d, want 0", len(coding))
 	}
 
-	if err := svc.MarkFinished(turn.ID, model.QAStatusDone, "因为答案要由后端落库", "sonnet", turn.SessionID, turn.SourceSessionID, true); err != nil {
+	if err := svc.MarkFinished(turn.ID, model.QAStatusDone, "因为答案要由后端落库", "sonnet", turn.SessionID, turn.SourceSessionID, true, ""); err != nil {
 		t.Fatalf("mark finished: %v", err)
 	}
 	got, err := svc.Get(turn.ID)
@@ -114,6 +114,42 @@ func TestRequirementQAService_CreateListMarkFinished(t *testing.T) {
 	}
 	if got.Model != "sonnet" {
 		t.Fatalf("model = %q, want sonnet", got.Model)
+	}
+	if got.ErrorKind != "" {
+		t.Fatalf("error_kind = %q, want empty on a successful turn", got.ErrorKind)
+	}
+}
+
+// TestRequirementQAService_ErrorKindRoundTrip pins that the failure
+// classification survives the round trip — it is the only machine-readable
+// trace of "the model was never asked" vs "the model answered and the reply
+// was lost".
+func TestRequirementQAService_ErrorKindRoundTrip(t *testing.T) {
+	d, reqID := newQATestDB(t)
+	svc := NewRequirementQAService(d)
+
+	turn, err := svc.Create(&model.RequirementQATurn{
+		RequirementID: reqID,
+		Stage:         model.QAStageCoding,
+		Question:      "为什么这里用 turn 表？",
+		JobID:         "job_1",
+		SessionID:     "sess-1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.MarkFinished(turn.ID, model.QAStatusError, "空结果", "", turn.SessionID, "src-1", false, "empty-result-after-fallback"); err != nil {
+		t.Fatalf("mark finished: %v", err)
+	}
+	got, err := svc.Get(turn.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ErrorKind != "empty-result-after-fallback" {
+		t.Fatalf("error_kind = %q, want empty-result-after-fallback", got.ErrorKind)
+	}
+	if got.Status != model.QAStatusError {
+		t.Fatalf("status = %q, want %q", got.Status, model.QAStatusError)
 	}
 }
 
@@ -163,7 +199,7 @@ func TestRequirementQAService_LatestTurns(t *testing.T) {
 
 	// An errored turn must NOT become the resume target — its session may be
 	// half-written. The previous answered turn stays the resume source.
-	if err := svc.MarkFinished(second.ID, model.QAStatusError, "boom", "", "bbbb", "", false); err != nil {
+	if err := svc.MarkFinished(second.ID, model.QAStatusError, "boom", "", "bbbb", "", false, "cli-crash"); err != nil {
 		t.Fatalf("mark error: %v", err)
 	}
 	answered, err = svc.LatestAnsweredTurn(reqID, model.QAStageCoding)

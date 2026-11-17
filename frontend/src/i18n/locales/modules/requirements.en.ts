@@ -184,6 +184,10 @@ export const requirements = {
     refreshBtn: 'Refresh',
     refreshTitle: 'Re-read the Q&A thread',
     execError: 'Q&A run failed',
+    // Retry affordance of a failed turn: ask the same question again.
+    retry: 'Retry',
+    retryTitle: 'Ask the same question again',
+    retrying: 'Retrying…',
     freshBadge: 'Not resumed from the original session (answered from the plan document)',
     threadRotated: 'Context updated',
     driftBadge: 'Context updated',

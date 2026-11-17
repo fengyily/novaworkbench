@@ -278,6 +278,11 @@ CREATE TABLE IF NOT EXISTS requirement_qa_turns (
 	session_id        TEXT NOT NULL DEFAULT '',
 	source_session_id TEXT NOT NULL DEFAULT '',
 	resumed           INTEGER NOT NULL DEFAULT 0,
+	-- error_kind classifies a failed turn (empty-result /
+	-- empty-result-after-fallback / stale-session / fork-guard / cli-crash /
+	-- timeout). Empty on success. Added by alterColumns below for legacy
+	-- databases.
+	error_kind        TEXT NOT NULL DEFAULT '',
 	created_by        TEXT NOT NULL DEFAULT '',
 	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1812,6 +1817,11 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN analyst_effort TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_effort TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN architect_effort TEXT NOT NULL DEFAULT ''`,
+	// error_kind: 答疑轮的失败分类（empty-result /
+	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
+	// timeout）。空串 = 成功。有了它，下一次同类故障从一行日志就能判断是
+	// 「模型根本没被调用」还是「模型答了但丢包」，不必再靠考古转录。
+	`ALTER TABLE requirement_qa_turns ADD COLUMN error_kind TEXT NOT NULL DEFAULT ''`,
 	// 子任务的实际档位。push_pr 子任务固定走 commit 阶段（low），普通子
 	// 任务走 coding 阶段（medium），Review 型子任务走 other 阶段。
 	`ALTER TABLE sub_tasks ADD COLUMN effort TEXT NOT NULL DEFAULT ''`,

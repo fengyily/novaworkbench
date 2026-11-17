@@ -2566,6 +2566,11 @@ export interface RequirementQATurn {
    *  false means the answer came from a degraded run seeded with the plan
    *  document — still useful, but shallower. */
   resumed: boolean;
+
+  /** Failure classification of a failed turn (empty-result /
+   *  empty-result-after-fallback / stale-session / fork-guard / cli-crash /
+   *  timeout). Empty on success. */
+  error_kind?: string;
   created_by: string;
   created_at: string;
   updated_at: string;

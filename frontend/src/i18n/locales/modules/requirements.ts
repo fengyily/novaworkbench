@@ -180,6 +180,11 @@ export const requirements = {
     refreshBtn: '刷新',
     refreshTitle: '重新拉取答疑记录',
     execError: '答疑执行出错',
+    // 失败轮的「重试」：用同样的问题重新问一次。失败轮本身是死的——线程只
+    // 增长，没有任何机制会重跑旧问题。
+    retry: '重试',
+    retryTitle: '用同样的问题重新问一次',
+    retrying: '重试中…',
     freshBadge: '未续接原会话（基于方案原文作答）',
     threadRotated: '上下文已更新',
     driftBadge: '上下文已更新',
