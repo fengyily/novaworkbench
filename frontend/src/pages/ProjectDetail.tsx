@@ -8,7 +8,6 @@ import {
   type Project, type RunStatus, type PlatformToken, type CommitStylePreview,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, priorityLabelKeys, kindOf, API_BASE, authedFetch,
-  MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
@@ -16,6 +15,7 @@ import { CreateRequirementForm } from '../components/CreateRequirementForm/Creat
 import { StatusChips } from '../components/StatusChips';
 import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import RequirementMobileCard from '../components/RequirementMobileCard/RequirementMobileCard';
+import RequirementMarkChips from '../components/RequirementMarkChips/RequirementMarkChips';
 import { RequirementQuickCreate } from '../components/RequirementQuickCreate';
 import { RequirementQAPeek } from '../components/RequirementQAPeek';
 import {
@@ -621,6 +621,14 @@ export default function ProjectDetail() {
   const [reqBatchResult, setReqBatchResult] = useState<{ deleted: number; failed: number } | null>(null);
   const [reqLiveMsg, setReqLiveMsg] = useState('');
 
+  // A mark toggle returns the server's authoritative Requirement. Patch ONLY
+  // the marks column into the local row: overwriting the whole row would drop
+  // the list-derived columns (child_count / qa_turn_count), which the
+  // single-row Get does not recompute.
+  const patchReqMarks = useCallback((updated: Requirement) => {
+    setReqs(prev => prev.map(r => r.id === updated.id ? { ...r, marks: updated.marks } : r));
+  }, []);
+
   // Requirement ids currently running a wizard job (across the whole
   // backend process). Populated by polling GET /api/wizard/active-jobs
   // every 5s. The renderRequirementRows helper checks this set per row
@@ -1132,36 +1140,23 @@ export default function ProjectDetail() {
         {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) render INLINE with
             the title (chip strip BEFORE the schedule clock + title text)
             so marked requirements stay on a single line — same order as
-            the global RequirementsList. Unmarked rows render nothing (no
-            extra height), and unknown codes are skipped so a stale value
-            written before a preset is renamed can't crash the row. Colors
-            come from MARK_PRESETS in api/client.ts (single source of
-            truth shared with the detail-page editor). */}
+            the global RequirementsList.
+
+            The strip is EDITABLE here — clicking a chip removes the
+            mark, the "+" opens the preset menu. The server returns the
+            whole Requirement, but only the marks column is patched back
+            into the row (see patchReqMarks) so the list-derived columns
+            survive. Unknown preset codes are skipped by the component so
+            a stale value written before a preset is renamed can't crash
+            the row. */}
         <div className="pr-title-text">
-          {(() => {
-            const rowMarks = parseMarks(req.marks);
-            if (rowMarks.length === 0) return null;
-            return (
-              <div className="pr-title-marks">
-                {rowMarks.map(code => {
-                  const p = MARK_PRESETS.find(x => x.code === code);
-                  if (!p) return null;
-                  const label = t(`requirements.detail2.marksPreset.${p.code}`);
-                  return (
-                    <span
-                      key={code}
-                      className="pr-title-mark"
-                      style={{ color: p.color, background: p.bg, borderColor: p.color }}
-                      title={label}
-                    >
-                      <span aria-hidden>{p.icon}</span>
-                      <span>{label}</span>
-                    </span>
-                  );
-                })}
-              </div>
-            );
-          })()}
+          <RequirementMarkChips
+            reqId={req.id}
+            marks={req.marks}
+            status={req.status}
+            onChange={patchReqMarks}
+            onError={msg => setReqLiveMsg(msg)}
+          />
           {/* Pending-scheduled chip — unified with the cross-project list:
               clock renders BEFORE the title text so both surfaces read
               identically. Mirrors scheduleClock() in RequirementsList.tsx
@@ -1436,6 +1431,10 @@ export default function ProjectDetail() {
         cardId={depth > 0 && req.parent_id && siblings?.[0]?.id === req.id
           ? `pr-req-children-${req.parent_id}`
           : undefined}
+        /* The card hosts its own editable mark strip. Route the change back
+           into the row so the desktop table (same requirement, same list
+           state) stays in sync with the phone rendering. */
+        onMarkChange={patchReqMarks}
         /* Selection box and tree toggle stay SIBLINGS of the card — the
            card is a role="button" and an <input> nested in one is
            invalid HTML whose click the card would swallow. */

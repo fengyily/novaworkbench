@@ -10,7 +10,7 @@
 // Kind filter is multi-select; the backend List accepts a comma-separated
 // kind list, so the toggles are joined into CSV.
 
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -28,8 +28,9 @@ import { useRowSelection } from '../components/RequirementBatch/useRowSelection'
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
 import RequirementMobileCard, {
-  MarksStrip, ScheduleChip,
+  ScheduleChip,
 } from '../components/RequirementMobileCard/RequirementMobileCard';
+import RequirementMarkChips from '../components/RequirementMarkChips/RequirementMarkChips';
 import { fmtRelative, fmtDateTime } from '../utils/intl';
 import './RequirementsList.css';
 
@@ -49,6 +50,14 @@ export default function RequirementsList() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [requirements, setRequirements] = useState<Requirement[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // A mark toggle returns the server's authoritative Requirement. Patch ONLY
+  // the marks column into the local row: overwriting the whole row would
+  // drop the list-derived columns (child_count / qa_turn_count), which the
+  // single-row Get does not recompute.
+  const patchReqMarks = useCallback((updated: Requirement) => {
+    setRequirements(prev => prev.map(r => r.id === updated.id ? { ...r, marks: updated.marks } : r));
+  }, []);
 
   // Filters
   const [projectFilter, setProjectFilter] = useState('');
@@ -508,11 +517,23 @@ export default function RequirementsList() {
                   come from MARK_PRESETS in api/client.ts so the
                   detail-page editor stays in sync.
 
+                  The strip is EDITABLE here — clicking a chip removes the
+                  mark, the "+" opens the preset menu. The server returns
+                  the whole Requirement, but only the marks column is
+                  patched back into the row (see patchReqMarks) so the
+                  list-derived columns survive.
+
                   No child-count chip here: the chevron in the gutter
                   already says "this master has children", and the violet
                   "Sub-requirements 3" chip was eating ~120px of the only
                   column worth protecting — the title. */}
-              <MarksStrip marks={r.marks} />
+              <RequirementMarkChips
+                reqId={r.id}
+                marks={r.marks}
+                status={r.status}
+                onChange={patchReqMarks}
+                onError={msg => setLiveMsg(msg)}
+              />
               <ScheduleChip scheduledRunAt={r.scheduled_run_at} />
               <span className="req-row-title-text-label">
                 {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
@@ -627,6 +648,9 @@ export default function RequirementsList() {
              stage hasn't run yet, so legacy rows simply render no
              chip (no local-vs-agent guess). */
           footExtra={<DevSourceBadge req={r} compact />}
+          /* The card hosts its own editable mark strip — keep the phone row
+             and the desktop row in sync through the same patch callback. */
+          onMarkChange={patchReqMarks}
           onOpen={req => navigate(`/requirements/${req.id}`)}
         />
       );
