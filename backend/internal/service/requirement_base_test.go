@@ -431,3 +431,86 @@ func TestNoBranchMasterFallsBackToProjectDefault(t *testing.T) {
 		t.Fatalf("child2 base_branch_effective = %q, want %q", staleChild.BaseBranchEffective, "main")
 	}
 }
+
+// TestAttachEffectiveBaseLeavesEmptyWhenLookupFails pins what happens when
+// the read path CANNOT resolve the base — a transient DB failure must not
+// produce a value that looks right.
+//
+// The failure mode this guards against: the project / parent lookups failed,
+// the resolver fell through to its last tier and answered "main". The
+// frontend seeds its BASE picker with "main", the user does not touch it,
+// and the picker sends "main" back. By then the runtime resolver is healthy
+// again and resolves the REAL parent branch — so the mismatch reads as "the
+// user deliberately chose main", and base_branch='main' with
+// source='explicit' is written to the row. The inheritance is dead and
+// nothing in the UI says so.
+//
+// An EMPTY effective base is the only safe answer: the frontend falls back
+// to the persisted base_branch (still correct) and the resolver keeps
+// reproducing the same value.
+func TestAttachEffectiveBaseLeavesEmptyWhenLookupFails(t *testing.T) {
+	d := newTestDB(t)
+	seedProject(t, d, "proj_a", "proj_a", "/tmp/proj_a")
+	s := NewRequirementService(d, nil)
+
+	master := mkReq(t, s, "proj_a", "master")
+	if err := s.UpdateWorktree(master.ID, "feat/req_"+master.ID, ""); err != nil {
+		t.Fatalf("stamp master branch: %v", err)
+	}
+
+	// The DB goes away — every query from here on fails.
+	d.Close()
+
+	// (1) The project-default lookup fails.
+	items := []model.Requirement{{ID: "req_C", ProjectID: "proj_a", ParentID: master.ID}}
+	s.attachEffectiveBase(items)
+	if items[0].BaseBranchEffective != "" {
+		t.Fatalf("base_branch_effective = %q, want empty — a failed lookup must not answer %q",
+			items[0].BaseBranchEffective, "main")
+	}
+
+	// (2) The parent lookup fails (no project id ⇒ no project query at all,
+	//     so the failure lands on the parent query).
+	items = []model.Requirement{{ID: "req_C", ParentID: master.ID}}
+	s.attachEffectiveBase(items)
+	if items[0].BaseBranchEffective != "" {
+		t.Fatalf("base_branch_effective = %q, want empty — a failed lookup must not answer %q",
+			items[0].BaseBranchEffective, "main")
+	}
+}
+
+// TestBaseLookupsReportFailure pins that the two batch lookups REPORT a
+// failed query instead of returning an empty map. An empty map is
+// indistinguishable from "no rows", and the resolver would answer "main"
+// for every project — the wrong base the caller then hands to the frontend.
+func TestBaseLookupsReportFailure(t *testing.T) {
+	d := newTestDB(t)
+	seedProject(t, d, "proj_a", "proj_a", "/tmp/proj_a")
+	s := NewRequirementService(d, nil)
+
+	// Healthy first: the lookups succeed and report no error.
+	projDefaults, err := s.projectDefaultBranches([]string{"proj_a"})
+	if err != nil {
+		t.Fatalf("projectDefaultBranches: %v", err)
+	}
+	if projDefaults["proj_a"] != "main" {
+		t.Fatalf("project default = %q, want %q", projDefaults["proj_a"], "main")
+	}
+	parents, err := s.parentRequirementRows([]string{"req_missing"})
+	if err != nil {
+		t.Fatalf("parentRequirementRows: %v", err)
+	}
+	if len(parents) != 0 {
+		t.Fatalf("parent rows = %d, want 0", len(parents))
+	}
+
+	// Now the DB is gone.
+	d.Close()
+
+	if _, err := s.projectDefaultBranches([]string{"proj_a"}); err == nil {
+		t.Fatal("projectDefaultBranches must report a failed query")
+	}
+	if _, err := s.parentRequirementRows([]string{"req_x"}); err == nil {
+		t.Fatal("parentRequirementRows must report a failed query")
+	}
+}
