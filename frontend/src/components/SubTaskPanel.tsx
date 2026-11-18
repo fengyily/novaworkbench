@@ -29,7 +29,7 @@ import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentityS
 import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
@@ -1038,11 +1038,13 @@ function SubTaskCard({
   // 新一轮上。
   const boundJobIdRef = useRef(st.job_id);
   useEffect(() => { boundJobIdRef.current = st.job_id; });
-  // 快照回放那一步（同一功能的下一个提交）会在这一块再补两个闸门：
-  // `hydratedJobRef`（已经为哪个 job_id 拉过快照）与 `logUnavailable`
-  // （拉取失败时的提示态），并补上 `coalesceLogLines` 的 import。它们与
-  // 快照 effect 放同一个提交落地 —— tsconfig 开了 noUnusedLocals，一个
-  // 还没人读的符号会让 `tsc -b` 直接失败，所以先声明后引用会卡住构建。
+  // 「已为哪个 job_id 拉过快照」——防止快照 effect 重跑造成重复请求 / 循环。
+  const hydratedJobRef = useRef('');
+  // 快照拉取失败（历史输出确实不存在，例如运行期进程被 kill、job_logs 未
+  // 落库）时的提示态 —— 显示提示而不是留白屏。值这一侧先留空位：提示文案
+  // 的渲染在下一步才接上，而 tsconfig 开了 noUnusedLocals —— 先声明一个
+  // 没人读的值会让 `tsc -b` 直接失败。渲染那一步把它改回具名解构即可。
+  const [, setLogUnavailable] = useState(false);
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
   //
@@ -1203,6 +1205,55 @@ function SubTaskCard({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.status, st.job_id]);
+
+  // 终态子任务的历史输出回放。
+  //
+  // 为什么要它：日志区原先只在 streaming 时渲染，卡片一结束就变成空白；
+  // 而 SSE 的实时历史只存在于后端内存 JobStore 里（cap 50），刷新页面后连
+  // 「当时的输出」都取不回来。快照端点 GET /api/wizard/jobs/{id} 内存命中
+  // 返回全量 log[]、未命中回落 job_logs 表（后端重启后仍可回看）。
+  //
+  // 三条硬约束：
+  //   1. 与 SSE **互斥** —— 两条路径都写同一个 lines state，叠加就是重复行。
+  //      gotFrameRef（收到过帧）/ liveRef（已订阅）/ hydratedJobRef（已拉过）
+  //      三道闸门在发起前各查一次，.then 里再查一次。
+  //   2. 过滤口径与实时路径**逐字一致** —— 实时回调丢弃 usage / phase /
+  //      phase_section 三类帧（它们分别进 usage 条与三阶段区），快照同样丢弃，
+  //      否则历史视图会多出实时视图里没有的噪音行（usage 的 JSON 载荷还会
+  //      被 .sub-log-md 当 Markdown 渲染）。
+  //   3. **不使用 cancelled 标志** —— main.tsx 开了 StrictMode，React 19 在
+  //      开发模式会「mount → cleanup → mount」重跑 effect；cancelled 会丢弃
+  //      第 1 轮的响应，而 hydratedJobRef 又挡住第 2 轮重新发起 ⇒ 开发环境
+  //      下历史输出永远加载不出来。改用「只增不减」的 ref 判定有效性，
+  //      组件卸载后 setState 在 React 18+ 是静默 no-op。
+  useEffect(() => {
+    if (streaming) return;                    // 运行中走 SSE，不拉快照
+    if (!st.job_id) return;                   // 尚未派发的行没有 job
+    if (gotFrameRef.current) return;          // 本次会话已经实时看过
+    if (liveRef.current) return;              // 实时路径已接管
+    if (hydratedJobRef.current === st.job_id) return;  // 防循环
+    hydratedJobRef.current = st.job_id;
+    wizardApi.getJob(st.job_id)
+      .then((job) => {
+        // 二重保险：请求在途期间可能已经切回实时（重做 / 继续），
+        // 或这一行已经被重新派发到另一个 job_id。
+        if (gotFrameRef.current) return;
+        if (liveRef.current) return;
+        if (boundJobIdRef.current !== st.job_id) return;
+        const raw = job.log ?? [];
+        // 与 live 路径保持一致：usage / phase / phase_section 不进 lines[]
+        const kept = raw.filter((l) => l.type !== 'usage'
+          && l.type !== 'phase' && l.type !== 'phase_section');
+        setLines(coalesceLogLines(kept));
+        setLogUnavailable(false);
+      })
+      .catch(() => {
+        // 历史输出确实不存在（例如运行期进程被 kill，job_logs 从未落库）——
+        // 显示提示，不留白屏。
+        setLogUnavailable(true);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, st.job_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
