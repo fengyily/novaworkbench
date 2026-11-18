@@ -1026,6 +1026,23 @@ function SubTaskCard({
   // showed exactly one line (a bare "exit status 143") and nothing else.
   const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
+  // 「本卡本次会话已收到过任何 SSE 帧」。SSE 的 onMessage 回调第一行置位
+  // （含 job_done 终帧）—— 它是「快照回放」与「实时输出」互斥的第一道闸门。
+  const gotFrameRef = useRef(false);
+  // 「本卡已走上实时路径」。在 SSE 订阅建立的那一刻就置位，而不是等首帧：
+  // 存在一个窄窗口（卡片从终态切回实时，SSE 已订阅但首帧未到），此时
+  // gotFrameRef 仍是 false，旧快照若落地就会与随后的 SSE 重放叠加。
+  const liveRef = useRef(false);
+  // 「本卡当前绑定的 job_id」。快照的 .then 读它，识别「请求在途期间这行
+  // 被重新派发」（重做 / 继续会原地覆盖 job_id），避免把旧一轮的日志写到
+  // 新一轮上。
+  const boundJobIdRef = useRef(st.job_id);
+  useEffect(() => { boundJobIdRef.current = st.job_id; });
+  // 快照回放那一步（同一功能的下一个提交）会在这一块再补两个闸门：
+  // `hydratedJobRef`（已经为哪个 job_id 拉过快照）与 `logUnavailable`
+  // （拉取失败时的提示态），并补上 `coalesceLogLines` 的 import。它们与
+  // 快照 effect 放同一个提交落地 —— tsconfig 开了 noUnusedLocals，一个
+  // 还没人读的符号会让 `tsc -b` 直接失败，所以先声明后引用会卡住构建。
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
   //
@@ -1072,6 +1089,7 @@ function SubTaskCard({
     esRef.current = createEventStream(
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
+        gotFrameRef.current = true;              // ← 新增：任何一帧都算（含 job_done）
         if (!evt || typeof evt !== 'object') return;
         const evtType = evt.type as string;
         if (evtType === 'usage') {
@@ -1148,12 +1166,21 @@ function SubTaskCard({
         }));
       },
       () => {
+        // 流失败后解除「实时路径已接管」标记，让快照回放可以兜底。
+        //
+        // 为什么这不会造成「快照与 SSE 叠加」：createEventStream 的 fail()
+        // 只触发一次（api/stream.ts 的 finished 标志），失败后读循环已经
+        // 退出、不会再有帧送达，所以解除 live 之后不存在「实时输出」可叠。
+        // 已经送达过帧的流仍被 gotFrameRef 挡住；重做 / 继续的竞态（请求
+        // 在途期间这行被重新派发）仍被 boundJobIdRef 挡住。
+        liveRef.current = false;                 // ← 流失败后允许快照回放兜底
         setStreaming(false);
         subTasksApi.get(st.requirement_id, st.id)
           .then((next) => { setArtifact(next.artifact); onChanged(next); })
           .catch(() => {});
       },
     );
+    liveRef.current = true;                    // ← 新增：实时路径已接管
     return () => { esRef.current?.close(); esRef.current = null; };
   // We deliberately use the minimal dep set — parent re-renders shouldn't
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
