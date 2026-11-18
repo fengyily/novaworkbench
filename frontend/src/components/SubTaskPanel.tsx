@@ -1041,10 +1041,10 @@ function SubTaskCard({
   // 「已为哪个 job_id 拉过快照」——防止快照 effect 重跑造成重复请求 / 循环。
   const hydratedJobRef = useRef('');
   // 快照拉取失败（历史输出确实不存在，例如运行期进程被 kill、job_logs 未
-  // 落库）时的提示态 —— 显示提示而不是留白屏。值这一侧先留空位：提示文案
-  // 的渲染在下一步才接上，而 tsconfig 开了 noUnusedLocals —— 先声明一个
-  // 没人读的值会让 `tsc -b` 直接失败。渲染那一步把它改回具名解构即可。
-  const [, setLogUnavailable] = useState(false);
+  // 落库）时的提示态 —— 显示提示而不是留白屏。
+  const [logUnavailable, setLogUnavailable] = useState(false);
+  // 日志区是否渲染：实时路径一定渲染；回放路径只要拿到了内容就渲染。
+  const showLog = streaming || lines.length > 0;
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
   //
@@ -1946,14 +1946,27 @@ function SubTaskCard({
             </section>
           )}
 
-          {/* Live log (streaming) — full-width terminal scrollback.
+          {/* Live log (streaming) / 历史输出回放 —— full-width terminal scrollback.
               Wrapped in a div with logAnchorRef so the header's
               继续 → "scroll to log" effect can scrollIntoView the
               container without coupling to SubTaskLogView's internal
-              auto-scroll-to-bottom ref. */}
-          {streaming && (
+              auto-scroll-to-bottom ref.
+              showLog = streaming || lines.length > 0 —— 任务结束后只要回放
+              出了内容就继续渲染，而不是像从前那样一结束就空白。 */}
+          {showLog && (
             <div ref={logAnchorRef}>
               <SubTaskLogView lines={lines} />
+            </div>
+          )}
+
+          {/* 历史输出确实不存在（例如运行期进程被 kill，job_logs 从未落库）：
+              说清楚，而不是留一块空白。复用 .sub-log-empty 的视觉，不新增
+              CSS 类。注意它必须与 SubTaskLogView **并列**：SubTaskLogView 在
+              lines 为空时自己会渲染一个 .sub-log-empty（logEmpty），包进去
+              就会出现两个空态框。 */}
+          {!streaming && logUnavailable && (
+            <div className="sub-log-empty">
+              {t('components.subTaskCard.logUnavailable')}
             </div>
           )}
 
