@@ -253,6 +253,7 @@ export const components = {
     hoursOnly: '{{h}}h',
     liveTicker: '⏱ {{duration}}',
     logEmpty: '⏳ Waiting for Claude output…',
+    logUnavailable: 'The output record for this sub-task is unavailable',
     tokenTitle: 'Input / output tokens (incl. cache)',
     tokenBadge: '🪙 {{cell}}',
     costTitle: 'Cost of this sub-task',

@@ -268,6 +268,7 @@ export const components = {
     hoursOnly: '{{h}}小时',
     liveTicker: '⏱ {{duration}}',
     logEmpty: '⏳ 等待 Claude 输出…',
+    logUnavailable: '该任务的输出记录不可用',
     tokenTitle: '输入 / 输出 tokens（含缓存）',
     tokenBadge: '🪙 {{cell}}',
     costTitle: '本次子任务费用',
