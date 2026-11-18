@@ -104,7 +104,15 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 		return "", false, warnings, nil
 	}
 	if reqRow.NoBranch {
-		warnings = append(warnings, "主需求为「不创建分支」模式，子需求直接基于主需求的基线开发。")
+		// 「不创建分支」模式的主需求**没有自己的分支**可继承，所以子需求
+		// 回落到项目默认分支 —— 与解析链（parentInheritBase / tier 3 → tier 5）
+		// 的判定一致。文案必须说清楚回落到了哪条线，否则用户会以为子需求
+		// 落在主需求的基线上（而主需求恰恰没有分支）。
+		base := strings.TrimSpace(proj.DefaultBranch)
+		if base == "" {
+			base = "main"
+		}
+		warnings = append(warnings, fmt.Sprintf("主需求为「不创建分支」模式，子需求直接基于项目默认分支 %s 开发。", base))
 		return "", false, warnings, nil
 	}
 

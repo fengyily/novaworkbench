@@ -118,16 +118,39 @@ func ParentBranchBase(lookup func(string) (*model.Requirement, error), req *mode
 	if err != nil || parent == nil {
 		return ""
 	}
+	return parentInheritBase(parent)
+}
+
+// parentInheritBase is THE rule for what a child requirement inherits from
+// its master: the master's DEVELOPMENT branch, or the master's own base when
+// it has not developed a branch yet.
+//
+// A master in "develop on base" mode (no_branch) has NO branch of its own —
+// it commits straight onto its base. There is therefore nothing to inherit:
+// the function returns "" and the caller falls back to the project default.
+//
+// The rule is shared by both sides of the seam, and they MUST agree:
+//
+//   - the read path (ParentBranchBase → the resolver's tier 3) computes the
+//     base a child would develop on;
+//   - the creation paths (inheritedBaseBranch) persist that same base.
+//
+// When they disagreed, the child row carried a base the resolver would never
+// reproduce: the frontend seeded its picker with the resolver's value and
+// sent it back, so the next design / coding run overwrote the persisted
+// value with a different one — the child's PR target silently drifted away
+// from the master's line.
+func parentInheritBase(parent *model.Requirement) string {
+	if parent == nil {
+		return ""
+	}
 	if parent.NoBranch {
 		return ""
 	}
 	if b := strings.TrimSpace(parent.BranchName); b != "" {
 		return b
 	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
-		return b
-	}
-	return ""
+	return strings.TrimSpace(parent.BaseBranch)
 }
 
 // attachEffectiveBase fills model.Requirement.BaseBranchEffective on every
@@ -248,6 +271,11 @@ func (s *RequirementService) parentRequirementRows(ids []string) map[string]*mod
 // the parent requirement — ONE targeted query, without the derived columns
 // (sub-task counts, effective base, …) a full Get would pull in.
 //
+// no_branch is part of the read: a master in "develop on base" mode has no
+// branch of its own to inherit, and the creation path must apply the same
+// rule the read path applies (parentInheritBase) — otherwise the persisted
+// base is one the resolver would never reproduce.
+//
 // Returns nil when the row is gone or unreadable; the caller then falls back
 // to the project default.
 func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirement {
@@ -257,8 +285,8 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 	}
 	var p model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id, project_id, branch_name, base_branch FROM requirements WHERE id = ?", parentID,
-	).Scan(&p.ID, &p.ProjectID, &p.BranchName, &p.BaseBranch)
+		"SELECT id, project_id, branch_name, base_branch, no_branch FROM requirements WHERE id = ?", parentID,
+	).Scan(&p.ID, &p.ProjectID, &p.BranchName, &p.BaseBranch, &p.NoBranch)
 	if err != nil {
 		return nil
 	}
@@ -277,6 +305,11 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 // Fallbacks: parent development branch → parent base → project default →
 // "main".
 //
+// The no_branch rule comes from parentInheritBase — the very same rule the
+// read path applies — so a master that develops on its base contributes
+// NOTHING to inherit (it has no branch of its own) and the child falls back
+// to the project default, exactly like the resolver would resolve it.
+//
 // The source is ALWAYS model.BaseSourceParent — never explicit. "explicit"
 // means "the user picked this on THIS requirement", and the user did not:
 // they picked it on the master, and the child merely follows.
@@ -284,13 +317,7 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 // The parent may be nil (deleted between the validation and the read) — the
 // caller then falls back to the project default.
 func (s *RequirementService) inheritedBaseBranch(parent *model.Requirement) string {
-	if parent == nil {
-		return s.projectDefaultBranchFor(parent)
-	}
-	if b := strings.TrimSpace(parent.BranchName); b != "" {
-		return b
-	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
+	if b := parentInheritBase(parent); b != "" {
 		return b
 	}
 	return s.projectDefaultBranchFor(parent)

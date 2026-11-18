@@ -348,3 +348,86 @@ func TestAttachEffectiveBaseFillsInheritedBase(t *testing.T) {
 		t.Fatalf("list missing rows: child=%v top=%v", sawChild, sawTop)
 	}
 }
+
+// TestNoBranchMasterFallsBackToProjectDefault pins the no_branch rule on
+// BOTH sides of the seam.
+//
+// A master in "develop on base" mode has no branch of its own — it commits
+// straight onto its base. There is therefore nothing for a child to
+// inherit, and both the creation path and the read path must say so: the
+// child falls back to the PROJECT DEFAULT.
+//
+// When the two disagreed, the child row carried a base the resolver would
+// never reproduce (the master's own base), the frontend seeded its picker
+// with the resolver's value instead, and the next design / coding run
+// overwrote the persisted base — the child's PR target silently drifted
+// away from the line the child actually developed on.
+func TestNoBranchMasterFallsBackToProjectDefault(t *testing.T) {
+	d := newTestDB(t)
+	seedProject(t, d, "proj_a", "proj_a", "/tmp/proj_a")
+	s := NewRequirementService(d, nil)
+
+	master := mkReq(t, s, "proj_a", "no-branch master")
+	// The master develops on "develop" — NOT the project default ("main").
+	if err := s.UpdateBaseBranchWithSource(master.ID, "develop", model.BaseSourceExplicit); err != nil {
+		t.Fatalf("stamp master base: %v", err)
+	}
+	if err := s.UpdateNoBranch(master.ID, true); err != nil {
+		t.Fatalf("stamp no_branch: %v", err)
+	}
+	masterRow, err := s.Get(master.ID)
+	if err != nil {
+		t.Fatalf("get master: %v", err)
+	}
+
+	child, err := s.Create(model.CreateRequirementReq{
+		ProjectID: "proj_a",
+		Title:     "child",
+		ParentID:  master.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	// The master's base is NOT inherited — a no_branch master has no branch
+	// of its own, so the child falls back to the project default.
+	if child.BaseBranch != "main" {
+		t.Fatalf("child base_branch = %q, want %q", child.BaseBranch, "main")
+	}
+	if child.BaseBranchSource != model.BaseSourceParent {
+		t.Fatalf("child base_branch_source = %q, want %q", child.BaseBranchSource, model.BaseSourceParent)
+	}
+
+	// The read path must agree with the creation path — otherwise the
+	// frontend would seed the picker with a value the resolver never
+	// reproduces, and the next run would rewrite the persisted base.
+	if child.BaseBranchEffective != "main" {
+		t.Fatalf("child base_branch_effective = %q, want %q", child.BaseBranchEffective, "main")
+	}
+	auto, _ := ResolveAutoBase(child, "main", ParentBranchBase(
+		func(string) (*model.Requirement, error) { return masterRow, nil }, child))
+	if auto != child.BaseBranchEffective {
+		t.Fatalf("auto base = %q, effective base = %q — the creation path and the resolver disagree",
+			auto, child.BaseBranchEffective)
+	}
+
+	// A master that still carries a stale branch_name (it developed before
+	// switching to no-branch mode) contributes nothing either: no_branch
+	// wins over the branch it no longer develops on.
+	if err := s.UpdateWorktree(master.ID, "feat/req_"+master.ID, ""); err != nil {
+		t.Fatalf("stamp stale master branch: %v", err)
+	}
+	staleChild, err := s.Create(model.CreateRequirementReq{
+		ProjectID: "proj_a",
+		Title:     "child2",
+		ParentID:  master.ID,
+	})
+	if err != nil {
+		t.Fatalf("create child2: %v", err)
+	}
+	if staleChild.BaseBranch != "main" {
+		t.Fatalf("child2 base_branch = %q, want %q", staleChild.BaseBranch, "main")
+	}
+	if staleChild.BaseBranchEffective != "main" {
+		t.Fatalf("child2 base_branch_effective = %q, want %q", staleChild.BaseBranchEffective, "main")
+	}
+}
