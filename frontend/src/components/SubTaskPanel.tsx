@@ -1026,24 +1026,32 @@ function SubTaskCard({
   // showed exactly one line (a bare "exit status 143") and nothing else.
   const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
-  // 「本卡本次会话已收到过任何 SSE 帧」。SSE 的 onMessage 回调第一行置位
-  // （含 job_done 终帧）—— 它是「快照回放」与「实时输出」互斥的第一道闸门。
+  // "This card has already received any SSE frame in this session." Set on
+  // the first line of the SSE onMessage callback (the job_done terminal
+  // frame counts) — it is the first gate keeping "snapshot replay" and
+  // "live output" mutually exclusive.
   const gotFrameRef = useRef(false);
-  // 「本卡已走上实时路径」。在 SSE 订阅建立的那一刻就置位，而不是等首帧：
-  // 存在一个窄窗口（卡片从终态切回实时，SSE 已订阅但首帧未到），此时
-  // gotFrameRef 仍是 false，旧快照若落地就会与随后的 SSE 重放叠加。
+  // "This card is on the live path." Flipped the moment the SSE subscription
+  // is established rather than on the first frame: there is a narrow window
+  // (the card flipped from a terminal state back to live — SSE subscribed
+  // but no frame yet) where gotFrameRef is still false and a stale snapshot
+  // landing would be stacked on top of the subsequent SSE replay.
   const liveRef = useRef(false);
-  // 「本卡当前绑定的 job_id」。快照的 .then 读它，识别「请求在途期间这行
-  // 被重新派发」（重做 / 继续会原地覆盖 job_id），避免把旧一轮的日志写到
-  // 新一轮上。
+  // "The job_id this card is currently bound to." The snapshot's .then reads
+  // it to detect "this row was re-dispatched while the request was in
+  // flight" (a redo / continue overwrites job_id in place), so the previous
+  // run's log never lands on the new one.
   const boundJobIdRef = useRef(st.job_id);
   useEffect(() => { boundJobIdRef.current = st.job_id; });
-  // 「已为哪个 job_id 拉过快照」——防止快照 effect 重跑造成重复请求 / 循环。
+  // "Which job_id we already pulled a snapshot for" — stops the snapshot
+  // effect from re-running into a duplicate request / loop.
   const hydratedJobRef = useRef('');
-  // 快照拉取失败（历史输出确实不存在，例如运行期进程被 kill、job_logs 未
-  // 落库）时的提示态 —— 显示提示而不是留白屏。
+  // Set when the snapshot pull fails (the historical output genuinely does
+  // not exist — e.g. the process was killed mid-run so job_logs was never
+  // written). Renders an explanation instead of a blank panel.
   const [logUnavailable, setLogUnavailable] = useState(false);
-  // 日志区是否渲染：实时路径一定渲染；回放路径只要拿到了内容就渲染。
+  // Whether the log area renders: the live path always renders it; the
+  // replay path renders it as soon as it has content.
   const showLog = streaming || lines.length > 0;
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
@@ -1091,7 +1099,7 @@ function SubTaskCard({
     esRef.current = createEventStream(
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
-        gotFrameRef.current = true;              // ← 新增：任何一帧都算（含 job_done）
+        gotFrameRef.current = true;              // any frame counts (incl. job_done)
         if (!evt || typeof evt !== 'object') return;
         const evtType = evt.type as string;
         if (evtType === 'usage') {
@@ -1168,21 +1176,25 @@ function SubTaskCard({
         }));
       },
       () => {
-        // 流失败后解除「实时路径已接管」标记，让快照回放可以兜底。
+        // Release the "live path has taken over" flag once the stream
+        // fails, so the snapshot replay can serve as the fallback.
         //
-        // 为什么这不会造成「快照与 SSE 叠加」：createEventStream 的 fail()
-        // 只触发一次（api/stream.ts 的 finished 标志），失败后读循环已经
-        // 退出、不会再有帧送达，所以解除 live 之后不存在「实时输出」可叠。
-        // 已经送达过帧的流仍被 gotFrameRef 挡住；重做 / 继续的竞态（请求
-        // 在途期间这行被重新派发）仍被 boundJobIdRef 挡住。
-        liveRef.current = false;                 // ← 流失败后允许快照回放兜底
+        // Why this cannot stack the snapshot on top of the SSE: the
+        // fail() in createEventStream fires only once (the `finished` flag
+        // in api/stream.ts) and the read loop has already exited by then, so
+        // no further frame can arrive and there is no "live output" left to
+        // stack. A stream that did deliver frames is still blocked by
+        // gotFrameRef; the redo / continue race (this row re-dispatched
+        // while the request was in flight) is still blocked by
+        // boundJobIdRef.
+        liveRef.current = false;                 // a failed stream may fall back to the snapshot
         setStreaming(false);
         subTasksApi.get(st.requirement_id, st.id)
           .then((next) => { setArtifact(next.artifact); onChanged(next); })
           .catch(() => {});
       },
     );
-    liveRef.current = true;                    // ← 新增：实时路径已接管
+    liveRef.current = true;                    // the live path has taken over
     return () => { esRef.current?.close(); esRef.current = null; };
   // We deliberately use the minimal dep set — parent re-renders shouldn't
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
@@ -1206,50 +1218,61 @@ function SubTaskCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.status, st.job_id]);
 
-  // 终态子任务的历史输出回放。
+  // Historical output replay for a finished sub-task.
   //
-  // 为什么要它：日志区原先只在 streaming 时渲染，卡片一结束就变成空白；
-  // 而 SSE 的实时历史只存在于后端内存 JobStore 里（cap 50），刷新页面后连
-  // 「当时的输出」都取不回来。快照端点 GET /api/wizard/jobs/{id} 内存命中
-  // 返回全量 log[]、未命中回落 job_logs 表（后端重启后仍可回看）。
+  // Why it exists: the log area used to render only while streaming, so a
+  // card went blank the moment its run ended; and the live SSE history only
+  // lives in the backend's in-memory JobStore (cap 50), so after a page
+  // refresh even "the output at the time" could not be retrieved. The
+  // snapshot endpoint GET /api/wizard/jobs/{id} returns the full log[] on
+  // an in-memory hit and falls back to the job_logs table otherwise (so it
+  // survives a backend restart).
   //
-  // 三条硬约束：
-  //   1. 与 SSE **互斥** —— 两条路径都写同一个 lines state，叠加就是重复行。
-  //      gotFrameRef（收到过帧）/ liveRef（已订阅）/ hydratedJobRef（已拉过）
-  //      三道闸门在发起前各查一次，.then 里再查一次。
-  //   2. 过滤口径与实时路径**逐字一致** —— 实时回调丢弃 usage / phase /
-  //      phase_section 三类帧（它们分别进 usage 条与三阶段区），快照同样丢弃，
-  //      否则历史视图会多出实时视图里没有的噪音行（usage 的 JSON 载荷还会
-  //      被 .sub-log-md 当 Markdown 渲染）。
-  //   3. **不使用 cancelled 标志** —— main.tsx 开了 StrictMode，React 19 在
-  //      开发模式会「mount → cleanup → mount」重跑 effect；cancelled 会丢弃
-  //      第 1 轮的响应，而 hydratedJobRef 又挡住第 2 轮重新发起 ⇒ 开发环境
-  //      下历史输出永远加载不出来。改用「只增不减」的 ref 判定有效性，
-  //      组件卸载后 setState 在 React 18+ 是静默 no-op。
+  // Three hard constraints:
+  //   1. Mutually exclusive with the SSE — both paths write the same lines
+  //      state, and stacking them means duplicate rows. gotFrameRef (a
+  //      frame arrived) / liveRef (subscribed) / hydratedJobRef (already
+  //      pulled) are each checked once before the request and once again
+  //      inside .then.
+  //   2. The filter matches the live path verbatim — the live callback
+  //      drops the usage / phase / phase_section frames (they feed the
+  //      usage bar and the three-phase panel respectively), and the
+  //      snapshot drops them too. Otherwise the historical view would
+  //      carry noise rows the live view never shows (and the usage JSON
+  //      payload would be rendered as Markdown by .sub-log-md).
+  //   3. No `cancelled` flag — main.tsx wraps the app in StrictMode, and
+  //      React 19 re-runs effects ("mount → cleanup → mount") in dev. A
+  //      cancelled flag would discard the first round's response while
+  //      hydratedJobRef would stop the second round from re-issuing it,
+  //      so the historical output would never load in dev. Validity is
+  //      decided by "only ever grows" refs instead; a setState after
+  //      unmount is a silent no-op in React 18+.
   useEffect(() => {
-    if (streaming) return;                    // 运行中走 SSE，不拉快照
-    if (!st.job_id) return;                   // 尚未派发的行没有 job
-    if (gotFrameRef.current) return;          // 本次会话已经实时看过
-    if (liveRef.current) return;              // 实时路径已接管
-    if (hydratedJobRef.current === st.job_id) return;  // 防循环
+    if (streaming) return;                    // running: the SSE owns the log
+    if (!st.job_id) return;                   // not dispatched yet: no job
+    if (gotFrameRef.current) return;          // already seen live in this session
+    if (liveRef.current) return;              // the live path has taken over
+    if (hydratedJobRef.current === st.job_id) return;  // loop guard
     hydratedJobRef.current = st.job_id;
     wizardApi.getJob(st.job_id)
       .then((job) => {
-        // 二重保险：请求在途期间可能已经切回实时（重做 / 继续），
-        // 或这一行已经被重新派发到另一个 job_id。
+        // Second line of defence: while the request was in flight the card
+        // may have flipped back to live (a redo / continue), or this row
+        // may have been re-dispatched onto another job_id.
         if (gotFrameRef.current) return;
         if (liveRef.current) return;
         if (boundJobIdRef.current !== st.job_id) return;
         const raw = job.log ?? [];
-        // 与 live 路径保持一致：usage / phase / phase_section 不进 lines[]
+        // Same as the live path: usage / phase / phase_section never enter lines[]
         const kept = raw.filter((l) => l.type !== 'usage'
           && l.type !== 'phase' && l.type !== 'phase_section');
         setLines(coalesceLogLines(kept));
         setLogUnavailable(false);
       })
       .catch(() => {
-        // 历史输出确实不存在（例如运行期进程被 kill，job_logs 从未落库）——
-        // 显示提示，不留白屏。
+        // The historical output genuinely does not exist (e.g. the process was
+        // killed mid-run so job_logs was never written) — say so instead of
+        // leaving a blank panel.
         setLogUnavailable(true);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1946,24 +1969,27 @@ function SubTaskCard({
             </section>
           )}
 
-          {/* Live log (streaming) / 历史输出回放 —— full-width terminal scrollback.
+          {/* Live log (streaming) / historical replay — full-width terminal scrollback.
               Wrapped in a div with logAnchorRef so the header's
               继续 → "scroll to log" effect can scrollIntoView the
               container without coupling to SubTaskLogView's internal
               auto-scroll-to-bottom ref.
-              showLog = streaming || lines.length > 0 —— 任务结束后只要回放
-              出了内容就继续渲染，而不是像从前那样一结束就空白。 */}
+              showLog = streaming || lines.length > 0 — once the run has
+              ended the area keeps rendering as long as the replay produced
+              content, instead of going blank the moment it finished. */}
           {showLog && (
             <div ref={logAnchorRef}>
               <SubTaskLogView lines={lines} />
             </div>
           )}
 
-          {/* 历史输出确实不存在（例如运行期进程被 kill，job_logs 从未落库）：
-              说清楚，而不是留一块空白。复用 .sub-log-empty 的视觉，不新增
-              CSS 类。注意它必须与 SubTaskLogView **并列**：SubTaskLogView 在
-              lines 为空时自己会渲染一个 .sub-log-empty（logEmpty），包进去
-              就会出现两个空态框。 */}
+          {/* The historical output genuinely does not exist (e.g. the process was
+              killed mid-run so job_logs was never written): say so instead
+              of leaving a blank panel. Reuses the .sub-log-empty look, so
+              no new CSS class. Note it must stay a SIBLING of
+              SubTaskLogView: when lines is empty SubTaskLogView renders
+              its own .sub-log-empty (logEmpty), and nesting this inside
+              would show two empty-state boxes. */}
           {!streaming && logUnavailable && (
             <div className="sub-log-empty">
               {t('components.subTaskCard.logUnavailable')}
