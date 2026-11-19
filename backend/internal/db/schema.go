@@ -1608,19 +1608,29 @@ var alterColumns = []string{
 	// closed-from-non-developing rows.
 	`ALTER TABLE requirements ADD COLUMN closed_at      DATETIME`,
 	`ALTER TABLE requirements ADD COLUMN closed_reason TEXT NOT NULL DEFAULT ''`,
-	// Denormalized counters driving the "需求数 / Issue 数 / 想法数" columns on
-	// the /projects list page. Stored on the projects row so the list endpoint
-	// can serve them without a per-row GROUP BY aggregate (matches the
-	// requirement "统计数据使用字段存储"). INTEGER NOT NULL DEFAULT 0 — new
-	// projects get 0 via the column default (so service.ProjectService.Add's
-	// INSERT doesn't need to specify them), and the ALTER migrates existing
-	// rows to 0 (no historical backfill, per "不做实时统计"). The columns are
-	// intentionally NOT updated by RequirementService.Create / UpdateKind —
-	// the count is a creation-time snapshot only. isIgnorableDDLError
-	// swallows "duplicate column" so these ALTERs are safe to ship before all
-	// DBs have caught up. INTEGER type is portable across SQLite / MySQL /
-	// Postgres without fixupSchema rewrites (contrast with TEXT which needs
-	// mysqlTextDefault wrapping on MySQL).
+	// VESTIGIAL — kept only so existing databases keep their shape; the /projects
+	// list NO LONGER reads these three columns.
+	//
+	// History: they were introduced as denormalized counters ("统计数据使用字段存
+	// 储") but the creation-time snapshot writer was NEVER implemented, so nothing
+	// ever wrote them — ProjectService.Add's INSERT doesn't list them, no UPDATE
+	// touches them, and the ALTER migrated every existing row to 0 with no
+	// backfill. The /projects list therefore rendered 0 / 0 / 0 for every project,
+	// forever. See service.requirementCountsExpr for the fix.
+	//
+	// The counts are now derived from `requirements` at READ time (see
+	// service.ProjectService.ListForUser), which makes `requirements` the single
+	// source of truth. DO NOT implement a write path for these columns: it would
+	// have to cover every requirement producer (Create / PromoteFromIdea /
+	// CreateChildren / issue_monitor import / UpdateKind / Delete / BatchDelete)
+	// and would drift.
+	//
+	// The columns themselves are left in place on purpose — dropping a column
+	// across SQLite / MySQL / Postgres is a destructive, dialect-sensitive
+	// migration with no behavioral benefit. isIgnorableDDLError swallows
+	// "duplicate column" so these ALTERs remain safe to re-run. INTEGER type is
+	// portable across SQLite / MySQL / Postgres without fixupSchema rewrites
+	// (contrast with TEXT which needs mysqlTextDefault wrapping on MySQL).
 	`ALTER TABLE projects ADD COLUMN requirement_count INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE projects ADD COLUMN issue_count        INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE projects ADD COLUMN idea_count         INTEGER NOT NULL DEFAULT 0`,
