@@ -630,6 +630,12 @@ func (h *WizardHandler) runQATurn(
 		// the granted reference material the other stages had.
 		if reqRow != nil {
 			opts.AddDirs = h.grantDirsFor(reqRow.ID, "")
+			// The project conventions reach the Q&A session through the CLI's
+			// own project-memory channel, exactly like every other stage — a
+			// question like "why is it designed this way" is answered against
+			// the project's conventions.
+			qaClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, reqRow.ProjectID, workDir)
+			qaClaudeDoc.ApplyTo(&opts)
 		}
 		switch p.Mode {
 		case qaModeResume:

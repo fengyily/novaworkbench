@@ -224,6 +224,61 @@ func (h *WizardHandler) RunRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	return h.runRemoteCoding(in)
 }
 
+// materializeRemoteClaudeDoc SFTPs the managed project-level CLAUDE.md onto
+// the Agent host so the remote claude run loads it through the CLI's own
+// project-memory channel.
+//
+// The managed copy lives in the DB, so it has to be written out as a real
+// file for the CLI to find. It goes to a directory NEXT TO the remote
+// worktree — never inside it: the worktree is a git checkout of the user's
+// repository, and the auto commit-push-PR flow runs `git add -A`, so a
+// managed copy inside it would be committed into the user's branch.
+//
+// The returned directory is what the caller passes as ClaudeMdDir, so the
+// worker grants it with --add-dir and enables the "CLAUDE.md dirs" env var.
+//
+// Failure policy: best-effort. When the upload fails the caller falls back
+// to the prompt-level injection, so the run still carries the project's
+// conventions.
+func (h *WizardHandler) materializeRemoteClaudeDoc(client *gossh.Client, job *store.Job, worktreeRoot string, req *model.Requirement) string {
+	return materializeRemoteClaudeDoc(client, job, worktreeRoot, h.projectSvc, req)
+}
+
+// materializeRemoteClaudeDoc is the shared implementation behind the wizard
+// and review remote paths.
+//
+// The document is written to <worktreeRoot>/<projectID>/memory/CLAUDE.md —
+// NEXT TO the worktree, never inside it: the worktree is a git checkout of
+// the user's repository, and the auto commit-push-PR flow runs `git add -A`,
+// so a managed copy inside it would be committed into the user's branch.
+//
+// Returns the directory holding the materialized copy, or "" when there is
+// no managed document (or the upload failed) — the caller then falls back to
+// the prompt-level injection.
+func materializeRemoteClaudeDoc(client *gossh.Client, job *store.Job, worktreeRoot string, projectSvc claudeDocReader, req *model.Requirement) string {
+	if client == nil || req == nil || req.ProjectID == "" || projectSvc == nil {
+		return ""
+	}
+	doc, err := projectSvc.ClaudeDoc(req.ProjectID)
+	if err != nil {
+		log.Printf("[run-remote] load claude doc for project %s failed: %v", req.ProjectID, err)
+		return ""
+	}
+	if doc == nil || strings.TrimSpace(doc.Content) == "" {
+		return ""
+	}
+	remoteDir := worktreeRoot + "/" + req.ProjectID + "/memory"
+	remotePath := remoteDir + "/CLAUDE.md"
+	if err := client.WriteFile(remotePath, []byte(strings.TrimSpace(doc.Content)), 0o644); err != nil {
+		log.Printf("[run-remote] claude doc materialize %s failed: %v", remotePath, err)
+		if job != nil {
+			job.Append(store.LogLine{Type: "warning", Content: "⚠️ 远端项目 CLAUDE.md 落盘失败，将改用提示词注入: " + err.Error()})
+		}
+		return ""
+	}
+	return remoteDir
+}
+
 // materializeRemoteSkills SFTPs the @slug-mentioned skills for a requirement
 // into the remote worktree as real SKILL.md files, mirroring the local
 // MaterializeSkillFiles so a remote Claude run auto-discovers the same skills
@@ -624,6 +679,19 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		PermissionMode:         "",
 		AddDirs:                in.AddDirs,
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
+	}
+	// The managed project CLAUDE.md reaches the remote model through the
+	// CLI's own project-memory channel, exactly as on the local path: the
+	// copy is written next to the remote worktree and granted with
+	// --add-dir, and the worktree's own instruction files are excluded so
+	// the managed copy is the only project document.
+	//
+	// The exclusion paths are the REMOTE ones — the worktree lives on the
+	// agent host, so the local paths would not match anything.
+	if remoteClaudeDocDir := h.materializeRemoteClaudeDoc(client, in.job, in.worktreeRoot, in.reqRow); remoteClaudeDocDir != "" {
+		opts.ClaudeMdDir = remoteClaudeDocDir
+		opts.ExcludeRepoClaudeMd = true
+		opts.ClaudeMdExcludes = llm.ClaudeMdFamilyPaths(wtPath)
 	}
 	// Use BuildRemoteEnvPairs (NOT a plain env inheritance): the remote worker
 	// spawns claude inside the agent host's own environment, so we must only
@@ -1048,6 +1116,15 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		DisallowedTools:        in.DisallowedTools,
 		AddDirs:                in.AddDirs,
 		OverrideSettingSources: &ignoreLocal,
+	}
+	// Same native-channel wiring as the coding path above: the managed
+	// project CLAUDE.md is written next to the remote worktree and granted
+	// with --add-dir, and the worktree's own instruction files are
+	// excluded so the managed copy is the only project document.
+	if remoteClaudeDocDir := h.materializeRemoteClaudeDoc(client, in.job, in.worktreeRoot, in.reqRow); remoteClaudeDocDir != "" {
+		opts.ClaudeMdDir = remoteClaudeDocDir
+		opts.ExcludeRepoClaudeMd = true
+		opts.ClaudeMdExcludes = llm.ClaudeMdFamilyPaths(wtPath)
 	}
 	// Per-project git platform env — same wiring as the runRemoteCoding step-4
 	// path above, so both stages of the Agent-server dispatch expose the
@@ -2431,6 +2508,19 @@ type workerRunBody struct {
 	// newline-separated (it mirrors the on-disk ~/.novaworkbench/extra-paths).
 	ClaudeBin  string `json:"claudeBin,omitempty"`
 	ExtraPaths string `json:"extraPaths,omitempty"`
+	// ClaudeMdDir is the directory holding the materialized managed
+	// project-level CLAUDE.md. The worker turns it into a `--add-dir` entry
+	// AND sets CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, which is what
+	// makes the CLI load <dir>/CLAUDE.md as project memory (measured — see
+	// internal/llm/claude_md_settings.go).
+	//
+	// The path resolves on the AGENT HOST: the Go side materializes the
+	// managed copy there and points at it.
+	ClaudeMdDir string `json:"claudeMdDir,omitempty"`
+	// ClaudeMdExcludes are absolute paths of instruction files the remote
+	// CLI must NOT load, so the managed copy is the project's only
+	// convention document. The paths resolve on the agent host.
+	ClaudeMdExcludes []string `json:"claudeMdExcludes,omitempty"`
 }
 
 // workerRepairMu serializes repairWorkerPATH per agent server. Concurrent
@@ -2679,6 +2769,11 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, srv *model.AgentSe
 		// work this out from its own PATH.
 		ClaudeBin:  claudeBin,
 		ExtraPaths: extraPaths,
+		// The managed project CLAUDE.md travels through the CLI's own
+		// project-memory channel, not through the prompt text. The worker
+		// grants the directory and enables the "CLAUDE.md dirs" env var.
+		ClaudeMdDir:      opts.ClaudeMdDir,
+		ClaudeMdExcludes: opts.ClaudeMdExcludes,
 	}
 }
 

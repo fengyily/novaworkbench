@@ -161,8 +161,11 @@ func (h *ReviewHandler) runFollowup(job *store.Job, rv *model.CodeReview, fu *mo
 	job.Append(store.LogLine{Type: "phase", Content: "💬 追问：" + fu.Question})
 
 	spec := reviewTurnSpec{
-		scope:             "review-followup",
-		prompt:            func(resumed bool) string { return h.followupPrompt(rv, fu, history, resumed) },
+		scope:  "review-followup",
+		prompt: func(resumed bool) string { return h.followupPrompt(rv, fu, history, resumed) },
+		// A follow-up answer is about the same code, so it carries the same
+		// project conventions the report was written against.
+		claudeDoc:         h.projectClaudeDoc(rv.ProjectID, project.LocalPath),
 		usage:             func() *usageCtx { return h.newFollowupUsage(job.ID, rv, fu, modelName) },
 		resumePhase:       "🔗 续接本次 Review 的会话上下文...",
 		staleNotice:       "⚠️ 原 Review 会话已失效，改用「报告原文 + 仓库代码」重新作答",
@@ -195,7 +198,7 @@ func (h *ReviewHandler) runReviewTurn(ctx context.Context, job *store.Job, rv *m
 //
 // stale=true means the run failed specifically because `--resume` pointed at
 // a conversation the CLI no longer has, which the caller retries fresh.
-func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, effort, sessionID string, resume bool, uctx *usageCtx) (answer string, stale bool, errMsg string) {
+func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, effort, sessionID string, resume bool, uctx *usageCtx, claudeDoc claudeDocInjection) (answer string, stale bool, errMsg string) {
 	opts := llm.StreamOpts{
 		Prompt:         taskPrompt,
 		WorkDir:        workDir,
@@ -208,6 +211,9 @@ func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, wo
 		opts.Resume = true
 		opts.SessionID = sessionID
 	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel, not through the prompt text.
+	claudeDoc.ApplyTo(&opts)
 	cmd := h.llm.StreamCmd(ctx, opts)
 
 	// Stderr is where the CLI reports "No conversation found with session ID",

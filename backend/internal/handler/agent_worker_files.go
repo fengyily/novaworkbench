@@ -1172,6 +1172,8 @@ function buildRunRequest(body) {
     claudeBin,
     extraPaths,
     addDirs,
+    claudeMdDir,
+    claudeMdExcludes,
   } = body;
 
   if (!workDir) {
@@ -1250,6 +1252,19 @@ function buildRunRequest(body) {
     // --add-dir paths, so a stale grant degrades to "no access" rather
     // than failing the run.
     addDirs: Array.isArray(addDirs) ? addDirs.filter((d) => typeof d === 'string' && d) : [],
+    // The managed project-level CLAUDE.md travels through the CLI's own
+    // project-memory channel rather than through the prompt text: the
+    // directory is granted with --add-dir and
+    // CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 makes the CLI load
+    // <dir>/CLAUDE.md from it. Measured against claude 2.1.328 — see
+    // backend/internal/llm/claude_md_settings.go for the full probe
+    // results.
+    claudeMdDir: typeof claudeMdDir === 'string' ? claudeMdDir : '',
+    // Instruction files the CLI must not load, so the managed copy is the
+    // project's only convention document. Absolute paths on the agent host.
+    claudeMdExcludes: Array.isArray(claudeMdExcludes)
+      ? claudeMdExcludes.filter((p) => typeof p === 'string' && p)
+      : [],
     settingSources,
   };
 }
@@ -1277,10 +1292,28 @@ function buildSettingsArg(opts) {
   if (opts.model) {
     envBlock.ANTHROPIC_MODEL = opts.model;
   }
-  if (Object.keys(envBlock).length === 0) {
+  // The "CLAUDE.md dirs" env var is what makes the CLI LOAD
+  // <dir>/CLAUDE.md from every --add-dir directory (--add-dir alone only
+  // grants read access). It is process-wide, so the exclusion list below
+  // has to cover the other granted directories too — otherwise an
+  // unrelated CLAUDE.md joins the context. Measured against claude
+  // 2.1.328; see backend/internal/llm/claude_md_settings.go.
+  if (opts.claudeMdDir) {
+    envBlock.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1';
+  }
+  const payload = {};
+  if (Object.keys(envBlock).length > 0) {
+    payload.env = envBlock;
+  }
+  // claudeMdExcludes is a TOP-LEVEL settings key (a sibling of "env"), not
+  // an env var — that is where the CLI reads it from.
+  if (Array.isArray(opts.claudeMdExcludes) && opts.claudeMdExcludes.length > 0) {
+    payload.claudeMdExcludes = opts.claudeMdExcludes;
+  }
+  if (Object.keys(payload).length === 0) {
     return null;
   }
-  return JSON.stringify({ env: envBlock });
+  return JSON.stringify(payload);
 }
 
 // renderCommand joins a spawn argv into one shell-style line for the worker log
@@ -1450,9 +1483,13 @@ function buildClaudeArgs(opts, settingsArg) {
   // path outside the working directory needs a permission decision, and a
   // non-interactive run has nobody to make it. The grant also widens the
   // session's search scope so Glob / Grep cover the granted trees.
-  if (opts.addDirs.length > 0) {
+  const addDirs = [...opts.addDirs];
+  if (opts.claudeMdDir) {
+    addDirs.push(opts.claudeMdDir);
+  }
+  if (addDirs.length > 0) {
     args.push('--add-dir');
-    args.push(...opts.addDirs);
+    args.push(...addDirs);
   }
 
   return args;
@@ -1525,6 +1562,7 @@ if (process.env.NOVA_AGENT_WORKER_NO_LISTEN !== '1') {
 export {
   buildRunRequest,
   buildClaudeArgs,
+  buildSettingsArg,
   normalizeEffort,
   cliSupportsEffort,
 };

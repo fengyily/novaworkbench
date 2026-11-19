@@ -44,7 +44,7 @@ func TestCollectProjectContext_SkipsBinaryAndKeepsText(t *testing.T) {
 		t.Fatalf("write payload_helper.txt: %v", err)
 	}
 
-	docBlock, readFiles, _ := collectProjectContext(dir, "payload spec")
+	docBlock, readFiles, _ := collectProjectContext(dir, "payload spec", false)
 
 	if strings.Contains(docBlock, "\x00") {
 		t.Fatalf("docBlock contains NUL byte after binary detection — would propagate to argv and EINVAL the spawn\n--- docBlock ---\n%s", docBlock)

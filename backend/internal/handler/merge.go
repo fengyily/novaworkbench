@@ -53,6 +53,9 @@ type MergeHandler struct {
 	// Non-nil enables the remote push / cleanup paths (see merge_agent.go);
 	// nil keeps every requirement on the local git path.
 	agentSvrSvc *service.AgentServerService
+	// settingSvc exposes the settings KV, which carries the project
+	// CLAUDE.md injection policy (see handler/claude_doc_injection.go).
+	settingSvc *service.SettingService
 	// gitCredSvc injects the project's platform token into the merge-stage
 	// `git fetch origin <base>` (defect point 3). BuildEnv returns
 	// (nil, noop, nil) for SSH remotes / projects without a token so a
@@ -78,6 +81,29 @@ func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc
 		agentSvrSvc:   agentSvrSvc,
 		gitCredSvc:    gitCredSvc,
 	}
+}
+
+// SetSettingService wires the settings KV into the Merge handler.
+//
+// The project CLAUDE.md injection policy lives in the settings KV (see
+// handler/claude_doc_injection.go). It is a setter rather than a constructor
+// argument so the existing NewMergeHandler call shape — and its tests — stay
+// put.
+func (h *MergeHandler) SetSettingService(svc *service.SettingService) {
+	h.settingSvc = svc
+}
+
+// mergeClaudeDoc resolves the project-level CLAUDE.md injection for a
+// merge-stage run.
+//
+// The merge stage resolves CONFLICTS in the user's repository, so it must
+// work against the project's own conventions — the same conventions the
+// coding stage that produced the changes worked against.
+func (h *MergeHandler) mergeClaudeDoc(projectID, workDir string) claudeDocInjection {
+	if h.projectSvc == nil {
+		return claudeDocInjection{}
+	}
+	return resolveClaudeDocInjection(h.projectSvc, h.settingSvc, projectID, workDir)
 }
 
 // activeConfigMeta returns the currently-active claude config's id + currency
@@ -959,7 +985,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			defer credCleanup()
 		}
 
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		mergeOpts := llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        dir,
 			SystemPrompt:   systemPrompt,
@@ -968,7 +994,13 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			ClaudeConfigID: claudeConfigID,
 			ExtraEnv:       extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
-		})
+		}
+		// The project conventions reach the merge through the CLI's own
+		// project-memory channel: resolving a merge is a project-level
+		// decision, so it works against the project's conventions.
+		mergeClaudeDoc := h.mergeClaudeDoc(reqRow.ProjectID, dir)
+		mergeClaudeDoc.ApplyTo(&mergeOpts)
+		cmd := h.llm.StreamCmd(context.Background(), mergeOpts)
 		configID, currency := h.activeConfigMeta()
 		runClaudeStream(jobSink{job}, cmd, "merge-resolve", &usageCtx{
 			Rec:            h.usageSvc,
@@ -1591,7 +1623,7 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 	if gpgCleanup != nil {
 		defer gpgCleanup()
 	}
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+	pushOpts := llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        devDir,
 		SystemPrompt:   systemPrompt,
@@ -1599,7 +1631,10 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		Effort:         resolveEffort(h.llm, "", llm.StageCommit),
 		ClaudeConfigID: claudeConfigID,
 		ExtraEnv:       extraEnv,
-	})
+	}
+	pushClaudeDoc := h.mergeClaudeDoc(reqRow.ProjectID, devDir)
+	pushClaudeDoc.ApplyTo(&pushOpts)
+	cmd := h.llm.StreamCmd(context.Background(), pushOpts)
 	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
 		Rec:            h.usageSvc,
@@ -1631,14 +1666,17 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		"操作步骤：\n1. 运行 git diff origin/%s...%s 查看本次相对主分支的全部改动\n2. 必要时运行 git log 查看提交历史\n"+
 		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文\n\n%s",
 		dev, base, reqRow.Title, reqRow.Description, base, dev, service.PRLangRules(commitLang, style))
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+	prSummaryOpts := llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        devDir,
 		SystemPrompt:   systemPrompt,
 		Model:          model,
 		Effort:         resolveEffort(h.llm, "", llm.StageCommit),
 		ClaudeConfigID: claudeConfigID,
-	})
+	}
+	prSummaryClaudeDoc := h.mergeClaudeDoc(reqRow.ProjectID, devDir)
+	prSummaryClaudeDoc.ApplyTo(&prSummaryOpts)
+	cmd := h.llm.StreamCmd(context.Background(), prSummaryOpts)
 	configID, currency := h.activeConfigMeta()
 	out := runClaudeStream(jobSink{job}, cmd, "push-pr-summary", &usageCtx{
 		Rec:            h.usageSvc,

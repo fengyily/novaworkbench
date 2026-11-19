@@ -278,6 +278,169 @@ type EffortConfig struct {
 	Other string `json:"other"`
 }
 
+// ── Project CLAUDE.md injection policy ─────────────────────────────────────
+//
+// How the managed project-level CLAUDE.md reaches the model. All three are
+// read on every stage that injects the document, so a change takes effect
+// without restarting the backend — same hot-reload pattern as the settings
+// above.
+//
+//   - claudedoc.inject_mode: "native" (default) = deliver the managed copy
+//     through the Claude CLI's own project-memory channel (a materialized
+//     CLAUDE.md granted via --add-dir), so the CLI loads it with the same
+//     authority it gives a repository's own CLAUDE.md. "prompt" = fall back
+//     to splicing the document into the user prompt (the pre-change
+//     behaviour).
+//   - claudedoc.exclude_repo_doc: true (default) = exclude the repository's
+//     own instruction files from the CLI's load set, so the managed copy is
+//     the ONLY copy in the context. false = let both coexist.
+//   - claudedoc.system_prompt_mode: "append" (default) = deliver the role
+//     persona with --append-system-prompt, keeping the CLI's default system
+//     prompt. "replace" = --system-prompt (the pre-change behaviour).
+//
+// The last one exists because the pre-change code replaced the CLI's whole
+// system prompt with the persona, which also removed the CLI's default
+// instructions. It is kept as a switch so the previous behaviour stays one
+// setting away.
+const (
+	settingClaudeDocInjectMode      = "claudedoc.inject_mode"
+	settingClaudeDocExcludeRepoDoc  = "claudedoc.exclude_repo_doc"
+	settingClaudeDocSystemPromptMod = "claudedoc.system_prompt_mode"
+)
+
+// Values of settingClaudeDocInjectMode.
+const (
+	// ClaudeDocInjectModeNative delivers the managed copy through the CLI's
+	// native project-memory channel.
+	ClaudeDocInjectModeNative = "native"
+	// ClaudeDocInjectModePrompt splices the managed copy into the user
+	// prompt (the fallback when materialization fails).
+	ClaudeDocInjectModePrompt = "prompt"
+)
+
+// Values of settingClaudeDocSystemPromptMod.
+const (
+	// ClaudeDocSystemPromptAppend keeps the CLI's default system prompt and
+	// appends the persona to it.
+	ClaudeDocSystemPromptAppend = "append"
+	// ClaudeDocSystemPromptReplace replaces the CLI's default system prompt
+	// with the persona.
+	ClaudeDocSystemPromptReplace = "replace"
+)
+
+// ClaudeDocInjectionConfig is the resolved injection policy.
+type ClaudeDocInjectionConfig struct {
+	// InjectMode is ClaudeDocInjectModeNative or ClaudeDocInjectModePrompt.
+	InjectMode string
+	// ExcludeRepoDoc excludes the repository's own instruction files from
+	// the CLI's load set.
+	ExcludeRepoDoc bool
+	// SystemPromptMode is ClaudeDocSystemPromptAppend or
+	// ClaudeDocSystemPromptReplace.
+	SystemPromptMode string
+}
+
+// DefaultClaudeDocInjectionConfig is the shipped policy: the managed copy
+// goes through the CLI's native channel, and the repository's own copy is
+// excluded so exactly one document is in context.
+//
+// The persona mode stays at "replace" — the pre-change behaviour. The
+// measurement (internal/llm/claude_md_settings.go) showed the native
+// channel works with EITHER persona mode, so switching it is NOT a
+// prerequisite for this feature; it is a separate change that alters the
+// model's behaviour in every stage, and it deserves its own staged rollout
+// with real regression runs rather than riding along with the injection
+// change.
+func DefaultClaudeDocInjectionConfig() ClaudeDocInjectionConfig {
+	return ClaudeDocInjectionConfig{
+		InjectMode:       ClaudeDocInjectModeNative,
+		ExcludeRepoDoc:   true,
+		SystemPromptMode: ClaudeDocSystemPromptReplace,
+	}
+}
+
+// ClaudeDocInjectionConfig reads the injection policy. Missing keys and
+// malformed values fall back to the shipped defaults; a DB error is returned
+// so the caller can log it and keep its last known good state.
+func (s *SettingService) ClaudeDocInjectionConfig() (ClaudeDocInjectionConfig, error) {
+	cfg := DefaultClaudeDocInjectionConfig()
+	if s == nil || s.db == nil {
+		// A nil settings service means "no settings wired" — the shipped
+		// defaults apply. Callers hold this behind an interface, so a nil
+		// *SettingService arrives as a non-nil interface value.
+		return cfg, nil
+	}
+	raw, err := s.Get(settingClaudeDocInjectMode)
+	if err != nil {
+		return cfg, err
+	}
+	switch strings.TrimSpace(raw) {
+	case ClaudeDocInjectModeNative:
+		cfg.InjectMode = ClaudeDocInjectModeNative
+	case ClaudeDocInjectModePrompt:
+		cfg.InjectMode = ClaudeDocInjectModePrompt
+	}
+	raw, err = s.Get(settingClaudeDocExcludeRepoDoc)
+	if err != nil {
+		return cfg, err
+	}
+	if b, berr := strconv.ParseBool(strings.TrimSpace(raw)); berr == nil {
+		cfg.ExcludeRepoDoc = b
+	}
+	raw, err = s.Get(settingClaudeDocSystemPromptMod)
+	if err != nil {
+		return cfg, err
+	}
+	switch strings.TrimSpace(raw) {
+	case ClaudeDocSystemPromptAppend:
+		cfg.SystemPromptMode = ClaudeDocSystemPromptAppend
+	case ClaudeDocSystemPromptReplace:
+		cfg.SystemPromptMode = ClaudeDocSystemPromptReplace
+	}
+	return cfg, nil
+}
+
+// SetClaudeDocInjectionConfig persists the injection policy. Values are
+// validated here (unknown values fall back to the shipped default) so a bad
+// payload can never be written in a shape the injection sites would have to
+// defend against on every read.
+func (s *SettingService) SetClaudeDocInjectionConfig(cfg ClaudeDocInjectionConfig) error {
+	mode := strings.TrimSpace(cfg.InjectMode)
+	if mode != ClaudeDocInjectModeNative && mode != ClaudeDocInjectModePrompt {
+		mode = DefaultClaudeDocInjectionConfig().InjectMode
+	}
+	if err := s.Set(settingClaudeDocInjectMode, mode); err != nil {
+		return err
+	}
+	if err := s.Set(settingClaudeDocExcludeRepoDoc, strconv.FormatBool(cfg.ExcludeRepoDoc)); err != nil {
+		return err
+	}
+	spMode := strings.TrimSpace(cfg.SystemPromptMode)
+	if spMode != ClaudeDocSystemPromptAppend && spMode != ClaudeDocSystemPromptReplace {
+		spMode = DefaultClaudeDocInjectionConfig().SystemPromptMode
+	}
+	return s.Set(settingClaudeDocSystemPromptMod, spMode)
+}
+
+// PersonaMode returns the configured persona delivery mode.
+//
+// It satisfies llm.PersonaModeProvider, so the gateway picks it up through
+// the same wiring as the effort defaults (SetPersonaModeProvider).
+//
+// A missing or malformed value falls back to the shipped default
+// ("append"), the same fallback ClaudeDocInjectionConfig uses — the two
+// read the same key, so they must agree.
+func (s *SettingService) PersonaMode() string {
+	if s == nil || s.db == nil {
+		return llm.NormalizePersonaMode(DefaultClaudeDocInjectionConfig().SystemPromptMode)
+	}
+	raw, err := s.Get(settingClaudeDocSystemPromptMod)
+	if err != nil {
+		return llm.NormalizePersonaMode(DefaultClaudeDocInjectionConfig().SystemPromptMode)
+	}
+	return llm.NormalizePersonaMode(raw)
+}
+
 // EffortConfig returns the reasoning-effort policy. Missing keys, malformed
 // values and DB errors all fail-safe to the shipped defaults rather than
 // erroring: a broken settings row must never be able to stop a run from

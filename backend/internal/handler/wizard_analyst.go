@@ -202,6 +202,11 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			workDir = wd
 		}
 
+		// 项目级 CLAUDE.md —— 解析一次，供提示词与 CLI 调用两处使用。
+		// 原生通道下文档由 Claude CLI 自己的项目记忆通道加载（不拼进提示词），
+		// 所以这里拿到的是「怎么注入」的决策结果，而不是一段文本。
+		claudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, requirement.ProjectID, workDir)
+
 		// firstTurnPrompt pre-reads a BOUNDED slice of the project (AI docs +
 		// a names-only structure tree) and emits each pre-read file as
 		// progress, so the user sees live activity before Claude responds.
@@ -219,7 +224,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		}
 		firstTurnPrompt := func() string {
 			sink.emit(store.LogLine{Type: "phase", Content: "📖 正在预读项目上下文（不遍历整个仓库）..."})
-			docBlock, readFiles, treeSummary := collectProjectContext(workDir, title)
+			docBlock, readFiles, treeSummary := collectProjectContext(workDir, title, claudeDoc.Native)
 			for _, rf := range readFiles {
 				sink.emit(store.LogLine{Type: "tool_call", Content: "📖 预读: " + rf})
 			}
@@ -230,9 +235,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				base += "\n\n" + block
 			}
 			// 项目级 CLAUDE.md —— 只在首轮注入：续轮沿用同一个会话，文档
-			// 已经在上下文里了，重复注入只是白烧 token。没有文档时
-			// claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-			if block := claudeDocBlock(h.projectSvc, requirement.ProjectID, workDir); block != "" {
+			// 已经在上下文里了，重复注入只是白烧 token。
+			//
+			// 原生通道下 Block() 返回空串 —— 文档由 Claude CLI 自己的项目
+			// 记忆通道加载（见 claude_doc_injection.go），不再拼进提示词。
+			// 没有文档时同样是空串，prompt 与改动前逐字节一致。
+			if block := claudeDoc.Block(); block != "" {
 				base += "\n\n" + block
 			}
 			return base
@@ -277,7 +285,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 				resume:          !isFirstRound,
 			})
 		} else {
-			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.grantDirsFor(req.RequirementID, ""))
+			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage, h.grantDirsFor(req.RequirementID, ""), claudeDoc)
 		}
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -526,7 +534,8 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxForConfig("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage, claudeConfigID)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.grantDirsFor(req.RequirementID, ""))
+	developerClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, developerProjectID, workDir)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, effort, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage, h.grantDirsFor(req.RequirementID, ""), developerClaudeDoc)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -594,7 +603,7 @@ func analystFirstTurnDisallowedToolsForKind(kind string) []string {
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx, addDirs []string, claudeDoc claudeDocInjection) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -611,7 +620,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 	if !resume {
 		disallowed = analystFirstTurnDisallowedToolsForKind(kind)
 	}
-	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+	opts := llm.StreamOpts{
 		Prompt:          prompt,
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
@@ -622,7 +631,12 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 		Resume:          resume,
 		DisallowedTools: disallowed,
 		AddDirs:         addDirs,
-	})
+	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel (a materialized copy granted via --add-dir), not
+	// through the prompt text.
+	claudeDoc.ApplyTo(&opts)
+	cmd := h.llm.StreamCmd(ctx, opts)
 	var stallOverride []time.Duration
 	if kind == "idea" {
 		stallOverride = append(stallOverride, ideaAnalystStallTimeout)
@@ -638,7 +652,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 		log.Printf("[analyst-chat] stale session %s — falling back to fresh first turn %s", sessionID, freshID)
 		sink.emit(store.LogLine{Type: "phase", Content: "🔄 检测到过期会话，正在重新开始分析..."})
 		prompt = firstTurnPrompt()
-		cmd = h.llm.StreamCmd(ctx, llm.StreamOpts{
+		freshOpts := llm.StreamOpts{
 			Prompt:          prompt,
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
@@ -648,7 +662,9 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
 			AddDirs:         addDirs,
-		})
+		}
+		claudeDoc.ApplyTo(&freshOpts)
+		cmd = h.llm.StreamCmd(ctx, freshOpts)
 		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, nil, 0, withStallTimeout(stallOverride...))
 		sessionID = freshID
 	}
@@ -678,7 +694,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // (--session-id); it is "" on a plain resume. Returns the final result text and
 // the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx, addDirs []string) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, effort, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx, addDirs []string, claudeDoc claudeDocInjection) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -698,7 +714,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 	} else {
 		sessionArg = newSID
 	}
-	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+	opts := llm.StreamOpts{
 		Prompt:          prompt,
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
@@ -711,7 +727,9 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		ForkSessionID:   forkSessionID,
 		DisallowedTools: developerChatDisallowedTools,
 		AddDirs:         addDirs,
-	})
+	}
+	claudeDoc.ApplyTo(&opts)
+	cmd := h.llm.StreamCmd(ctx, opts)
 	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil, nil, 0)
 
 	if out.staleSession && resume {
@@ -723,7 +741,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		sendStatus(w, rc, "phase", "🔄 检测到过期会话，正在重新开始...")
 		rc.Flush()
 		prompt = firstTurnPrompt()
-		cmd = h.llm.StreamCmd(ctx, llm.StreamOpts{
+		freshOpts := llm.StreamOpts{
 			Prompt:          prompt,
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
@@ -733,7 +751,9 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 			AddDirs:         addDirs,
-		})
+		}
+		claudeDoc.ApplyTo(&freshOpts)
+		cmd = h.llm.StreamCmd(ctx, freshOpts)
 		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil, nil, 0)
 		sessionID = freshID
 	}

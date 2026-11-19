@@ -54,6 +54,10 @@ type Gateway struct {
 	// llm.New's signature — which a dozen tests call as llm.New(nil, nil)
 	// — stays byte-identical. nil → the built-in defaults apply.
 	effortCfg EffortProvider
+	// personaCfg supplies the persona delivery mode (append vs replace).
+	// Injected via SetPersonaModeProvider for the same reason as
+	// effortCfg. nil → the pre-change behaviour (replace).
+	personaCfg PersonaModeProvider
 }
 
 // ErrEmptyInput is returned by HTTP-channel methods when the caller hands them
@@ -523,19 +527,39 @@ func (g *Gateway) settingsEnvOverrides(model, configID string, extras ...string)
 // redacted command line), and argv is only readable by the same uid — the
 // env-var approach this replaces had the identical property.
 func (g *Gateway) settingsArg(model, configID string, extras ...string) string {
+	return g.settingsArgWithExcludes(model, configID, nil, extras...)
+}
+
+// settingsArgWithExcludes renders the inline --settings JSON, optionally
+// carrying a claudeMdExcludes list.
+//
+// The exclusion list is a TOP-LEVEL settings key (a sibling of "env"), not
+// an env var — that is where the CLI reads it from (measured; see
+// claude_md_settings.go). Keeping it out of the "env" block also matters
+// for the redaction helper: RedactSettings only rewrites the env block, so
+// the exclusion paths (absolute paths on the executing host) stay visible in
+// the logged command line, which is what an operator needs to see when
+// diagnosing "why is my CLAUDE.md not loaded".
+func (g *Gateway) settingsArgWithExcludes(model, configID string, excludes []string, extras ...string) string {
 	envBlock := g.settingsEnvOverrides(model, configID, extras...)
-	if len(envBlock) == 0 {
+	payload := map[string]json.RawMessage{}
+	if len(envBlock) > 0 {
+		payload["env"] = mustMarshalMap(envBlock)
+	}
+	if raw, ok := claudeMdExcludesSettings(excludes); ok {
+		payload[ClaudeMdExcludesKey] = raw
+	}
+	if len(payload) == 0 {
 		return ""
 	}
-	payload, err := json.Marshal(map[string]json.RawMessage{
-		"env": mustMarshalMap(envBlock),
-	})
+	out, err := json.Marshal(payload)
 	if err != nil {
-		// json.Marshal of a flat string map cannot fail in practice; the guard
-		// keeps the signature honest without inventing an error path upstream.
+		// json.Marshal of a flat map of raw messages cannot fail in practice;
+		// the guard keeps the signature honest without inventing an error path
+		// upstream.
 		return ""
 	}
-	return string(payload)
+	return string(out)
 }
 
 // mustMarshalMap serializes a flat string map for the --settings env block.
@@ -686,7 +710,35 @@ func (g *Gateway) streamArgs(opts StreamOpts) []string {
 	// model / tier pins) at the top of the CLI's settings stack. Prepended so
 	// it lands before the -p block, mirroring the worker's buildClaudeArgs
 	// ordering. Empty model AND no configured auth → omitted entirely.
-	if sa := g.settingsArg(opts.Model, opts.ClaudeConfigID); sa != "" {
+	// The native channel needs two things from the CLI: the memory directory
+	// granted via --add-dir (below) and the env var that turns granted
+	// directories into "CLAUDE.md dirs" — without it the CLI grants READ
+	// access but never loads <dir>/CLAUDE.md (measured; see
+	// claude_md_settings.go).
+	//
+	// The env var travels in the --settings "env" block, which the CLI
+	// applies to its own process environment, so it reaches the memory
+	// discovery. It is only added when a managed copy is actually granted.
+	//
+	// The exclusion list is computed HERE, where the full set of granted
+	// directories is known. The env var is process-wide: it makes EVERY
+	// granted directory a "CLAUDE.md dir", so every one of them (the
+	// working directory plus the authorized requirement / attachment dirs)
+	// has to be covered — otherwise an unrelated CLAUDE.md joins the
+	// context and the single-source guarantee breaks.
+	settingsExtras := []string{}
+	excludes := opts.ClaudeMdExcludes
+	if opts.ClaudeMdDir != "" {
+		settingsExtras = append(settingsExtras, ClaudeMdEnvPairs()...)
+		excludes = append(excludes, ClaudeMdExcludePatternsForDirs(opts.AddDirs, opts.ClaudeMdDir)...)
+	}
+	if opts.ExcludeRepoClaudeMd {
+		// The repository's own instruction files. The working directory is
+		// where the CLI discovers them, so it is the one that has to be
+		// excluded for the managed copy to be the only project document.
+		excludes = append(excludes, ClaudeMdFamilyPaths(opts.WorkDir)...)
+	}
+	if sa := g.settingsArgWithExcludes(opts.Model, opts.ClaudeConfigID, excludes, settingsExtras...); sa != "" {
 		args = append([]string{"--settings", sa}, args...)
 	}
 	if opts.SystemPrompt != "" {
@@ -696,6 +748,13 @@ func (g *Gateway) streamArgs(opts StreamOpts) []string {
 			// instructions (explore read-only, write plan to ~/.claude/plans/,
 			// call ExitPlanMode). --system-prompt would REPLACE those and break the
 			// plan workflow, so we APPEND the role persona instead.
+			args = append(args, "--append-system-prompt", systemPrompt)
+		} else if opts.AppendSystemPrompt || g.personaMode() == PersonaModeAppend {
+			// The CLI's default system prompt carries its own operating
+			// instructions (tool usage, the agent's own guidance). Replacing it
+			// with the persona strips all of that, so the default is to APPEND
+			// the persona to it. The pre-change behaviour (full replacement)
+			// stays available through the persona-mode switch.
 			args = append(args, "--append-system-prompt", systemPrompt)
 		} else {
 			args = append(args, "--system-prompt", systemPrompt)
@@ -749,9 +808,19 @@ func (g *Gateway) streamArgs(opts StreamOpts) []string {
 	//
 	// A directory that does not exist on the executing host is harmless — the
 	// CLI ignores unknown --add-dir paths — so we forward the list as-is.
-	if len(opts.AddDirs) > 0 {
+	//
+	// The managed project CLAUDE.md rides along in this list: with
+	// CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD set (see
+	// claude_md_settings.go) the CLI also loads <dir>/CLAUDE.md from every
+	// granted directory, so the managed copy reaches the model through the
+	// CLI's own project-memory channel.
+	addDirs := opts.AddDirs
+	if opts.ClaudeMdDir != "" {
+		addDirs = append(append([]string{}, addDirs...), opts.ClaudeMdDir)
+	}
+	if len(addDirs) > 0 {
 		args = append(args, "--add-dir")
-		args = append(args, opts.AddDirs...)
+		args = append(args, addDirs...)
 	}
 	return args
 }
@@ -803,6 +872,45 @@ type StreamOpts struct {
 	// here. A path that does not exist on the executing host is ignored by
 	// the CLI, so the list is forwarded verbatim.
 	AddDirs []string
+	// ClaudeMdDir is the directory holding the materialized managed
+	// project-level CLAUDE.md. It is granted to the session via --add-dir,
+	// and — with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD set — the CLI
+	// loads <dir>/CLAUDE.md from it as project memory. That is what makes
+	// the managed copy reach the model through the CLI's own channel instead
+	// of being spliced into the user prompt. Empty = no managed copy.
+	//
+	// The directory lives under NovaWorkbench's data dir, never inside the
+	// user's checkout: the auto commit-push-PR flow runs `git add -A`, so a
+	// managed copy inside the repository would be committed into the user's
+	// branch.
+	ClaudeMdDir string
+	// ClaudeMdExcludes lists absolute paths of instruction files the CLI
+	// must NOT load. It is what keeps the managed copy the single source of
+	// truth: the repository's own CLAUDE.md / AGENTS.md are excluded, so the
+	// model sees exactly one project document.
+	//
+	// The paths must be absolute and must match the files the CLI would
+	// pick up in ITS OWN working directory (the requirement worktree for
+	// most stages), not the project's checkout.
+	//
+	// The gateway adds the working directory and the other granted
+	// directories on top of this list; use it for files outside those.
+	ClaudeMdExcludes []string
+	// ExcludeRepoClaudeMd excludes the working directory's own
+	// CLAUDE.md-family files from the CLI's load set.
+	//
+	// It is what makes the managed copy the project's ONLY convention
+	// document: without it the CLI loads the repository's CLAUDE.md next to
+	// the managed copy, and the model sees two documents that may disagree.
+	ExcludeRepoClaudeMd bool
+	// AppendSystemPrompt delivers the persona with --append-system-prompt
+	// instead of --system-prompt, so the CLI's default system prompt
+	// survives. False keeps the pre-change behaviour (full replacement).
+	//
+	// The gateway fills this in from the persona-mode setting when the
+	// caller leaves it unset, so a call site only has to set it to force a
+	// specific mode.
+	AppendSystemPrompt bool
 	// ExtraEnv is layered onto the spawned claude CLI's environment as
 	// KEY=VALUE entries — used to inject GIT_AUTHOR_* / GIT_COMMITTER_*
 	// when the merge step asks Claude to commit on a Docker host without

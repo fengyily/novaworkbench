@@ -2974,6 +2974,33 @@ export const subTaskConfigApi = {
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
 };
 
+// The project-level CLAUDE.md injection policy.
+//
+// `inject_mode` decides HOW the managed document reaches the model:
+// 'native' = the Claude CLI's own project-memory channel (the default — the
+// managed copy is materialized as a real CLAUDE.md and granted with
+// --add-dir, while the repository's own copy is excluded), 'prompt' = the
+// document is spliced into the user prompt (the pre-change behaviour, kept as
+// the rollback switch).
+//
+// `exclude_repo_doc` keeps the repository's own CLAUDE.md / AGENTS.md out of
+// the CLI's load set, so the managed copy is the ONLY project document in the
+// context.
+//
+// `system_prompt_mode` is independent of the above: it decides whether the
+// role persona replaces the CLI's default system prompt ('replace') or is
+// appended to it ('append').
+export interface ClaudeDocInjectionConfig {
+  inject_mode: 'native' | 'prompt';
+  exclude_repo_doc: boolean;
+  system_prompt_mode: 'append' | 'replace';
+}
+export const claudeDocInjectionApi = {
+  get: () => api.get<ClaudeDocInjectionConfig>('/api/settings/claude-doc-injection'),
+  update: (data: ClaudeDocInjectionConfig) =>
+    api.put<ClaudeDocInjectionConfig>('/api/settings/claude-doc-injection', data),
+};
+
 // Reasoning-effort policy (claude CLI --effort). The backend reads it on
 // every claude run, so saving takes effect without a restart.
 //
@@ -3898,6 +3925,16 @@ export interface ProjectClaudeDoc {
   bytes: number;
   /** The CLAUDE.md that may already exist in the project directory. */
   disk: ProjectClaudeDocDisk;
+  /**
+   * How the managed document reaches the model: "native" (the Claude CLI's
+   * own project-memory channel — the default) or "prompt" (spliced into the
+   * user prompt).
+   *
+   * It matters to the user because in native mode the repository's own
+   * CLAUDE.md is kept out of the context: an edit there has no effect until
+   * it is imported into the managed copy.
+   */
+  injection_channel?: 'native' | 'prompt';
 }
 
 /** One frozen version of the project CLAUDE.md. */

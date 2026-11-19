@@ -32,7 +32,7 @@ import { join } from 'node:path';
 
 process.env.NOVA_AGENT_WORKER_NO_LISTEN = '1';
 
-const { buildRunRequest, buildClaudeArgs, normalizeEffort, cliSupportsEffort } =
+const { buildRunRequest, buildClaudeArgs, buildSettingsArg, normalizeEffort, cliSupportsEffort } =
   await import('./server.mjs');
 
 /**
@@ -174,4 +174,84 @@ test('cliSupportsEffort refuses to guess when the binary is missing', () => {
 test('cliSupportsEffort never emits for an empty command', () => {
   assert.equal(cliSupportsEffort('', process.env), false);
   assert.equal(cliSupportsEffort(null, process.env), false);
+});
+
+// ── the project CLAUDE.md native channel ───────────────────────────────────
+//
+// The managed project-level CLAUDE.md reaches the remote model through the
+// Claude CLI's OWN project-memory channel rather than through the prompt
+// text. Two things make that work, and both are easy to lose:
+//
+//   1. The directory holding the materialized copy is granted with --add-dir.
+//      --add-dir is VARIADIC, so it has to stay LAST in argv.
+//
+//   2. CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 has to be set: without
+//      it --add-dir only grants READ access and the CLI never loads
+//      <dir>/CLAUDE.md. (Measured against claude 2.1.328 — the full probe
+//      results live in backend/internal/llm/claude_md_settings.go.)
+//
+// The exclusion list rides along in the --settings JSON as a TOP-LEVEL
+// "claudeMdExcludes" key (a sibling of "env"), which is where the CLI reads
+// it from.
+
+test('buildRunRequest carries the CLAUDE.md native channel fields', () => {
+  const opts = buildRunRequest(baseBody({
+    claudeMdDir: '/tmp/nova-agent/proj_1/memory',
+    claudeMdExcludes: ['/tmp/nova-agent/proj_1/req_1/CLAUDE.md'],
+  }));
+  assert.equal(opts.claudeMdDir, '/tmp/nova-agent/proj_1/memory');
+  assert.deepEqual(opts.claudeMdExcludes, ['/tmp/nova-agent/proj_1/req_1/CLAUDE.md']);
+});
+
+test('buildRunRequest tolerates a body without the CLAUDE.md fields', () => {
+  // An OLD NovaWorkbench talking to this worker must not break the run.
+  const opts = buildRunRequest(baseBody());
+  assert.equal(opts.claudeMdDir, '');
+  assert.deepEqual(opts.claudeMdExcludes, []);
+});
+
+test('buildClaudeArgs grants the CLAUDE.md directory through --add-dir', () => {
+  const opts = buildRunRequest(baseBody({
+    claudeMdDir: '/tmp/nova-agent/proj_1/memory',
+    addDirs: ['/tmp/nova-agent/proj_1/req_1/attachments'],
+  }));
+  const args = buildClaudeArgs(opts, buildSettingsArg(opts));
+  assert.notEqual(indexOfArg(args, '--add-dir'), -1);
+  // --add-dir is variadic: the memory directory has to be one of its values.
+  assert.ok(args.includes('/tmp/nova-agent/proj_1/memory'));
+  // And it has to stay last in argv, or a later flag would be swallowed.
+  assert.equal(args[args.length - 1], '/tmp/nova-agent/proj_1/memory');
+});
+
+test('buildSettingsArg enables the CLAUDE.md dirs env var', () => {
+  const opts = buildRunRequest(baseBody({ claudeMdDir: '/tmp/nova-agent/proj_1/memory' }));
+  const parsed = JSON.parse(buildSettingsArg(opts));
+  assert.equal(parsed.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, '1');
+});
+
+test('buildSettingsArg omits the env var without a memory directory', () => {
+  // The env var is process-wide: it makes EVERY granted directory a
+  // "CLAUDE.md dir". Without a managed copy to deliver there is no reason to
+  // turn it on — and turning it on would pull unrelated CLAUDE.md files into
+  // the context.
+  const opts = buildRunRequest(baseBody({ addDirs: ['/tmp/nova-agent/proj_1/req_1/attachments'] }));
+  // Nothing to pin at all → the worker omits --settings entirely, so the
+  // CLI keeps its defaults (and never sees the env var).
+  const settings = buildSettingsArg(opts);
+  if (settings !== null) {
+    const parsed = JSON.parse(settings);
+    assert.equal(parsed.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, undefined);
+  }
+});
+
+test('buildSettingsArg puts claudeMdExcludes at the top level', () => {
+  // The CLI reads the exclusion list from a TOP-LEVEL settings key, not from
+  // the env block.
+  const opts = buildRunRequest(baseBody({
+    claudeMdDir: '/tmp/nova-agent/proj_1/memory',
+    claudeMdExcludes: ['/tmp/a/CLAUDE.md', '/tmp/a/AGENTS.md'],
+  }));
+  const parsed = JSON.parse(buildSettingsArg(opts));
+  assert.deepEqual(parsed.claudeMdExcludes, ['/tmp/a/CLAUDE.md', '/tmp/a/AGENTS.md']);
+  assert.equal(parsed.env.claudeMdExcludes, undefined);
 });

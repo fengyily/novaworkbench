@@ -160,6 +160,15 @@ type designRunParams struct {
 	// outside the session's working directory needs a permission decision,
 	// and a non-interactive run has nobody to make it.
 	AddDirs        []string
+	// ClaudeDoc — the resolved project-level CLAUDE.md injection decision
+	// for this run (see handler/claude_doc_injection.go).
+	//
+	// It is resolved once in prepareDesignWorkspace — where the working
+	// directory is known — and carried here so the local and remote
+	// branches apply the SAME decision: in native mode the document
+	// travels through the CLI's own project-memory channel, in prompt mode
+	// it is part of the task prompt.
+	ClaudeDoc      claudeDocInjection
 	Model          string // 已经应用请求体覆盖
 	// Effort — the reasoning-effort tier (claude CLI --effort) for this
 	// design run. Resolved once in prepareArchitectDesign and carried here
@@ -1125,6 +1134,11 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	}
 
 	p.WorkDir = workDir
+	// Resolve the project CLAUDE.md injection once, here, where the working
+	// directory is known. Both the prompt (below) and the claude invocation
+	// read the result, so the two can never disagree about whether the
+	// document travels in the prompt or through the CLI's native channel.
+	p.ClaudeDoc = resolveClaudeDocInjection(h.projectSvc, h.settingSvc, p.Req.ProjectID, workDir)
 
 	// Stamp the design baseline SHA before spawning claude, so the record
 	// survives a mid-run crash (the merge stage reads this column for the
@@ -1189,7 +1203,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 			prompt = descBlock + prompt
 		}
 	} else if p.SkipAnalysis && p.SourceSID == "" {
-		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
+		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title, p.ClaudeDoc.Native)
 		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
 			"制定具体可执行的技术实现方案（plan）。\n\n" +
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
@@ -1231,7 +1245,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// （续接分析会话 / 跳过分析全新会话 / 带压缩摘要）都会带上它，而且只改
 	// 这一处。本地与远端共用 p.Prompt，Agent Server 执行同样覆盖。
 	// 没有文档时 claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-	if block := claudeDocBlock(h.projectSvc, p.Req.ProjectID, workDir); block != "" {
+	if block := p.ClaudeDoc.Block(); block != "" {
 		prompt += "\n\n" + block
 	}
 	// Sub-requirement: append the master-requirement context (its settled
@@ -1308,7 +1322,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
 	var kbReadTitles []string
 	if p.ReadKnowledge {
-		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
+		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title, p.ClaudeDoc.Native)
 		if kbBlock != "" {
 			prompt = kbBlock + "\n" + prompt
 		}
@@ -1419,7 +1433,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// returns.
 		stage := newStageRun("architect-design")
 		defer stage.cancel()
-		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
+		designOpts := llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   p.SystemPrompt,
@@ -1432,7 +1446,9 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 			AddDirs:        p.AddDirs,
-		})
+		}
+		p.ClaudeDoc.ApplyTo(&designOpts)
+		cmd := h.llm.StreamCmd(stage.ctx, designOpts)
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,

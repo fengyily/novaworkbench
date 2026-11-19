@@ -41,7 +41,26 @@ import (
 //   - readFiles: the relative paths whose content was injected (for SSE progress).
 //   - treeSummary: a names-only directory listing (depth- and count-capped) so
 //     Claude knows the layout without Glob'ing multi-GB of files.
-func collectProjectContext(projectPath, requirementTitle string) (docBlock string, readFiles []string, treeSummary string) {
+// skipProjectConventions drops the repository's own convention documents
+// (CLAUDE.md / AGENTS.md) from the pre-read.
+//
+// The native channel delivers the MANAGED copy of the project document
+// through the Claude CLI's own project-memory mechanism, and excludes the
+// repository's copies at the same time (see handler/claude_doc_injection.go).
+// Inlining them here would put a SECOND, possibly contradicting version of
+// the same document into the prompt — exactly the duplication the native
+// channel exists to remove.
+//
+// AGENTS.md goes with CLAUDE.md because the CLI treats it as the ALTERNATIVE
+// for CLAUDE.md: while CLAUDE.md is loaded AGENTS.md is ignored, but
+// excluding CLAUDE.md alone silently promotes AGENTS.md into the context
+// (measured — see internal/llm/claude_md_settings.go). Excluding one
+// without the other would swap a document instead of removing it.
+//
+// It is skipped only in native mode: the fallback (prompt mode) keeps the
+// pre-change behaviour, so a run that cannot use the native channel still
+// sees everything it used to.
+func collectProjectContext(projectPath, requirementTitle string, skipProjectConventions bool) (docBlock string, readFiles []string, treeSummary string) {
 	const (
 		maxDocBytes    = 40 * 1024
 		maxTreeEntries = 240
@@ -49,6 +68,9 @@ func collectProjectContext(projectPath, requirementTitle string) (docBlock strin
 	)
 
 	docCandidates := []string{"CLAUDE.md", "AGENTS.md", ".cursorrules", "README.md", "README"}
+	if skipProjectConventions {
+		docCandidates = []string{".cursorrules", "README.md", "README"}
+	}
 
 	// Keywords from the title (lowercased) for source-file matching. Chinese
 	// titles rarely match English paths, so docs + tree carry most of the weight;
@@ -416,7 +438,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt = h.applyMentionedSkills(prompt, workDir, skillText)
 
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+	refineOpts := llm.StreamOpts{
 		Prompt:  prompt,
 		WorkDir: workDir,
 		// SystemPrompt intentionally omitted: the design refine is a plain
@@ -432,7 +454,15 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		// Authorized directories (--add-dir grants) — the refine chat is
 		// where the user most often points Claude at a reference directory.
 		AddDirs: h.grantDirsFor(req.RequirementID, ""),
-	})
+	}
+	// The project conventions reach the refine chat through the CLI's own
+	// project-memory channel: the chat edits the project's own documents, so
+	// it has to work against the same conventions.
+	if requirement != nil {
+		refineClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, requirement.ProjectID, workDir)
+		refineClaudeDoc.ApplyTo(&refineOpts)
+	}
+	cmd := h.llm.StreamCmd(r.Context(), refineOpts)
 
 	// Reuse runClaudeStream so this path gets live content_block_delta text
 	// deltas (the model streams incrementally via stream_event), tool-call
@@ -862,7 +892,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 		} else {
-			cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+			applyOpts := llm.StreamOpts{
 				Prompt:         applyPrompt,
 				WorkDir:        workDir,
 				SystemPrompt:   systemPrompt,
@@ -874,7 +904,12 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				SessionID:      sourceSID,
 				Resume:         true,
 				AddDirs:        h.grantDirsFor(reqID, ""),
-			})
+			}
+			// The project conventions reach the apply turn through the CLI's
+			// own project-memory channel.
+			applyClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, requirement.ProjectID, workDir)
+			applyClaudeDoc.ApplyTo(&applyOpts)
+			cmd := h.llm.StreamCmd(context.Background(), applyOpts)
 			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, nil, 0, withStallTimeout(codingStallTimeout))
 		}
 
@@ -1209,7 +1244,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		"WebFetch", "WebSearch", "NotebookEdit",
 	}
 
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+	compressOpts := llm.StreamOpts{
 		Prompt:          compressPrompt,
 		WorkDir:         workDir,
 		SessionID:       sourceSID,
@@ -1219,7 +1254,12 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		Effort:          resolveEffort(h.llm, req.Effort, llm.StageOther),
 		ClaudeConfigID:  claudeConfigID,
 		DisallowedTools: noTools,
-	})
+	}
+	// The project conventions reach the compression turn through the CLI's
+	// own project-memory channel.
+	compressClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, requirement.ProjectID, workDir)
+	compressClaudeDoc.ApplyTo(&compressOpts)
+	cmd := h.llm.StreamCmd(r.Context(), compressOpts)
 
 	// Usage record: step is namespaced under "compress_<step>" so the existing
 	// usageApi.requirement() aggregation includes compression cost without
