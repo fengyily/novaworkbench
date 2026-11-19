@@ -206,7 +206,9 @@ export interface Project {
   last_synced_at?: string;
   last_synced_commit?: string;
   sync_status?: 'idle' | 'ok' | 'error';
-  // Stored counters (set at project creation; not maintained in real time).
+  // 需求数 / 问题数 / 想法数 —— 后端从 requirements 表实时聚合得出（按 kind 分桶：
+  // requirement / issue / idea；wiki 类不计入；空 kind 视为 requirement；归档需求照计）。
+  // 旧实现是 projects 表上三列「从不写入」的死列，因此永远显示 0。
   requirement_count?: number;
   issue_count?: number;
   idea_count?: number;
