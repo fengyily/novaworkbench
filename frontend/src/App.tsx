@@ -45,6 +45,25 @@ function ProjectIssueMonitorWithId() {
   return <ProjectIssueMonitor projectId={id} />;
 }
 
+// RequirementDetailWithId mounts the requirement page under the :id route.
+//
+// The key is load-bearing: React Router keeps a route's element MOUNTED when
+// only a route PARAM changes, so without the key the page would survive a
+// switch from one requirement to another and keep the previous requirement's
+// state — its BASE branch among them. A stale BASE would be sent back on the
+// next design / coding run, and the backend reads a value that differs from
+// the auto value as "the user deliberately chose this": it freezes the base
+// and kills the parent inheritance (a child requirement must develop on its
+// master's branch).
+//
+// Remounting also puts the page back into its loading state until the new
+// row arrives, so no action can fire with the previous requirement's data.
+function RequirementDetailWithId() {
+  const { id } = useParams();
+  if (!id) return null;
+  return <RequirementDetail key={id} />;
+}
+
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const { t } = useTranslation();
@@ -90,7 +109,7 @@ export default function App() {
             {/* 字面量段 "calendar" 必须早于 ":id" 通配注册，否则会被
                路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}
             <Route path="requirements/calendar" element={<RequirementsCalendar />} />
-            <Route path="requirements/:id" element={<RequirementDetail />} />
+            <Route path="requirements/:id" element={<RequirementDetailWithId />} />
             <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />

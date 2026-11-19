@@ -1201,6 +1201,13 @@ export default function RequirementDetail() {
   // a value that differs from the auto value as "the user deliberately
   // chose this" and pins the base, killing the inheritance for good.
   //
+  // The latch below is per REQUIREMENT, and that is load-bearing: App.tsx
+  // mounts this page with key={id}, so switching to another requirement
+  // remounts it and the latch starts over. React Router would otherwise
+  // keep THIS instance mounted across an :id change, and the picker would
+  // keep the PREVIOUS requirement's base — the backend would then read
+  // that stale value as an explicit choice and freeze it.
+  //
   // After the first seed, user customisation wins — the effect
   // short-circuits so mid-session project-metadata edits can't clobber an
   // in-flight design/coding choice.

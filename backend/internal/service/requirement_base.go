@@ -1,7 +1,10 @@
 package service
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/novaworkbench/backend/internal/model"
@@ -118,16 +121,39 @@ func ParentBranchBase(lookup func(string) (*model.Requirement, error), req *mode
 	if err != nil || parent == nil {
 		return ""
 	}
+	return parentInheritBase(parent)
+}
+
+// parentInheritBase is THE rule for what a child requirement inherits from
+// its master: the master's DEVELOPMENT branch, or the master's own base when
+// it has not developed a branch yet.
+//
+// A master in "develop on base" mode (no_branch) has NO branch of its own —
+// it commits straight onto its base. There is therefore nothing to inherit:
+// the function returns "" and the caller falls back to the project default.
+//
+// The rule is shared by both sides of the seam, and they MUST agree:
+//
+//   - the read path (ParentBranchBase → the resolver's tier 3) computes the
+//     base a child would develop on;
+//   - the creation paths (inheritedBaseBranch) persist that same base.
+//
+// When they disagreed, the child row carried a base the resolver would never
+// reproduce: the frontend seeded its picker with the resolver's value and
+// sent it back, so the next design / coding run overwrote the persisted
+// value with a different one — the child's PR target silently drifted away
+// from the master's line.
+func parentInheritBase(parent *model.Requirement) string {
+	if parent == nil {
+		return ""
+	}
 	if parent.NoBranch {
 		return ""
 	}
 	if b := strings.TrimSpace(parent.BranchName); b != "" {
 		return b
 	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
-		return b
-	}
-	return ""
+	return strings.TrimSpace(parent.BaseBranch)
 }
 
 // attachEffectiveBase fills model.Requirement.BaseBranchEffective on every
@@ -143,6 +169,13 @@ func ParentBranchBase(lookup func(string) (*model.Requirement, error), req *mode
 // branches, one for the distinct parent rows. Both are primary-key lookups;
 // the parent lookup is a single IN query so a list of N children costs one
 // round-trip, not N.
+//
+// A FAILED lookup leaves BaseBranchEffective EMPTY on every row. That is
+// deliberate: an empty field is a missing value, while a wrong value is a
+// lie the frontend cannot detect. The frontend falls back to the persisted
+// base_branch (still correct) instead of seeding its picker with a base the
+// resolver would never reproduce — see projectDefaultBranches for what that
+// lie would cost.
 func (s *RequirementService) attachEffectiveBase(items []model.Requirement) {
 	if len(items) == 0 {
 		return
@@ -163,8 +196,16 @@ func (s *RequirementService) attachEffectiveBase(items []model.Requirement) {
 		}
 	}
 
-	projDefaults := s.projectDefaultBranches(projIDs)
-	parents := s.parentRequirementRows(parentIDs)
+	projDefaults, err := s.projectDefaultBranches(projIDs)
+	if err != nil {
+		log.Printf("[requirement] resolve effective base: project default lookup failed: %v", err)
+		return
+	}
+	parents, err := s.parentRequirementRows(parentIDs)
+	if err != nil {
+		log.Printf("[requirement] resolve effective base: parent lookup failed: %v", err)
+		return
+	}
 
 	// The lookup mirrors the handler's runtime lookup (ParentBranchBase takes
 	// an injected lookup to stay a pure function): a missing parent row is an
@@ -186,10 +227,20 @@ func (s *RequirementService) attachEffectiveBase(items []model.Requirement) {
 // projectDefaultBranches reads projects.default_branch for the given project
 // ids in ONE query. A missing project row is simply absent from the map —
 // the resolver then falls through to the "main" sentinel.
-func (s *RequirementService) projectDefaultBranches(ids []string) map[string]string {
+//
+// A QUERY FAILURE is a different matter and is reported as an error instead
+// of an empty map. An empty map would make the resolver answer "main" for
+// every project — a plausible-looking but WRONG base. The frontend seeds its
+// BASE picker with it and echoes it back; the runtime resolver (healthy by
+// then, and resolving the real parent branch) reads the mismatch as "the
+// user deliberately chose this" and pins base_branch='main' with
+// source='explicit' — silently and permanently. An error keeps the effective
+// base empty, and an empty field is a value the frontend can fall back from
+// (the persisted base_branch) instead of a value it cannot.
+func (s *RequirementService) projectDefaultBranches(ids []string) (map[string]string, error) {
 	out := map[string]string{}
 	if len(ids) == 0 {
-		return out
+		return out, nil
 	}
 	placeholders := make([]string, len(ids))
 	args := make([]interface{}, len(ids))
@@ -200,26 +251,33 @@ func (s *RequirementService) projectDefaultBranches(ids []string) map[string]str
 	rows, err := s.db.Query(
 		"SELECT id, default_branch FROM projects WHERE id IN ("+strings.Join(placeholders, ",")+")", args...)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, def string
 		if err := rows.Scan(&id, &def); err != nil {
-			continue
+			return nil, err
 		}
 		out[id] = def
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // parentRequirementRows reads the columns the parent-branch rules need for
 // the given requirement ids in ONE query: the development branch, the
 // fallback base and the no-branch flag.
-func (s *RequirementService) parentRequirementRows(ids []string) map[string]*model.Requirement {
+//
+// A query failure is reported as an error for the same reason as in
+// projectDefaultBranches: a silently truncated map would answer "main" for
+// the missing parents and pin that wrong base as an explicit choice.
+func (s *RequirementService) parentRequirementRows(ids []string) (map[string]*model.Requirement, error) {
 	out := map[string]*model.Requirement{}
 	if len(ids) == 0 {
-		return out
+		return out, nil
 	}
 	placeholders := make([]string, len(ids))
 	args := make([]interface{}, len(ids))
@@ -230,26 +288,39 @@ func (s *RequirementService) parentRequirementRows(ids []string) map[string]*mod
 	rows, err := s.db.Query(
 		"SELECT id, branch_name, base_branch, no_branch FROM requirements WHERE id IN ("+strings.Join(placeholders, ",")+")", args...)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.BranchName, &r.BaseBranch, &r.NoBranch); err != nil {
-			continue
+			return nil, err
 		}
 		row := r
 		out[r.ID] = &row
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // inheritedParentRow loads the columns the base-inheritance rule needs from
 // the parent requirement — ONE targeted query, without the derived columns
 // (sub-task counts, effective base, …) a full Get would pull in.
 //
+// no_branch is part of the read: a master in "develop on base" mode has no
+// branch of its own to inherit, and the creation path must apply the same
+// rule the read path applies (parentInheritBase) — otherwise the persisted
+// base is one the resolver would never reproduce.
+//
 // Returns nil when the row is gone or unreadable; the caller then falls back
 // to the project default.
+//
+// A read failure is logged (a deleted parent is not a failure): the caller
+// persists the project default with source=parent, which the next read
+// corrects once the parent row is readable again — but the operator has to
+// be able to SEE that it happened.
 func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirement {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
@@ -257,9 +328,12 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 	}
 	var p model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id, project_id, branch_name, base_branch FROM requirements WHERE id = ?", parentID,
-	).Scan(&p.ID, &p.ProjectID, &p.BranchName, &p.BaseBranch)
+		"SELECT id, project_id, branch_name, base_branch, no_branch FROM requirements WHERE id = ?", parentID,
+	).Scan(&p.ID, &p.ProjectID, &p.BranchName, &p.BaseBranch, &p.NoBranch)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[requirement] read parent %s for base inheritance failed: %v", parentID, err)
+		}
 		return nil
 	}
 	return &p
@@ -277,6 +351,11 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 // Fallbacks: parent development branch → parent base → project default →
 // "main".
 //
+// The no_branch rule comes from parentInheritBase — the very same rule the
+// read path applies — so a master that develops on its base contributes
+// NOTHING to inherit (it has no branch of its own) and the child falls back
+// to the project default, exactly like the resolver would resolve it.
+//
 // The source is ALWAYS model.BaseSourceParent — never explicit. "explicit"
 // means "the user picked this on THIS requirement", and the user did not:
 // they picked it on the master, and the child merely follows.
@@ -284,13 +363,7 @@ func (s *RequirementService) inheritedParentRow(parentID string) *model.Requirem
 // The parent may be nil (deleted between the validation and the read) — the
 // caller then falls back to the project default.
 func (s *RequirementService) inheritedBaseBranch(parent *model.Requirement) string {
-	if parent == nil {
-		return s.projectDefaultBranchFor(parent)
-	}
-	if b := strings.TrimSpace(parent.BranchName); b != "" {
-		return b
-	}
-	if b := strings.TrimSpace(parent.BaseBranch); b != "" {
+	if b := parentInheritBase(parent); b != "" {
 		return b
 	}
 	return s.projectDefaultBranchFor(parent)
