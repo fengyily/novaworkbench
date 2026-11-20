@@ -232,6 +232,9 @@ func main() {
 	// effect on the next run without a restart. Wired with a setter rather
 	// than a third New() argument so llm.New's signature stays unchanged.
 	llmGateway.SetEffortProvider(settingSvc)
+	// The persona delivery mode (append vs replace the CLI's default system
+	// prompt) is a settings-driven choice — see handler/claude_doc_injection.go.
+	llmGateway.SetPersonaModeProvider(settingSvc)
 
 	// Scanner depends on the LLM gateway (auto project description generation)
 	// and the project service (description persistence).
@@ -502,6 +505,10 @@ func main() {
 	// tests keep working — and so a build that disables the requirement
 	// service simply exposes no /issues endpoint.
 	reviewH.SetRequirementSvc(reqSvc)
+	// The project CLAUDE.md injection policy lives in the settings KV, so
+	// the Review handler needs the settings service to read it (see
+	// handler/claude_doc_injection.go).
+	reviewH.SetSettingService(settingSvc)
 	// 需求级 Review（Review 作为子任务）——独立的 handler，因为它拥有的是
 	// 「轮次链」这一层编排：建 Review 行 → 建 task_kind='review' 的子任务 →
 	// findings 转修复子子任务 → 回归 Review（round +1）。执行面复用同一个
@@ -517,6 +524,9 @@ func main() {
 	go reqReviewH.StartAutoIterateReconciler(context.Background())
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
+	// The project CLAUDE.md injection policy lives in the settings KV (see
+	// handler/claude_doc_injection.go).
+	mergeH.SetSettingService(settingSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -606,6 +616,10 @@ func main() {
 	//   POST   /api/projects/{id}/claude-doc/import         → import the on-disk CLAUDE.md
 	//   GET    /api/projects/{id}/claude-doc/jobs/{job_id}/stream → SSE progress
 	claudeDocH := handler.NewProjectClaudeDocHandler(projectSvc, llmGateway, sharedJobs)
+	// The project CLAUDE.md injection policy lives in the settings KV (see
+	// handler/claude_doc_injection.go) — the panel shows which channel is
+	// active.
+	claudeDocH.SetSettingService(settingSvc)
 	mux.HandleFunc("GET /api/projects/{id}/claude-doc", claudeDocH.Get)
 	mux.HandleFunc("PUT /api/projects/{id}/claude-doc", claudeDocH.Put)
 	mux.HandleFunc("DELETE /api/projects/{id}/claude-doc", claudeDocH.Delete)
@@ -809,6 +823,10 @@ func main() {
 	// orchestration tick and SubTaskRunner, so a change needs no restart.
 	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
 	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
+	// The project-level CLAUDE.md injection policy — the rollback surface
+	// for the native channel (see handler/claude_doc_injection.go).
+	mux.HandleFunc("GET /api/settings/claude-doc-injection", settingH.GetClaudeDocInjection)
+	mux.HandleFunc("PUT /api/settings/claude-doc-injection", settingH.UpdateClaudeDocInjection)
 
 	// Reasoning-effort policy (settings) — the per-stage default tiers for the
 	// claude CLI's --effort flag (方案设计 / 开发实现 / 提交推送 / 其他) plus a

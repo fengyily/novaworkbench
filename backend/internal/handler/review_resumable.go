@@ -54,6 +54,12 @@ type reviewTurnSpec struct {
 	// remoteNoService is the error shown when the Agent Server service isn't
 	// wired at all.
 	remoteNoService string
+	// claudeDoc is the resolved project-level CLAUDE.md injection for the
+	// turn (see handler/claude_doc_injection.go). It travels with the spec
+	// so the local and the remote branch apply the SAME decision: in
+	// native mode the document reaches the model through the CLI's own
+	// project-memory channel, in prompt mode it is part of the task prompt.
+	claudeDoc claudeDocInjection
 }
 
 // runLocalReviewTurn executes one turn on the local checkout: resume first
@@ -78,7 +84,7 @@ func (h *ReviewHandler) runLocalReviewTurn(ctx context.Context, job *store.Job, 
 	if sessionID != "" {
 		job.Append(store.LogLine{Type: "phase", Content: spec.resumePhase})
 		out, stale, msg := h.streamReviewTurn(ctx, job, project.LocalPath, systemPrompt,
-			spec.prompt(true), modelName, claudeConfigID, effort, sessionID, true, spec.usage())
+			spec.prompt(true), modelName, claudeConfigID, effort, sessionID, true, spec.usage(), spec.claudeDoc)
 		if !stale {
 			return out, true, msg
 		}
@@ -88,7 +94,7 @@ func (h *ReviewHandler) runLocalReviewTurn(ctx context.Context, job *store.Job, 
 	}
 
 	out, _, msg := h.streamReviewTurn(ctx, job, project.LocalPath, systemPrompt,
-		spec.prompt(false), modelName, claudeConfigID, effort, "", false, spec.usage())
+		spec.prompt(false), modelName, claudeConfigID, effort, "", false, spec.usage(), spec.claudeDoc)
 	return out, false, msg
 }
 

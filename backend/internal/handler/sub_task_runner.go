@@ -1366,6 +1366,10 @@ func (r *SubTaskRunner) run(
 	}
 	job.Append(store.LogLine{Type: "message", Content: "📁 工作目录: " + workDir})
 
+	// 项目级 CLAUDE.md 的注入决策，在工作目录确定之后解析：排除清单必须
+	// 覆盖 CLI 真正运行的那个目录。
+	claudeDoc := resolveClaudeDocInjection(r.projectSvc, r.settingSvc, req.ProjectID, workDir)
+
 	// v0.5.x: 三阶段（理解 / 实施 / 小结）只在手动触发路径打开。auto / push_pr
 	// 子任务的 live log 渲染和自动批派逻辑保持不变——它们依然走单一的 artifact
 	// 路径，phase_* 列保持空、phase_emitted=0、前端不渲染三段区。
@@ -1453,9 +1457,10 @@ func (r *SubTaskRunner) run(
 		prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
 	}
 	// 项目级 CLAUDE.md —— 项目的权威开发约定。子任务（含需求级 Review）都要
-	// 带上：执行者按项目约定写代码，评审者按项目约定判对错。没有文档时
-	// claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-	if block := claudeDocBlock(r.projectSvc, req.ProjectID, workDir); block != "" {
+	// 带上：执行者按项目约定写代码，评审者按项目约定判对错。
+	// 原生通道下文档由 Claude CLI 自己的项目记忆通道加载（不拼进提示词），
+	// 没有文档时同样是空串，prompt 与改动前逐字节一致。
+	if block := claudeDoc.Block(); block != "" {
 		prompt += "\n" + block + "\n"
 	}
 	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
@@ -1721,7 +1726,7 @@ func (r *SubTaskRunner) run(
 			adjust /*forkFlag*/, false,
 			freshSession, bare,
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-			addDirs, spec.disallowedTools,
+			addDirs, spec.disallowedTools, claudeDoc,
 		)
 		out.errMsg = annotateFailureWithTranscript(out, workDir, lastAttemptSID, lastAttemptStart)
 	} else {
@@ -1771,7 +1776,7 @@ func (r *SubTaskRunner) run(
 				/*forkFlag*/ true,
 				freshSession, bare,
 				workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-				addDirs, spec.disallowedTools,
+				addDirs, spec.disallowedTools, claudeDoc,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -1803,7 +1808,7 @@ func (r *SubTaskRunner) run(
 			if looksLikeForkInstantCrash(out, probe) {
 				out = r.retryForkAsFreshSession(st, job, req, out, prompt, systemPromptForRun,
 					modelName, sourceSID, workDir, subUsage, finalConfigID, credEnv,
-					phaseTrack, hardTimeout, addDirs, spec.disallowedTools, probe)
+					phaseTrack, hardTimeout, addDirs, spec.disallowedTools, claudeDoc, probe)
 			}
 		}
 	}
@@ -1898,6 +1903,7 @@ func (r *SubTaskRunner) retryForkAsFreshSession(
 	hardTimeout time.Duration,
 	addDirs []string,
 	disallowedTools []string,
+	claudeDoc claudeDocInjection,
 	probe claudeTranscriptProbe,
 ) claudeStreamOutcome {
 	log.Printf("[sub-task] %s: fork crashed instantly (elapsed=%s events=%d) — %s",
@@ -1931,7 +1937,7 @@ func (r *SubTaskRunner) retryForkAsFreshSession(
 		/*freshSession*/ true,
 		/*bare*/ false,
 		workDir, subUsage, finalConfigID, credEnv, tracker, hardTimeout,
-		addDirs, disallowedTools,
+		addDirs, disallowedTools, claudeDoc,
 	)
 	if out.errMsg == "" && out.finalResult != "" {
 		return out
@@ -1971,6 +1977,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	hardTimeout time.Duration,
 	addDirs []string,
 	disallowedTools []string,
+	claudeDoc claudeDocInjection,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -1992,7 +1999,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		forkFor = false
 		sessionIDForCLI = newSID
 	}
-	cmd, cancel, hb := r.llm.GenerateCode(llm.StreamOpts{
+	localOpts := llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPromptForRun,
@@ -2021,7 +2028,12 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		ExtraEnv:        credEnv,              // HTTPS git creds + committer identity
 		IdleTimeout:     subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
 		AddDirs:         addDirs,
-	})
+	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel (a materialized copy granted via --add-dir), not
+	// through the prompt text.
+	claudeDoc.ApplyTo(&localOpts)
+	cmd, cancel, hb := r.llm.GenerateCode(localOpts)
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
 	// SIGKILL). Must happen BEFORE `defer cancel()` so Stop can fire between

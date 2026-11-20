@@ -23,6 +23,15 @@ export const claudeDoc = {
   diskDiffers: 'The CLAUDE.md on disk no longer matches the managed copy{{at}}; the managed copy is still what gets injected — import the disk version to update it.',
   diskModifiedAt: ' (disk version: {{time}})',
   diskMissing: 'There is no CLAUDE.md in the repository directory; the managed copy is what gets injected.',
+  // The injection channel — how the managed document reaches the model.
+  // "native" = the Claude CLI's own project-memory channel; "prompt" = the
+  // document is spliced into the user prompt.
+  injectionChannelNative: 'Native memory',
+  injectionChannelPrompt: 'Prompt fallback',
+  injectionChannelLabel: 'Injection channel',
+  // In native mode the repository's own CLAUDE.md is kept OUT of the
+  // context, so an edit there has no effect until it is imported.
+  singleSourceHint: 'Only the copy on this panel is loaded into the session; the CLAUDE.md in the repository directory does not take part — import it to apply your changes there.',
   importFromDisk: 'Import from disk',
 
   // Actions

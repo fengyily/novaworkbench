@@ -62,6 +62,12 @@ func buildDesignPromptFixture(t *testing.T, withDoc bool) (*WizardHandler, *mode
 	settingSvc := service.NewSettingService(d)
 	jobs := store.NewJobStore(8)
 
+	// The managed copy is materialized under ~/.novaworkbench in
+	// production; a test must never write into the developer's real home
+	// directory, so the memory root is redirected into the temp dir.
+	t.Cleanup(func() { service.SetClaudeDocMemoryRoot("") })
+	service.SetClaudeDocMemoryRoot(filepath.Join(dir, "memory"))
+
 	if withDoc {
 		if _, err := projSvc.UpsertClaudeDoc(projID,
 			"# 项目约定\n\n分层：handler / service / model。",
@@ -110,11 +116,45 @@ func TestDesignPromptInjectsProjectClaudeDoc(t *testing.T) {
 			lines, status, _ := job.Snapshot()
 			t.Fatalf("prepareDesignWorkspace failed (status=%s, lines=%+v)", status, lines)
 		}
+		// The document travels through the CLI's own project-memory channel,
+		// so the PROMPT must NOT carry it — a copy in both places is exactly
+		// the duplication this change removes.
+		if strings.Contains(p.Prompt, prompt.ProjectClaudeDocHeading) {
+			t.Errorf("design prompt carries the CLAUDE.md block although the native channel delivers it:\n%s", p.Prompt)
+		}
+		if !p.ClaudeDoc.Native {
+			t.Errorf("the design stage did not resolve the native injection channel")
+		}
+		if p.ClaudeDoc.MemDir == "" {
+			t.Errorf("the native injection channel has no memory directory")
+		}
+	})
+
+	t.Run("prompt mode keeps the block in the prompt", func(t *testing.T) {
+		h, req, job, work := buildDesignPromptFixture(t, true)
+		// Force the fallback: the document is spliced into the prompt.
+		if err := h.settingSvc.SetClaudeDocInjectionConfig(service.ClaudeDocInjectionConfig{
+			InjectMode:       service.ClaudeDocInjectModePrompt,
+			ExcludeRepoDoc:   false,
+			SystemPromptMode: service.ClaudeDocSystemPromptReplace,
+		}); err != nil {
+			t.Fatalf("set injection config: %v", err)
+		}
+		p := &designRunParams{
+			Req:         req,
+			ProjectPath: work,
+			BaseBranch:  "main",
+			SourceSID:   "analyst-sid",
+		}
+		if ok := h.prepareDesignWorkspace(p, job); !ok {
+			lines, status, _ := job.Snapshot()
+			t.Fatalf("prepareDesignWorkspace failed (status=%s, lines=%+v)", status, lines)
+		}
 		if !strings.Contains(p.Prompt, prompt.ProjectClaudeDocHeading) {
-			t.Errorf("design prompt missing the project CLAUDE.md block:\n%s", p.Prompt)
+			t.Errorf("prompt-mode design prompt missing the project CLAUDE.md block:\n%s", p.Prompt)
 		}
 		if !strings.Contains(p.Prompt, "分层：handler / service / model。") {
-			t.Errorf("design prompt missing the document body:\n%s", p.Prompt)
+			t.Errorf("prompt-mode design prompt missing the document body:\n%s", p.Prompt)
 		}
 	})
 
