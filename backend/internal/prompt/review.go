@@ -384,6 +384,17 @@ type FixPromptInput struct {
 	// RequirementTitle is the parent requirement's title — it gives the child
 	// agent the "why" behind the code it is fixing.
 	RequirementTitle string
+	// PreviousFindings is the parent Review's finding list, rendered as a
+	// short Markdown block ("- P0-1 xxx（file）").
+	//
+	// Why it matters: the fixer is handed ONE finding, but the review found
+	// several. Without the list it cannot tell whether the others are
+	// already handled — so it re-investigates them (or "fixes" them a second
+	// time), which is wasted work and one more reason for the agent to
+	// restate conclusions it already reached.
+	//
+	// Empty = no list available (the prompt then carries only this finding).
+	PreviousFindings string
 }
 
 // BuildFixPrompt assembles the task prompt for a fix sub-task spawned from a
@@ -440,6 +451,11 @@ func BuildFixPrompt(in FixPromptInput) string {
 	if strings.TrimSpace(in.RequirementTitle) != "" {
 		b.WriteString("- 所属需求：")
 		b.WriteString(strings.TrimSpace(in.RequirementTitle))
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(in.PreviousFindings) != "" {
+		b.WriteString("\n本次 Review 的全部发现（只修上面指定的那一条，其余视为已由其他子任务处理，不要重复调查或重复修改）：\n")
+		b.WriteString(strings.TrimSpace(in.PreviousFindings))
 		b.WriteString("\n")
 	}
 

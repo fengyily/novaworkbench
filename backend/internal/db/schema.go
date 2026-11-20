@@ -335,6 +335,26 @@ CREATE TABLE IF NOT EXISTS settings (
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Running backend instances. Each nova server process registers one row and
+-- refreshes heartbeat_at every 15s. The row is deleted on graceful exit.
+--
+-- Why it exists: two backends pointed at the same database each run their
+-- OWN scheduler tick and their OWN in-memory JobStore, so the same
+-- orchestration batch got dispatched twice (two claude processes for one
+-- sub-task) and a Stop request could not reach the process owned by the
+-- other instance. The scheduler consults this table before dispatching and
+-- only the instance holding the "exclusive" lease dispatches.
+--
+-- A row whose heartbeat is older than 60s is considered dead (the process
+-- was SIGKILLed and never got to clean up) and is ignored.
+CREATE TABLE IF NOT EXISTS backend_instances (
+	id           TEXT PRIMARY KEY,
+	pid          INTEGER NOT NULL DEFAULT 0,
+	host         TEXT    NOT NULL DEFAULT '',
+	started_at   DATETIME,
+	heartbeat_at DATETIME
+);
+
 CREATE TABLE IF NOT EXISTS claude_configs (
 	id            TEXT PRIMARY KEY,
 	name          TEXT NOT NULL DEFAULT '',
@@ -1847,6 +1867,30 @@ var alterColumns = []string{
 	// path. Append-only (like every other column here): a fresh install
 	// gets it from this ALTER, an existing one from the same statement.
 	`ALTER TABLE code_reviews ADD COLUMN findings_source TEXT NOT NULL DEFAULT ''`,
+	// child_pid / child_pgid: the OS identity of the claude CLI process
+	// this row currently owns. 0 = nothing running (never started, or
+	// already reaped).
+	//
+	// Why they exist: a backend restart used to orphan the claude child
+	// (the parent died, the child was re-parented to launchd and kept
+	// editing the requirement worktree for minutes AFTER the UI already
+	// showed the sub-task as "error"). With the pid persisted, the NEXT
+	// backend instance can find the leftover process at boot and kill its
+	// process group — so "the row says error but an agent is still
+	// writing files" can no longer happen.
+	//
+	// child_pgid equals child_pid because the child is started with
+	// Setpgid (it becomes the leader of its own process group), which is
+	// what lets us kill the whole tree (claude + its tool subprocesses)
+	// instead of just the direct child.
+	`ALTER TABLE sub_tasks ADD COLUMN child_pid  INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN child_pgid INTEGER NOT NULL DEFAULT 0`,
+	// work_dir: the directory this row's claude child actually ran in.
+	// Written by the runner right before the spawn. Exposed read-only on
+	// the API so the SubTaskPanel can show "this agent writes into
+	// <dir>" — the user needs it to answer "are two agents writing the
+	// same files?" without leaving the UI.
+	`ALTER TABLE sub_tasks ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`,
 	// manual_edited_at: when a HUMAN last edited the project-level
 	// CLAUDE.md. It is the guard flag for the destructive replaces (an AI
 	// regeneration, a disk import): while it is set, such a replace needs an

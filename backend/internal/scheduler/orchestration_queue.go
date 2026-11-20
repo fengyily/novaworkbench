@@ -121,6 +121,19 @@ type OrchestrationQueue struct {
 	// change lands within one interval without a restart.
 	settingSvc   *service.SettingService
 	limiter      *service.ProjectLimiter
+	// wtLimiter is the per-working-directory gate, shared with
+	// handler.SubTaskRunner: every child of a batch runs in the SAME
+	// directory, and a manual sub-task of the same requirement runs there
+	// too — so the two dispatch paths must exclude each other, not just
+	// themselves. It is taken LAST (project → runSem → worktree) on both
+	// paths, so they cannot deadlock.
+	wtLimiter    *service.WorktreeLimiter
+	// lease elects the single backend instance allowed to dispatch. Nil
+	// means "always dispatch" (single-instance deployments, tests).
+	lease LeaseChecker
+	// leaseLost tracks whether the last lease check said "stand by", so
+	// the transition is logged once instead of on every tick.
+	leaseLost    bool
 	wizardH      SubTaskExecutor
 	tickInterval time.Duration
 
@@ -166,7 +179,15 @@ func NewOrchestrationQueue(
 	if limiter == nil {
 		limiter = service.NewProjectLimiter(service.DefaultSubTaskProjectConcurrency)
 	}
-	staleAfter := 2 * time.Minute
+	// The heartbeat cutoff. It must stay comfortably above the 5s heartbeat
+	// interval: a heartbeat delayed by a slow DB write would otherwise look
+	// stale and the row would be re-dispatched — a second claude process for
+	// one row, i.e. two agents in one worktree.
+	//
+	// It was raised from 2 to 5 minutes because the heartbeat writes go
+	// through the same DB the run itself uses, and a busy database (a large
+	// review, a concurrent migration) can delay them past two minutes.
+	staleAfter := 5 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("NOVA_ORCH_STALE_AFTER")); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil && d >= 30*time.Second {
 			staleAfter = d
@@ -183,6 +204,7 @@ func NewOrchestrationQueue(
 		reqSvc:       reqSvc,
 		settingSvc:   settingSvc,
 		limiter:      limiter,
+		wtLimiter:    service.NewWorktreeLimiter(),
 		wizardH:      wizardH,
 		tickInterval: interval,
 		stopCh:       make(chan struct{}),
@@ -295,6 +317,58 @@ func (q *OrchestrationQueue) Recover() error {
 	return nil
 }
 
+// SetWorktreeLimiter injects the SHARED per-working-directory gate.
+//
+// It must be the same instance the SubTaskRunner uses: an orchestrated child
+// and a manual sub-task of the same requirement both write into that
+// requirement's worktree, so the two dispatch paths have to exclude each
+// other — not just themselves.
+//
+// Passing nil restores the queue's private gate (tests / single-path use).
+func (q *OrchestrationQueue) SetWorktreeLimiter(l *service.WorktreeLimiter) {
+	if l == nil {
+		l = service.NewWorktreeLimiter()
+	}
+	q.wtLimiter = l
+}
+
+// SetInstanceLease injects the single-instance lease checker.
+//
+// The queue consults it before every dispatch: with two backends on one
+// database, both would otherwise claim the same orchestration batch and
+// spawn two claude processes for one sub-task.
+//
+// Passing nil disables the check (tests / single-instance deployments).
+func (q *OrchestrationQueue) SetInstanceLease(lease LeaseChecker) {
+	q.lease = lease
+}
+
+// holdsDispatchLease is the fail-safe wrapper around the lease check.
+//
+// No lease wired → dispatch (single-instance deployments and tests keep
+// working). The lease says no → don't dispatch, and say so in the log once
+// per transition so the operator can see WHY nothing is happening. The lease
+// cannot be read → dispatch (a stopped scheduler is worse than a duplicated
+// one).
+func (q *OrchestrationQueue) holdsDispatchLease() bool {
+	if q.lease == nil {
+		return true
+	}
+	ok, err := q.lease.HoldsLease()
+	if err != nil {
+		log.Printf("[orch] dispatch lease check failed: %v — dispatching anyway", err)
+		return true
+	}
+	if !ok && !q.leaseLost {
+		log.Printf("[orch] another backend instance holds the dispatch lease — this instance stands by")
+		q.leaseLost = true
+	} else if ok && q.leaseLost {
+		log.Printf("[orch] dispatch lease acquired — this instance dispatches again")
+		q.leaseLost = false
+	}
+	return ok
+}
+
 // Start launches the polling goroutine. Recover must run first so the first
 // tick doesn't observe pre-recovery state. Subsequent calls are no-ops
 // (sync.Once).
@@ -366,6 +440,18 @@ func (q *OrchestrationQueue) loop() {
 // ever invoked from the loop above, so this is defensive documentation
 // (matches scheduler.tick()).
 func (q *OrchestrationQueue) tick() {
+	// SINGLE-INSTANCE GUARD. Two backends pointed at the same database each
+	// run their own tick, so the same batch would be dispatched twice — two
+	// claude processes for one sub-task, both editing the same worktree.
+	// The lease in backend_instances elects exactly one dispatcher.
+	//
+	// The check is skipped when no lease service is wired (tests) and the
+	// failure mode is fail-safe in the OTHER direction too: if the lease
+	// cannot be read we DISPATCH (a stopped scheduler is worse than a
+	// duplicated one, and the log line makes the situation visible).
+	if !q.holdsDispatchLease() {
+		return
+	}
 	// Sweep for pending rows that no dispatcher owns BEFORE looking at the
 	// batches. This is not batch-scoped, so it must not live inside the
 	// batch loop below.
@@ -461,12 +547,36 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 		return
 	}
 
-	// (2) Promote the next pending row. The slot is held across this DB write
+	// (2) The per-working-directory gate. Every child of a batch runs in the
+	// SAME directory (batch.WorkDir), so two of them running at once would
+	// edit the same files — which is what made the model re-verify and
+	// re-state its conclusion over and over.
+	//
+	// The gate is taken HERE, before the row is claimed, so a busy directory
+	// defers the claim to the next tick and the row stays 'pending' (the UI
+	// shows "排队中") instead of being flipped to 'running' with nothing
+	// executing. The gate is released by the spawned goroutine when the child
+	// finishes.
+	//
+	// Gate ORDER (project → runSem → worktree) matches the manual runner's
+	// order exactly, so the two dispatch paths can never deadlock.
+	wtKey := batch.WorkDir
+	if wtKey != "" && q.wtLimiter != nil && !q.wtLimiter.TryAcquire(wtKey) {
+		log.Printf("[orch] tick %s: working directory %s is busy, deferring next claim",
+			batch.ID, wtKey)
+		q.releaseSlot(projectID)
+		return
+	}
+
+	// (3) Promote the next pending row. The slot is held across this DB write
 	// so a parallel queue instance (or this queue's own earlier goroutine
 	// that's still draining) can't race past us.
 	st, ok, err := q.subTaskSvc.ClaimNextPending(batch.ID)
 	if err != nil {
 		log.Printf("[orch] claim %s: %v", batch.ID, err)
+		if wtKey != "" && q.wtLimiter != nil {
+			q.wtLimiter.Release(wtKey)
+		}
 		q.releaseSlot(projectID)
 		return
 	}
@@ -475,6 +585,9 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 		go func(b *model.OrchestrationBatch, s *model.SubTask) {
 			defer q.running.Done()
 			defer q.releaseSlot(projectID)
+			if wtKey != "" && q.wtLimiter != nil {
+				defer q.wtLimiter.Release(wtKey)
+			}
 			q.wizardH.ExecuteOrchestratedChild(b, s)
 		}(batch, st)
 		return
@@ -482,6 +595,9 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 	// No row to claim — release the slot we grabbed above so the next
 	// tick can try again. (Common when another tick already flipped the
 	// row between our admission check and our SELECT.)
+	if wtKey != "" && q.wtLimiter != nil {
+		q.wtLimiter.Release(wtKey)
+	}
 	q.releaseSlot(projectID)
 
 	// No pending row claimed — every child has hit a terminal status. Before

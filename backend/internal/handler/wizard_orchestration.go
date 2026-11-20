@@ -222,7 +222,12 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if out.finalResult != "" {
-			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+			if !out.resultRepeatsLastMessage {
+				// The CLI's "result" event repeats the assistant's final
+				// text, which was already streamed as "message" lines.
+				// Emitting it again showed the same conclusion twice.
+				job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+			}
 		}
 
 		// Same parse chain as the auto path. NOTE: unlike tryAutoOrchestrate
@@ -1493,7 +1498,12 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		artifactBody = "❌ Claude 未返回结果，请重试"
 	}
 	if status != model.SubTaskStatusError {
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		// "✅ 子任务完成！" only on the success path — see the matching note
 		// in SubTaskRunner.finishSubTask.
 		job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
@@ -1806,7 +1816,12 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	if perr := h.reqSvc.Touch(batch.RequirementID); perr != nil {
 		log.Printf("[orchestrate] touch parent %s: %v", batch.RequirementID, perr)
 	}
-	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	if !out.resultRepeatsLastMessage {
+		// The CLI's "result" event repeats the assistant's final
+		// text, which was already streamed as "message" lines.
+		// Emitting it again showed the same conclusion twice.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
 	job.Finish(0, store.JobDone)
 

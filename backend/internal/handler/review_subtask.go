@@ -80,11 +80,17 @@ type RequirementReviewHandler struct {
 	gitCredSvc  *service.GitCredentialService
 	runner      *SubTaskRunner
 	jobs        *store.JobStore
+	// settingSvc reads the fix sub-tasks' session mode
+	// (subtask.fix_session_mode). Nil keeps the default (a curated
+	// parent-context block instead of forking the developer's session).
+	settingSvc *service.SettingService
 }
 
 // NewRequirementReviewHandler wires the handler. main.go passes the same
 // service instances the wizard / review handlers already use, so there is
 // exactly one SubTaskRunner and one JobStore in the process.
+//
+// settingSvc may be nil — the fix session mode then stays at its default.
 func NewRequirementReviewHandler(
 	reqSvc *service.RequirementService,
 	projectSvc *service.ProjectService,
@@ -96,6 +102,7 @@ func NewRequirementReviewHandler(
 	gitCredSvc *service.GitCredentialService,
 	runner *SubTaskRunner,
 	jobs *store.JobStore,
+	settingSvc *service.SettingService,
 ) *RequirementReviewHandler {
 	return &RequirementReviewHandler{
 		reqSvc:      reqSvc,
@@ -108,6 +115,7 @@ func NewRequirementReviewHandler(
 		gitCredSvc:  gitCredSvc,
 		runner:      runner,
 		jobs:        jobs,
+		settingSvc:  settingSvc,
 	}
 }
 
@@ -480,10 +488,32 @@ func (h *RequirementReviewHandler) createFixTasks(
 	if h.runner == nil {
 		return nil, fmt.Errorf("子任务执行器未初始化")
 	}
-	// The fixer inherits the DEVELOPER's session, not the reviewer's: it
-	// needs to know how the code was written in order to fix it, while the
-	// reviewer's opinion would only add noise.
+	// The fixer's context comes from the DEVELOPER's session, not the
+	// reviewer's: it needs to know how the code was written in order to fix
+	// it, while the reviewer's opinion would only add noise.
 	sourceSID := subTaskSourceSID(req, "")
+	// How that context reaches the fixer.
+	//
+	// "with_context" (default): a NEW claude session that receives a
+	// curated context block — requirement + design docs + the parent's
+	// recent turns + the sibling fix tasks' digests, capped at 32 KB.
+	//
+	// "fork" (the historical behaviour): --resume the developer's session,
+	// inheriting its FULL conversation. The recorded incident showed why
+	// that is the wrong default: the developer session carried 95 KB of
+	// prompt and 197 tool calls, and the fixer restated the same conclusion
+	// over and over because it kept re-reading (and re-auditing) that
+	// history. The setting keeps the old behaviour available as an escape
+	// hatch for the rare fixer that genuinely needs the full transcript.
+	fixSessionMode := service.SubTaskFixSessionModeWithContext
+	if h.settingSvc != nil {
+		if mode, err := h.settingSvc.SubTaskFixSessionMode(); err == nil {
+			fixSessionMode = mode
+		} else {
+			log.Printf("[review-fix] read fix session mode: %v (keeping %s)", err, fixSessionMode)
+		}
+	}
+	useFork := fixSessionMode == service.SubTaskFixSessionModeFork
 	// The fix runs on the model the Review ran on, so the two halves of the
 	// loop speak the same dialect. The "默认模型" sentinel means "no specific
 	// model" and must never reach the CLI — fall back to the runner's own
@@ -504,6 +534,11 @@ func (h *RequirementReviewHandler) createFixTasks(
 			Line:            it.finding.Line,
 			Ref:             it.ref,
 			RequirementTitle: req.Title,
+			// The parent review's own report tells the fixer what was
+			// ALREADY found, so it does not re-derive it. Without this the
+			// fixer re-reads the whole code base to rediscover a finding
+			// the report already states.
+			PreviousFindings: summarizeFindings(rv.FindingsJSON),
 		})
 		title := fixTaskTitle(it.finding, it.ref)
 		// The fix must edit the SAME tree the next round will read, or the
@@ -525,8 +560,25 @@ func (h *RequirementReviewHandler) createFixTasks(
 		// and the manual path only runs on an explicit user action, so such a
 		// row would sit at "排队中" forever. Creating the job here is what
 		// makes the row dispatchable.
+		//
+		// The row's session_mode records which strategy produced it, so the
+		// audit trail says "this fixer ran with a curated context" (or "it
+		// forked the developer session") without having to infer it.
+		rowSessionMode := model.SubTaskSessionModeWithContext
+		if useFork {
+			rowSessionMode = model.SubTaskSessionModeFork
+		}
+		// sourceSID is empty for the with_context mode: there is no session
+		// to resume — the context arrives through the prompt instead. The
+		// runner clears it again on the fresh-session path, but keeping the
+		// row honest from the start avoids a window where the row claims a
+		// source it never resumed.
+		rowSourceSID := sourceSID
+		if !useFork {
+			rowSourceSID = ""
+		}
 		st, job, newSID, cerr := h.runner.NewPendingSubTask(req.ID, title, fixPrompt, rv.Model,
-			sourceSID, fixAgentServerID, model.SubTaskSessionModeFork, parentID, model.SubTaskReportModeAuto)
+			rowSourceSID, fixAgentServerID, rowSessionMode, parentID, model.SubTaskReportModeAuto)
 		if cerr != nil {
 			return created, fmt.Errorf("为 %s 建修复子任务失败: %w", it.ref, cerr)
 		}
@@ -540,12 +592,72 @@ func (h *RequirementReviewHandler) createFixTasks(
 		// instead of spawning a claude process each.
 		//
 		// fork=true → --resume <sourceSID> --fork-session: the fixer starts
-		// from the developer's conversation, not a blank slate.
+		// from the developer's conversation.
+		// freshSession=true → a new session with the curated parent-context
+		// block (requirement + design docs + recent parent turns + sibling
+		// digests), which is the default: it carries the same essential
+		// information in a fraction of the tokens.
+		//
+		// fork stays TRUE in both cases (it selects the "## 子任务" prompt
+		// header and the sub-task's execution shape); freshSession is what
+		// decides the SESSION strategy. Passing fork=false would flip the
+		// header to "## 继续执行", which is wrong for a fix task.
 		go h.runner.RunFix(req, st, job, newSID, sourceSID, fixPrompt, modelOverride, "",
-			false /*adjust*/, true /*fork*/, false /*freshSession*/, false /*bare*/, "", model.SubTaskReportModeAuto,
+			false /*adjust*/, true /*fork*/, !useFork /*freshSession*/, false /*bare*/, "", model.SubTaskReportModeAuto,
 			onChildFinished)
 	}
 	return created, nil
+}
+
+// summarizeFindings renders the parent review's finding list as a short
+// Markdown block for the fix prompt.
+//
+// Why: the fixer is handed ONE finding, but the review found several. Without
+// the list, the fixer has no idea whether the other findings are already
+// handled — so it re-investigates them (or worse, "fixes" them again), which
+// is wasted work and another source of the repeated conclusions.
+//
+// The block is capped so a review with 30 findings cannot blow up the
+// prompt; only the first few are listed.
+func summarizeFindings(findingsJSON string) string {
+	findingsJSON = strings.TrimSpace(findingsJSON)
+	if findingsJSON == "" {
+		return ""
+	}
+	var findings []struct {
+		Ref      string `json:"ref"`
+		Severity string `json:"severity"`
+		Title    string `json:"title"`
+		File     string `json:"file"`
+	}
+	if err := json.Unmarshal([]byte(findingsJSON), &findings); err != nil {
+		return ""
+	}
+	if len(findings) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, f := range findings {
+		if i >= 10 {
+			b.WriteString("- …（其余发现见 Review 报告）\n")
+			break
+		}
+		ref := strings.TrimSpace(f.Ref)
+		if ref == "" {
+			ref = "?"
+		}
+		title := strings.TrimSpace(f.Title)
+		if title == "" {
+			title = "(未命名)"
+		}
+		loc := strings.TrimSpace(f.File)
+		if loc != "" {
+			b.WriteString("- " + ref + " " + title + "（" + loc + "）\n")
+		} else {
+			b.WriteString("- " + ref + " " + title + "\n")
+		}
+	}
+	return b.String()
 }
 
 // RecheckReq is the body of POST /api/requirements/{id}/reviews/{rid}/recheck.

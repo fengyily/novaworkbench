@@ -693,7 +693,12 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 		// Job done — frontend reads `result` for the AI message and the
 		// `done` log line for the terminal marker (same protocol
 		// AdjustCoding's apply path uses for its done event).
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		doneData, _ := json.Marshal(map[string]interface{}{
 			"type":            "done",
 			"history":         updatedHistory,
