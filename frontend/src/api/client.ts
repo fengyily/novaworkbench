@@ -206,7 +206,13 @@ export interface Project {
   last_synced_at?: string;
   last_synced_commit?: string;
   sync_status?: 'idle' | 'ok' | 'error';
-  // Stored counters (set at project creation; not maintained in real time).
+  // Requirement / issue / idea counts, derived server-side from the
+  // requirements table and bucketed by kind: 'requirement' → requirement_count,
+  // 'issue' → issue_count, 'idea' → idea_count. An empty kind (legacy row)
+  // counts as 'requirement'; the 'wiki' kind counts in none of the three;
+  // status is not filtered, so archived requirements still count. The old
+  // implementation read three never-written denormalized columns on projects,
+  // so they always rendered 0.
   requirement_count?: number;
   issue_count?: number;
   idea_count?: number;
