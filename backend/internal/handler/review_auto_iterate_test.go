@@ -217,7 +217,7 @@ func newAutoIterateFixture(t *testing.T) *autoIterateFixture {
 	return &autoIterateFixture{
 		t:          t,
 		db:         d,
-		h:          NewRequirementReviewHandler(reqSvc, projectSvc, subTaskSvc, reviewSvc, nil, roleSvc, nil, nil, runner, jobs),
+		h:          NewRequirementReviewHandler(reqSvc, projectSvc, subTaskSvc, reviewSvc, nil, roleSvc, nil, nil, runner, jobs, nil),
 		subTaskSvc: subTaskSvc,
 		reviewSvc:  reviewSvc,
 		reqSvc:     reqSvc,

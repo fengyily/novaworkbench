@@ -975,6 +975,16 @@ func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
 	// truncating its session jsonl tail and surfacing as "system exits for no
 	// reason" once we count those orphaned writes against the parent's RSS.
 	cmd.WaitDelay = 5 * time.Second
+	// Put the child in its OWN process group (Setpgid), so the whole tree —
+	// claude plus every tool subprocess it spawns — can be signalled as a
+	// unit. Without this, a stopped / abandoned run leaves the tool
+	// subprocesses (bash, git, node) running, still writing into the
+	// requirement's worktree.
+	//
+	// It also makes the child a GROUP LEADER, so its pgid == its pid: the
+	// runner can persist that single number and a restarted backend can
+	// find and kill the orphan (see service.SubTaskService.ReapOrphanChildren).
+	SetProcGroup(cmd)
 	return cmd
 }
 

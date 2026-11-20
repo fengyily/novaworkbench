@@ -601,6 +601,21 @@ export interface SubTask {
   artifact: string;
   model: string;
   /**
+   * OS pid of the claude child this row currently owns (0 = nothing running).
+   *
+   * Shown on the sub-task card so the user can answer "is there really a
+   * second agent running?" without leaving the UI — the reported symptom was
+   * an agent that kept answering while the card already said "error".
+   */
+  child_pid?: number;
+  /**
+   * The directory this row's claude child writes into.
+   *
+   * Two sub-tasks showing the SAME work_dir are two agents editing the same
+   * files; the card renders it so that is visible at a glance.
+   */
+  work_dir?: string;
+  /**
    * Reasoning-effort tier (claude CLI --effort) this child actually ran at.
    * Empty on legacy rows written before the column existed. Audit trail
    * only — the tier a NEW run uses comes from the composer's picker (or

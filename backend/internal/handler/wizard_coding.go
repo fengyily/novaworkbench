@@ -1655,7 +1655,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Finish(1, store.JobError)
 			return
 		}
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
 		if p.RequirementID != "" {
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
@@ -1729,7 +1734,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Finish(1, store.JobError)
 		return
 	}
-	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	if !out.resultRepeatsLastMessage {
+		// The CLI's "result" event repeats the assistant's final
+		// text, which was already streamed as "message" lines.
+		// Emitting it again showed the same conclusion twice.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	}
 	// Close the knowledge loop: mark which read entries the run actually used.
 	if len(kbReadTitles) > 0 {
 		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
@@ -2239,7 +2249,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// job_done: keep status="done" (no UpdateStatus call) and do NOT update
 		// coding_session_id (no UpdateCodingSession call) — every later adjust
 		// round resumes the SAME original coding session.
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 追加调整完成！"})
 		// Record the effective developer model for this adjust round (success
 		// path only — "most recent successful run" semantics).
@@ -2287,7 +2302,12 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 		job.Finish(1, store.JobError)
 		return
 	}
-	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	if !out.resultRepeatsLastMessage {
+		// The CLI's "result" event repeats the assistant's final
+		// text, which was already streamed as "message" lines.
+		// Emitting it again showed the same conclusion twice.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	}
 	job.Append(store.LogLine{Type: "done", Content: doneMsg})
 	if reqID != "" {
 		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
@@ -2584,7 +2604,12 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// job_done: keep status="developing" (no UpdateStatus call) and do NOT
 		// update coding_session_id (no UpdateCodingSession call) — every continue
 		// round resumes the SAME original coding session.
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 继续开发完成！"})
 		// Record the effective developer model for this continue round (success
 		// path only — "most recent successful run" semantics).

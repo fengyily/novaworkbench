@@ -738,6 +738,26 @@
   word-break: break-word;
 }
 
+/* Where this agent writes + which claude session it owns. Answers "is a
+   second agent running in the same directory?" without leaving the card. */
+.sub-card-runtime {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.sub-card-runtime-item {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 .sub-card-body {
   padding: 14px 16px;
   display: flex;

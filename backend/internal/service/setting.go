@@ -40,6 +40,27 @@ const (
 	settingSubTaskConcurrency = "subtask.concurrency"
 	settingSubTaskAutoRetry   = "subtask.auto_retry"
 	settingSubTaskRetryMax    = "subtask.retry_max"
+	// settingSubTaskFixSessionMode selects how a Review's fix sub-tasks
+	// obtain their context:
+	//
+	//   - "with_context" (default): a NEW claude session that receives a
+	//     curated context block (requirement + design docs + the parent's
+	//     recent turns + sibling digests, capped at 32 KB).
+	//   - "fork": the historical behaviour — --resume the developer's
+	//     session, inheriting its FULL conversation.
+	//
+	// Why the default changed: forking the developer session handed the
+	// fixer 95 KB of prompt and 197 tool calls, and the resulting context
+	// pollution is what made the model restate the same conclusion over and
+	// over. "fork" stays available as the escape hatch for the (rare) case
+	// where a fixer genuinely needs the developer's full history.
+	settingSubTaskFixSessionMode = "subtask.fix_session_mode"
+)
+
+// Session modes for subtask.fix_session_mode.
+const (
+	SubTaskFixSessionModeWithContext = "with_context"
+	SubTaskFixSessionModeFork        = "fork"
 )
 
 // Defaults applied when the keys are absent (fresh DB) or unparsable. They
@@ -235,6 +256,39 @@ func (s *SettingService) SetSubTaskConfig(concurrency int, autoRetry bool, retry
 		return err
 	}
 	return s.Set(settingSubTaskRetryMax, strconv.Itoa(retryMax))
+}
+
+// SubTaskFixSessionMode reads the session mode a Review's fix sub-tasks use.
+//
+// Missing or malformed values fall back to "with_context" (the safe default:
+// a curated ≤32 KB context instead of the developer's full conversation).
+// A DB error IS returned — the caller keeps its last known value.
+func (s *SettingService) SubTaskFixSessionMode() (string, error) {
+	raw, err := s.Get(settingSubTaskFixSessionMode)
+	if err != nil {
+		return SubTaskFixSessionModeWithContext, err
+	}
+	switch strings.TrimSpace(raw) {
+	case SubTaskFixSessionModeFork:
+		return SubTaskFixSessionModeFork, nil
+	case SubTaskFixSessionModeWithContext:
+		return SubTaskFixSessionModeWithContext, nil
+	default:
+		return SubTaskFixSessionModeWithContext, nil
+	}
+}
+
+// SetSubTaskFixSessionMode persists the fix sub-tasks' session mode.
+// An unknown value is normalized to the default so a typo can never leave
+// the dispatch path without a valid mode.
+func (s *SettingService) SetSubTaskFixSessionMode(mode string) error {
+	switch strings.TrimSpace(mode) {
+	case SubTaskFixSessionModeFork:
+		mode = SubTaskFixSessionModeFork
+	default:
+		mode = SubTaskFixSessionModeWithContext
+	}
+	return s.Set(settingSubTaskFixSessionMode, mode)
 }
 
 // Setting keys for the reasoning-effort policy (claude CLI --effort). Read

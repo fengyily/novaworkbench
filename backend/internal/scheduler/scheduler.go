@@ -168,6 +168,24 @@ type Scheduler struct {
 	doneCh      chan struct{}
 	wg          sync.WaitGroup
 	once        sync.Once
+	// lease elects the single backend instance allowed to dispatch. Nil
+	// means "always dispatch" (single-instance deployments, tests).
+	lease LeaseChecker
+}
+
+// LeaseChecker reports whether THIS process may dispatch scheduled work.
+//
+// It is satisfied by service.BackendInstanceService.HoldsLease.
+type LeaseChecker interface {
+	HoldsLease() (bool, error)
+}
+
+// SetLease injects the single-instance lease checker.
+//
+// With two backends on one database each ran its own tick, so the same
+// scheduled task fired twice. The lease elects one dispatcher.
+func (s *Scheduler) SetLease(lease LeaseChecker) {
+	s.lease = lease
 }
 
 // New builds a Scheduler. The interval / concurrency / maxLateness defaults
@@ -265,6 +283,21 @@ func (s *Scheduler) loop() {
 // concurrently (only ever invoked from the loop above, so this is just
 // defensive documentation).
 func (s *Scheduler) tick() {
+	// SINGLE-INSTANCE GUARD. Two backends pointed at the same database each
+	// run their own tick, so the same scheduled task fired twice — two claude
+	// processes for one task. The lease in backend_instances elects exactly
+	// one dispatcher.
+	//
+	// A lease read failure does NOT block dispatch: a stopped scheduler is
+	// strictly worse than a duplicated one, and the failure is logged.
+	if s.lease != nil {
+		if ok, err := s.lease.HoldsLease(); err != nil {
+			log.Printf("[scheduler] dispatch lease check failed: %v — dispatching anyway", err)
+		} else if !ok {
+			return
+		}
+	}
+
 	// now MUST be UTC wall-clock: the write path (service.ScheduledTaskService
 	// Create) normalizes run_at to UTC before INSERT, and SQLite/Postgres both
 	// compare TIMESTAMP columns as wall-clock text. Using local time here made

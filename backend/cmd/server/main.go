@@ -171,6 +171,26 @@ func main() {
 		log.Println("[main] architect role prompt 已升级到「模板驱动」版本")
 	}
 
+	// SINGLE-INSTANCE REGISTRATION.
+	//
+	// Two backends pointed at the same database each ran their own scheduler
+	// tick and their own in-memory JobStore, so the same orchestration batch
+	// was dispatched twice (two claude processes for one sub-task) and a Stop
+	// request could not reach the process owned by the other instance.
+	//
+	// The registration + heartbeat elects ONE dispatcher; the others stand by.
+	// The lease is fail-safe in the "keep working" direction: a lease read
+	// failure dispatches anyway (a stopped scheduler is worse than a
+	// duplicated one).
+	instanceSvc := service.NewBackendInstanceService(database)
+	instanceID, err := instanceSvc.StartHeartbeat("")
+	if err != nil {
+		log.Printf("[main] backend instance registration failed: %v (dispatch lease disabled)", err)
+	} else {
+		log.Printf("[main] backend instance registered: id=%s", instanceID)
+		defer instanceSvc.Stop()
+	}
+
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
 	// running/pending rows orphaned (eternal spinner in the UI). Recover them
 	// to error so the user re-dispatches via 重新拆分.
@@ -178,6 +198,24 @@ func main() {
 		log.Printf("[main] sub-task orphan recovery: %v", err)
 	} else if n > 0 {
 		log.Printf("[main] 回收了 %d 个因服务重启而中断的子任务", n)
+	}
+
+	// Kill the claude processes that outlived the PREVIOUS backend.
+	//
+	// A claude child runs in its own process group, so it does NOT die with
+	// a backend that was SIGKILLed — it is re-parented to launchd and keeps
+	// editing the requirement's worktree for minutes after the UI already
+	// showed the sub-task as "error". The user then saw an agent "repeatedly
+	// answering" because two processes (the orphan + a freshly dispatched
+	// one) were writing to the same tree.
+	//
+	// The child's pid was persisted per row (sub_tasks.child_pid), so the
+	// new instance can find it. The kill is identity-checked (the command
+	// line must still look like our claude CLI) because pids get recycled.
+	if n, err := subTaskSvc.ReapOrphanChildren(); err != nil {
+		log.Printf("[main] orphan agent reaper: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] 回收了 %d 个遗留的 Agent 进程", n)
 	}
 
 
@@ -341,7 +379,15 @@ func main() {
 	log.Printf("[startup] sub-task policy: per-project concurrency=%d auto-retry=%v retry-max=%d (process ceiling=%d)",
 		subTaskConc, subTaskAutoRetry, subTaskRetryMax, subTaskConcurrency)
 	projectLimiter := service.NewProjectLimiter(subTaskConc)
+	// Per-WORKING-DIRECTORY gate, shared by both dispatch paths (the manual
+	// runner and the orchestration queue). Two sub-tasks of the same
+	// requirement share one worktree, so with the project cap above 1 they
+	// used to run concurrently and both edit the same files — each child's
+	// probe result was then invalidated by the sibling's edit, which is what
+	// made the model re-verify and re-state its conclusion over and over.
+	worktreeLimiter := service.NewWorktreeLimiter()
 	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, reqSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency, subTaskGlobalSem, projectLimiter, settingSvc)
+	subTaskRunner.SetWorktreeLimiter(worktreeLimiter)
 	batchSvc := service.NewOrchestrationBatchService(database)
 	if n, err := batchSvc.Recover(); err != nil {
 		log.Printf("[main] orchestration batch recovery: %v", err)
@@ -373,6 +419,8 @@ func main() {
 	schedExec := handler.NewScheduledExecutor(wizardH, schedSvc)
 	schedH := handler.NewScheduleHandler(schedSvc, reqSvc)
 	schedulerRunner := scheduler.New(database, schedExec)
+	// Only the instance holding the dispatch lease runs the tick loops.
+	schedulerRunner.SetLease(instanceSvc)
 	if _, err := schedulerRunner.Recover(); err != nil {
 		log.Printf("[main] scheduler recovery: %v", err)
 	}
@@ -391,6 +439,11 @@ func main() {
 	// children are known not to contend for the same worktree. The process-wide
 	// ceiling (subTaskGlobalSem) still bounds the total across projects.
 	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, reqSvc, wizardH, projectLimiter, settingSvc, subTaskGlobalSem, 10*time.Second)
+	// The SAME worktree gate the manual runner uses — the two paths must
+	// exclude each other, not just themselves.
+	orchQueue.SetWorktreeLimiter(worktreeLimiter)
+	// Only the instance holding the dispatch lease dispatches batches.
+	orchQueue.SetInstanceLease(instanceSvc)
 	if err := orchQueue.Recover(); err != nil {
 		log.Printf("[main] orchestration queue recover: %v", err)
 	}
@@ -515,7 +568,7 @@ func main() {
 	// subTaskRunner，报告面复用同一张 code_reviews 表。
 	reqReviewH := handler.NewRequirementReviewHandler(
 		reqSvc, projectSvc, subTaskSvc, codeReviewSvc, codeReviewRevisionSvc,
-		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs,
+		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs, settingSvc,
 	)
 	// 需求级 Review 的「自动迭代」链的兜底巡检：链的正常驱动是事件钩子
 	//（本轮结束 → 建修复子任务 → 修复完成 → 发起下一轮），但后端重启会
@@ -1229,6 +1282,15 @@ func main() {
 		// any in-flight dispatcher finishes writing its job_log before we
 		// tear everything down. Stop() waits up to 2s for the loop to exit.
 		schedulerRunner.Stop()
+		// Signal the claude children this backend spawned, so they exit with
+		// their session jsonl intact instead of being re-parented to launchd
+		// and continuing to edit the requirement's worktree after the
+		// backend is gone. The pid is persisted per sub-task row, so even a
+		// child that outlives this process is found by the next boot's
+		// orphan reaper.
+		if n := sharedJobs.CancelAll(); n > 0 {
+			log.Printf("[shutdown] signalled %d running agent process(es)", n)
+		}
 	}()
 
 	log.Printf("Server listening on http://localhost:%s", port)

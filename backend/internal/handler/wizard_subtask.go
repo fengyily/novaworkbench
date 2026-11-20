@@ -366,10 +366,46 @@ func (h *WizardHandler) runSubTask(
 		reportMode = model.SubTaskReportModeAuto
 	}
 	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare, parentSourceSID, reportMode)
-	// (The agent-server routing branch previously inlined here moved to
-	// SubTaskRunner.Run so that every sub-task path — manual children,
-	// orchestrated children, and push/PR sub-tasks — shares the same
 	// req.AgentServerID plumbing.)
+}
+
+// runSubTaskContinue is runSubTask's 「继续执行」 twin: it resumes the
+// PREVIOUS attempt's session but writes this turn into a FRESH session file.
+//
+// It exists as a separate entry point (rather than another positional flag on
+// runSubTask) because the session strategy is a THREE-way choice now —
+// in-place resume, fork-from-parent, fork-from-previous-attempt — and
+// threading a fourth boolean through a 14-argument call site is how the
+// "which session did this run use?" question gets lost.
+func (h *WizardHandler) runSubTaskContinue(
+	req *model.Requirement,
+	st *model.SubTask,
+	job *store.Job,
+	newSID string,
+	sourceSID string,
+	body string,
+	modelOverride string,
+	configIDOverride string,
+	parentSourceSID string,
+	reportMode string,
+) {
+	if h.subTaskRunner == nil {
+		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
+		job.Append(store.LogLine{Type: "error", Content: "❌ 子任务执行器未初始化"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	// Same source/reportMode normalization as runSubTask (see its comments).
+	if st.Source == "" {
+		st.Source = model.SubTaskSourceManual
+	}
+	if reportMode == "" {
+		reportMode = st.ReportMode
+	}
+	if reportMode == "" {
+		reportMode = model.SubTaskReportModeAuto
+	}
+	h.subTaskRunner.RunContinue(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, parentSourceSID, reportMode)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -829,11 +865,25 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
-// Mirrors the wording ContinueCoding (wizard_coding.go) ships to the main
-// coding agent so the sub-task variant stays consistent — the child is asked
-// to first survey the workspace, identify what the previous run left done vs.
-// pending, then resume from the partial state and summarize in Chinese.
-const continueSubTaskPrompt = "继续完成之前的子任务。请先检查当前代码与工作区状态，判断哪些部分已完成、哪些未完成或需要修复；然后基于子任务的原始 prompt 继续完成剩余工作、补齐缺失内容。最后用中文总结本次完成的内容。"
+//
+// Why it is worded the way it is: the OLD wording ("请先检查当前代码与工作区
+// 状态，判断哪些部分已完成、哪些未完成或需要修复；然后基于子任务的原始 prompt
+// 继续完成剩余工作") made the model AUDIT its own previous work before acting.
+// The audit is what produced the reported symptom — the child re-derived the
+// same conclusion over and over (14 of 19 assistant blocks in the recorded
+// session carried the same sentence), because each new turn re-checked
+// whether the work was done instead of simply continuing.
+//
+// The new wording forbids the audit and the repetition outright, and asks for
+// the GAPS rather than a status report. It also keeps the "finish with a
+// Chinese summary" instruction so the artifact still reads like the other
+// sub-task reports.
+const continueSubTaskPrompt = "继续完成之前的子任务。\n\n" +
+	"要求：\n" +
+	"1. 不要复述、不要重新审计、也不要重新总结已经得出的结论——直接动手做还没做完的事。\n" +
+	"2. 只针对上一轮尚未完成的部分继续实现；已经完成的部分保持原样，不要重写。\n" +
+	"3. 如果确认所有内容都已完成，直接给出结论与验证方式，不要重述历史过程。\n" +
+	"4. 最后用中文简要说明本次实际新增或修改的内容。"
 
 // ContinueSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/continue.
 //
@@ -919,7 +969,6 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	// session_id across ContinueReset, but reading it up front keeps the
 	// "what does --resume point at" question answered by the same snapshot the
 	// status guard above was checked against.
-	parentSessionID := parent.SessionID
 	sourceSID := parent.SessionID
 
 	// Re-arm the SAME row. ContinueReset's guard is
@@ -942,7 +991,23 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	if perr := h.subTaskSvc.UpdateJobID(sid, job.ID); perr != nil {
 		log.Printf("[sub-task continue] failed to persist job_id for %s: %v", sid, perr)
 	}
-	if perr := h.subTaskSvc.UpdateSession(sid, parentSessionID, sourceSID); perr != nil {
+	// The NEW session id for this attempt. The previous attempt's session is
+	// RESUMED (so the model inherits its conversation) but this turn is
+	// written into a file of its own.
+	//
+	// Why not resume in place: the previous attempt's jsonl may still be
+	// held open by an ORPHANED claude process — a backend that was SIGKILLed
+	// leaves the child running, and it keeps appending to that file. A second
+	// process appending to the same file interleaves two transcripts, and the
+	// model then re-derives the same conclusion over and over. Forking keeps
+	// the inheritance and removes the shared writer.
+	newSID := util.NewUUID()
+	// Only the session id moves. source_session_id keeps pointing at the
+	// row's real origin (the requirement's coding session, or the parent
+	// sub-task's session for an adjustment child) — the old code overwrote
+	// it with the row's OWN session id, so the row claimed to be its own
+	// parent and the audit chain was unreadable.
+	if perr := h.subTaskSvc.UpdateSessionID(sid, newSID); perr != nil {
 		log.Printf("[sub-task continue] failed to persist session for %s: %v", sid, perr)
 	}
 	// Resuming is still implementation work → 「开发实现」 stage. With no
@@ -954,11 +1019,11 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 		"reused_session": "false",
 	})
 
-	// Continue reuses the row's own session id; --resume <parentSessionID>
-	// picks up the same JSONL the previous attempt appended to. Run() with
-	// fork=false picks the "## 继续执行" prompt header so the contextualization
-	// stays consistent with the wizard's coding ContinueCoding path.
-	go h.runSubTask(req, st, job, parentSessionID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID, "")
+	// RunContinue resumes the previous attempt's session but forks into the
+	// NEW session id, so this turn lands in its own jsonl. The prompt header
+	// stays "## 继续执行" so the contextualization matches the wizard's
+	// coding ContinueCoding path.
+	go h.runSubTaskContinue(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", parent.SourceSessionID, "")
 }
 
 // Reason lines written into the artifact when a Stop lands on a row whose
