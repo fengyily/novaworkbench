@@ -131,10 +131,12 @@ func BuildParentContextBlock(parent *model.Requirement, attachManifest string) s
 // the input half so the architect reads the parent's content and the obligation
 // to distill it as one instruction.
 //
-// The four level-3 subsections are fixed rather than free-form because the
+// The five level-3 subsections are fixed rather than free-form because the
 // content is consumed by machines-ish readers downstream: 开发阶段 reuses
-// 「继承的约束与决策」 and 「相关附件」 verbatim, and a stable heading lets
-// refine / apply prompts point at it by name.
+// 「继承的约束与决策」 and 「相关附件」 verbatim, a stable heading lets
+// refine / apply prompts point at it by name, and 「与主需求的偏差」 is parsed
+// out of the stored plan at persist time to seed the master requirement's
+// findings queue (see prompt.ExtractSectionBullets).
 const parentContextContract = "## 输出要求：必须写出「主需求关联上下文」章节\n\n" +
 	"本需求是上述主需求的子需求。请把**与本子需求实现相关**的主需求内容提炼进你自己的技术方案。" +
 	"方案中必须包含一个**二级标题**，标题文字是「主需求关联上下文」（可以**在前面加序号**，" +
@@ -142,7 +144,7 @@ const parentContextContract = "## 输出要求：必须写出「主需求关联�
 	ParentContextHeading + "\n\n" +
 	"该章节必须**自包含**：后续开发者只会读本子需求的方案，不会打开主需求，" +
 	"所以凡是实现本子需求时必须遵守的主需求信息，都要写进这一节。\n\n" +
-	"章节正文固定包含以下四个三级小节：\n\n" +
+	"章节正文固定包含以下五个三级小节：\n\n" +
 	"### 来源\n" +
 	"主需求的标题与 ID。\n\n" +
 	"### 继承的约束与决策\n" +
@@ -153,6 +155,11 @@ const parentContextContract = "## 输出要求：必须写出「主需求关联�
 	"明确哪些内容由本子需求负责实现，哪些由主需求本体或其他子需求负责，避免重复实现或越界修改。\n\n" +
 	"### 相关附件\n" +
 	"列出与本子需求相关的主需求附件（文件名 + 用途 + 完整路径），开发阶段仍可直接 Read；无相关附件则写「无」。\n\n" +
+	"### 与主需求的偏差\n" +
+	"本方案与主需求方案的**不一致之处**：主需求里写的做法与本子需求实际需要冲突的地方、" +
+	"本子需求必须偏离主需求约定的地方、以及本子需求发现主需求方案遗漏或错误的地方。\n" +
+	"- 每条写明：主需求原文的说法 / 本子需求的实际做法 / 采用哪一边及理由；\n" +
+	"- 没有偏差就写「无」。\n\n" +
 	"额外规则：\n" +
 	"- 该章节请放在方案靠前位置，**紧随「需求理解」之后**，避免被大段正文挤到末尾；\n" +
 	"- 若主需求内容与本子需求确实完全无关，本节正文只写「本子需求与主需求内容无直接关联，无需继承」，**严禁编造关联**；\n" +

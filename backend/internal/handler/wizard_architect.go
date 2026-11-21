@@ -1707,6 +1707,28 @@ func (h *WizardHandler) finalizeArchitectRun(
 	}
 	_ = h.reqSvc.UpdateDesignJob(id, "")
 
+	// Stamp which version of the MASTER plan this child was designed against,
+	// so the children endpoint can tell the user when the master plan has
+	// moved on since (it changes as implementation findings are absorbed).
+	//
+	// Best-effort: a failure here only costs the staleness signal, never the
+	// design itself.
+	if p.Parent != nil {
+		if herr := h.reqSvc.UpdateParentDesignHash(id, util.SHA256Hex(p.Parent.DesignDocs)); herr != nil {
+			log.Printf("[architect-design] failed to stamp parent_design_hash for %s: %v", id, herr)
+		}
+	}
+
+	// Harvest the 「与主需求的偏差」 section the architect was asked to write
+	// and file it as a finding against the master. This is the child → master
+	// channel that did not exist before: a child that discovers the master
+	// plan conflicts with reality now has a way to say so, and the master has
+	// a queue to review it in.
+	//
+	// Best-effort by design — a findings failure must never fail a design
+	// run that already produced a good plan.
+	jobLogFindings(job, h.recordDesignFindings(id, p.Parent, planMarkdown))
+
 	// Auto-promote designing → designed on the success path. The wizard
 	// pipeline's gate for 「开始开发」 is `status=='designed'`, and the manual
 	// HTTP path (POST /api/wizard/requirements/{id}/architect-design) used to

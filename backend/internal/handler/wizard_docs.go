@@ -430,6 +430,12 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if req.DocType == "design" {
 		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
 		prompt += referencedContextKeepRule(requirement.DesignDocs)
+		// Master requirement: fold the accepted-but-unabsorbed findings into
+		// the plan. This is the "确认后收纳" step — a human accepted the
+		// children's discoveries, and the master plan has to reflect them.
+		// Empty when there is nothing outstanding, so the common case is
+		// byte-identical to before.
+		prompt += h.findingsAbsorbBlock(requirement)
 	}
 
 	skillText := req.UserMessage
@@ -824,6 +830,10 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		// that the design run had appended.
 		prompt += parentContextKeepRule(requirement, requirement.DesignDocs)
 		prompt += referencedContextKeepRule(requirement.DesignDocs)
+		// Same absorb checklist as the refine path — the master plan must end
+		// up carrying the confirmed children's discoveries whichever route
+		// produced the final version.
+		prompt += h.findingsAbsorbBlock(requirement)
 	}
 
 	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
@@ -985,6 +995,11 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 			_, saveErr = h.reqSvc.UpdateWikiDoc(reqID, persistVal)
 		} else {
 			_, saveErr = h.reqSvc.UpdateDesign(reqID, persistVal)
+			if saveErr == nil {
+				// The master plan just changed — mark the accepted findings
+				// as absorbed so the queue reflects reality.
+				h.absorbFindingsAfterPlanWrite(requirement)
+			}
 		}
 		if saveErr != nil {
 			log.Printf("[apply-doc] save failed: %v", saveErr)

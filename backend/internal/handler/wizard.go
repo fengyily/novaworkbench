@@ -121,6 +121,13 @@ type WizardHandler struct {
 	// working (a deployment that doesn't need regenerating can leave it
 	// nil without affecting any first-run path).
 	designRevSvc *service.DesignRevisionService
+	// findingSvc handles the requirement_findings table — the structured
+	// channel that carries what a child requirement discovered back to its
+	// master. Wired after construction from main.go via SetRequirementFindingSvc
+	// (same constructor-cycle pattern as the design-revision service). nil
+	// disables the findings producer and the review endpoints; every other
+	// wizard feature keeps working.
+	findingSvc *service.RequirementFindingService
 	// qaSvc handles the requirement_qa_turns table — the 阶段答疑 (stage Q&A)
 	// threads hanging off a requirement's design / coding session. Wired
 	// after construction from main.go via SetRequirementQASvc (same pattern
@@ -248,6 +255,14 @@ func (h *WizardHandler) dirsManifestFor(reqID string) string {
 // the new handler registers.
 func (h *WizardHandler) SetDesignRevisionSvc(svc *service.DesignRevisionService) {
 	h.designRevSvc = svc
+}
+
+// SetRequirementFindingSvc injects the RequirementFindingService used by the
+// 「实施发现」 endpoints and by the design-stage findings producer. Called
+// from main.go AFTER NewWizardHandler (constructor cycle, same as the
+// design-revision service above).
+func (h *WizardHandler) SetRequirementFindingSvc(svc *service.RequirementFindingService) {
+	h.findingSvc = svc
 }
 
 // SetRequirementQASvc injects the RequirementQAService used by the 阶段答疑

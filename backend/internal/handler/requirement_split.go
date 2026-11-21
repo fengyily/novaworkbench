@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -895,10 +896,58 @@ func (h *WizardHandler) ListChildren(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 		return
 	}
+	// Staleness: a child whose recorded parent-plan hash no longer matches the
+	// master's live plan was designed against an older master plan. The master
+	// plan changes as implementation findings are absorbed into it, so this is
+	// the signal that the child's context may be out of date.
+	stale := h.staleChildIDs(reqID, children)
+	for _, c := range children {
+		c.Stale = stale[c.ID]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"children":     children,
-		"dependencies": deps,
+		"children":       children,
+		"dependencies":   deps,
+		"stale_child_ids": staleChildIDList(stale),
 	})
+}
+
+// staleChildIDs marks the children whose recorded parent-plan hash no longer
+// matches the master's live plan hash.
+//
+// A child with an EMPTY hash is never stale: it was never designed against a
+// parent (or the parent had no plan yet) and "unknown" must not be reported
+// as "out of date".
+func (h *WizardHandler) staleChildIDs(parentID string, children []*model.Requirement) map[string]bool {
+	out := map[string]bool{}
+	if len(children) == 0 {
+		return out
+	}
+	parent, err := h.reqSvc.Get(parentID)
+	if err != nil || parent == nil {
+		return out
+	}
+	live := util.SHA256Hex(parent.DesignDocs)
+	for _, c := range children {
+		if c == nil || c.ParentDesignHash == "" {
+			continue
+		}
+		if c.ParentDesignHash != live {
+			out[c.ID] = true
+		}
+	}
+	return out
+}
+
+// staleChildIDList renders the stale set as a stable, sorted id list.
+func staleChildIDList(stale map[string]bool) []string {
+	out := make([]string, 0, len(stale))
+	for id, isStale := range stale {
+		if isStale {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // listSplitDependencies collects every dependency edge touching this
