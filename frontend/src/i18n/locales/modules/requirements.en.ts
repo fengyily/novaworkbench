@@ -989,6 +989,7 @@ export const requirements = {
     noteLabel: 'Reference reason',
     originDirect: 'Direct',
     originParent: 'Inherited from parent',
+    originReverse: 'Referenced by the other side',
     limitReached: 'At most {{n}} requirements can be referenced',
     moreResults: '{{n}} more — keep typing',
     count: '{{n}}/{{max}} referenced',
@@ -1086,6 +1087,31 @@ export const requirements = {
   // Execution-order dependencies. NOT the same as references: a dependency is
   // a gate (the backend refuses to start coding), a reference only shares
   // context.
+  // Implementation findings — discoveries the child requirements made while
+  // they were being designed or implemented, waiting for a review.
+  findings: {
+    title: 'Implementation findings',
+    pendingTitle: 'Pending review',
+    acceptedTitle: 'Accepted',
+    rejectedTitle: 'Rejected',
+    pendingCount: '{{n}} pending',
+    accept: 'Accept',
+    reject: 'Reject',
+    fromChild: 'From child requirement',
+    empty: 'No implementation findings yet — changes the child requirements report while designing or developing show up here.',
+    loading: 'Loading…',
+    absorbHint: 'Accepted findings are written into the master plan on the next 「优化方案」 (refine) run.',
+    staleBadge: '⚠ Master plan updated',
+    staleHint: 'The master plan this child was designed against has changed since — its context may be out of date.',
+    errLoad: 'Failed to load implementation findings: {{msg}}',
+    errUpdate: 'Failed to update implementation finding: {{msg}}',
+    severity: {
+      info: 'New fact',
+      conflict: 'Conflict',
+      deviation: 'Deviation',
+      blocker: 'Blocker',
+    },
+  },
   dependency: {
     title: 'Prerequisites',
     postTitle: 'Dependent tasks',
