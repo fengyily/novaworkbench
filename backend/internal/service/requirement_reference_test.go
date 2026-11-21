@@ -380,3 +380,69 @@ func TestResolveReferenceContent_ToleratesMalformedColumn(t *testing.T) {
 		t.Fatalf("got %d references, want 0", len(items))
 	}
 }
+
+// References are semantically undirected (「互相参考」) but only the out-edges
+// are stored — the "to" side of a pair could never see the "from" side's
+// plan. In a split batch that left the last child of a chain with an EMPTY
+// referenced context. The read path now closes that gap.
+func TestResolveReferences_IncludesReverseEdges(t *testing.T) {
+	svc := newRefSvc(t)
+	seedRefProject(t, svc, "proj_a", "A")
+	seedRefReq(t, svc, "req_from", "proj_a", "引用方", "描述", "# 引用方方案", "", "[]")
+	seedRefReq(t, svc, "req_to", "proj_a", "被引用方", "描述", "# 被引用方方案", "", "[]")
+
+	if _, err := svc.SetReferences("req_from", []model.RequirementReferenceInput{
+		{RequirementID: "req_to", Note: "两者必须保持一致"},
+	}); err != nil {
+		t.Fatalf("SetReferences: %v", err)
+	}
+
+	// The "to" side must now see the "from" side.
+	items, err := svc.ResolveReferenceContent("req_to")
+	if err != nil {
+		t.Fatalf("ResolveReferenceContent: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("reverse references = %d, want 1", len(items))
+	}
+	if items[0].RequirementID != "req_from" {
+		t.Fatalf("reverse reference points at %q, want req_from", items[0].RequirementID)
+	}
+	if items[0].Origin != model.ReferenceOriginReverse {
+		t.Fatalf("origin = %q, want %q", items[0].Origin, model.ReferenceOriginReverse)
+	}
+	if items[0].DesignDocs != "# 引用方方案" {
+		t.Fatalf("design docs = %q, want the referring side's plan", items[0].DesignDocs)
+	}
+}
+
+// The reverse pass must not invent a self-reference or resurrect the master
+// requirement (whose content is already carried by the parent-context block).
+func TestResolveReferences_ReverseExcludesSelfAndMaster(t *testing.T) {
+	svc := newRefSvc(t)
+	seedRefProject(t, svc, "proj_a", "A")
+	seedRefReq(t, svc, "req_master", "proj_a", "主需求", "描述", "# 主方案", "", "[]")
+	seedRefReq(t, svc, "req_child", "proj_a", "子需求", "描述", "", "req_master", "[]")
+
+	// The master references the child (a backwards edge that should not
+	// exist in practice, but the resolver must not surface it as the
+	// child's own reference).
+	if _, err := svc.SetReferences("req_master", []model.RequirementReferenceInput{
+		{RequirementID: "req_child", Note: "x"},
+	}); err != nil {
+		t.Fatalf("SetReferences: %v", err)
+	}
+
+	items, err := svc.ResolveReferenceContent("req_child")
+	if err != nil {
+		t.Fatalf("ResolveReferenceContent: %v", err)
+	}
+	for _, it := range items {
+		if it.RequirementID == "req_master" {
+			t.Fatalf("the master must never appear in the child's own reference set")
+		}
+		if it.RequirementID == "req_child" {
+			t.Fatalf("a requirement must never reference itself")
+		}
+	}
+}

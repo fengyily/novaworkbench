@@ -90,10 +90,16 @@ type ConfirmSplitReq struct {
 	// Tasks — 用户确认（可能编辑过）的候选子需求。depends_on 里存的是**批次
 	// 内序号**（1 起算），不是数据库 id。
 	Tasks []model.SplitTaskInput `json:"tasks"`
-	// References — 用户勾选的「互相参考」子需求对，元素是 [引用方序号,
-	// 被引用方序号]（均 1 起算）。依赖（闸门）与引用（上下文参考）是两件事：
-	// 引用只影响方案提示词，不阻塞任何流程。
-	References [][2]int `json:"references"`
+	// References — 用户勾选的「互相参考」子需求对。元素是 [引用方序号,
+	// 被引用方序号]（均 1 起算）或 {"from":1,"to":2,"reason":"…"}。
+	// 依赖（闸门）与引用（上下文参考）是两件事：引用只影响方案提示词，
+	// 不阻塞任何流程。
+	//
+	// 元素用 model.SplitReferencePair 而不是 [][2]int，是为了让**模型给出的
+	// 判断依据（reason）**能一路带到落库 —— 拆分契约明确要求 reason 必填，
+	// 「写『无理由』『相关』这种废话等于没判断」，但旧形状把它丢在了 HTTP
+	// 边界上。
+	References []model.SplitReferencePair `json:"references"`
 	// SourceBranch — 用户选的**来源分支**：主需求自己的开发分支
 	// （feat/req_<master>）由它 checkout 出来，拆分时还会被推送到远端。
 	// 留空则沿用主需求当前的基线。
@@ -798,15 +804,19 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 // A pair whose ends don't survive the remap (pointing at a candidate that
 // isn't there) is dropped — a reference to a nonexistent sibling would make
 // SetReferences fail for the WHOLE batch.
-func remapSplitReferences(refs [][2]int, remap map[int]int) [][2]int {
-	out := make([][2]int, 0, len(refs))
+//
+// The model's reason travels with the pair: it is the architect's own
+// judgment about why these two children must stay consistent, and dropping it
+// here would throw away the one thing the split contract insists on.
+func remapSplitReferences(refs []model.SplitReferencePair, remap map[int]int) []model.SplitReferencePair {
+	out := make([]model.SplitReferencePair, 0, len(refs))
 	for _, pair := range refs {
-		from, okFrom := remap[pair[0]]
-		to, okTo := remap[pair[1]]
+		from, okFrom := remap[pair.From]
+		to, okTo := remap[pair.To]
 		if !okFrom || !okTo || from == to {
 			continue
 		}
-		out = append(out, [2]int{from, to})
+		out = append(out, model.SplitReferencePair{From: from, To: to, Reason: pair.Reason})
 	}
 	return out
 }
@@ -816,7 +826,21 @@ func remapSplitReferences(refs [][2]int, remap map[int]int) [][2]int {
 // SetReferences REPLACES the requirement's direct reference set, so each
 // child must be written exactly once with its full list of siblings —
 // calling it repeatedly would overwrite the previous call's links.
-func (h *WizardHandler) applySplitReferences(children []*model.Requirement, refs [][2]int) error {
+//
+// Two behaviours worth spelling out:
+//
+//  1. **Both directions are written.** A "互相参考" pair is undirected, but
+//     only the out-edge was stored, so the requirement on the "to" side could
+//     never see the "from" side's plan during design. Writing both sides
+//     makes the pair visible from either end.
+//
+//  2. **The model's reason survives.** It used to be replaced by a fixed
+//     string, which both erased the architect's judgment and showed the user
+//     a meaningless note in the confirmation UI. Each side gets the same
+//     reason prefixed with the OTHER child's ordinal, because the note is
+//     injected into the prompt as 「- 引用原因：」 — the prefix tells the
+//     model who is asking for the consistency.
+func (h *WizardHandler) applySplitReferences(children []*model.Requirement, refs []model.SplitReferencePair) error {
 	// ordinal (1-based, into the ordered children) → child row
 	byOrdinal := map[int]*model.Requirement{}
 	for i, c := range children {
@@ -825,14 +849,22 @@ func (h *WizardHandler) applySplitReferences(children []*model.Requirement, refs
 	// child id → the siblings it should reference
 	links := map[string][]model.RequirementReferenceInput{}
 	for _, pair := range refs {
-		from, okFrom := byOrdinal[pair[0]]
-		to, okTo := byOrdinal[pair[1]]
+		from, okFrom := byOrdinal[pair.From]
+		to, okTo := byOrdinal[pair.To]
 		if !okFrom || !okTo || from.ID == to.ID {
 			continue
 		}
+		reason := strings.TrimSpace(pair.Reason)
+		if reason == "" {
+			reason = "同批次拆分，互相关联"
+		}
 		links[from.ID] = append(links[from.ID], model.RequirementReferenceInput{
 			RequirementID: to.ID,
-			Note:          "同批次拆分，互相关联",
+			Note:          fmt.Sprintf("子需求%d：%s", pair.To, reason),
+		})
+		links[to.ID] = append(links[to.ID], model.RequirementReferenceInput{
+			RequirementID: from.ID,
+			Note:          fmt.Sprintf("子需求%d：%s", pair.From, reason),
 		})
 	}
 	for childID, inputs := range links {

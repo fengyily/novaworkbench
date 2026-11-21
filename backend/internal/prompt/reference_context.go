@@ -167,12 +167,16 @@ func renderReferenceEntry(idx int, ref model.RequirementReferenceContent) string
 	return b.String()
 }
 
-// referenceOriginLabel renders the origin marker. Two values: the user
-// picked this requirement directly, or it was inherited from the master
-// requirement.
+// referenceOriginLabel renders the origin marker. Three values: the user
+// picked this requirement directly, it was inherited from the master
+// requirement, or the other requirement picked THIS one (a reverse edge —
+// references are undirected, so both sides must be able to see each other).
 func referenceOriginLabel(origin string) string {
-	if origin == model.ReferenceOriginParent {
+	switch origin {
+	case model.ReferenceOriginParent:
 		return "继承自主需求"
+	case model.ReferenceOriginReverse:
+		return "被对方引用"
 	}
 	return "本需求直接引用"
 }

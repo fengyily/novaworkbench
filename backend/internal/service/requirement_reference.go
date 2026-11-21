@@ -30,8 +30,12 @@ import (
 // 引用集合的边界。条数上限与选择器 UI 一致；引用原因的长度上限按 rune
 // 截断（按字节会劈开中文字符产生乱码）。
 const (
-	maxReferenceCount     = 8
-	maxReferenceNoteRunes = 120
+	maxReferenceCount = 8
+	// maxReferenceNoteRunes matches the rune cap the split contract applies to
+	// the model's reason (prompt.SplitJSONContract → truncateRunes(…, 200)).
+	// A shorter cap would silently truncate the architect's own reasoning —
+	// the one thing the contract says must not be thrown away.
+	maxReferenceNoteRunes = 200
 )
 
 // 引用写入的校验错误（由 handler 原样透出给前端）。
@@ -194,11 +198,6 @@ func (s *RequirementService) resolveReferences(id string) ([]resolvedReference, 
 		return nil, ErrRequirementNotFound
 	}
 
-	type refEntry struct {
-		id     string
-		note   string
-		origin string
-	}
 	var direct []refEntry
 	for _, r := range decodeReferenceColumn(self.referenced) {
 		direct = append(direct, refEntry{id: r.RequirementID, note: r.Note, origin: model.ReferenceOriginDirect})
@@ -221,6 +220,17 @@ func (s *RequirementService) resolveReferences(id string) ([]resolvedReference, 
 				inherited = append(inherited, refEntry{id: r.RequirementID, note: r.Note, origin: model.ReferenceOriginParent})
 			}
 		}
+	}
+
+	// Reverse edges. References are semantically UNDIRECTED (「互相参考」) but
+	// the storage only keeps out-edges, so the "to" side of a pair could never
+	// see the "from" side's plan. This pass closes that gap and also repairs
+	// every batch that was split before the write path became symmetric.
+	reverse, rerr := s.reverseReferences(self.id, self.projectID)
+	if rerr != nil {
+		log.Printf("[requirement-references] reverse lookup failed for %s: %v — continuing without reverse references", self.id, rerr)
+	} else {
+		inherited = append(inherited, reverse...)
 	}
 
 	// Merge + filter. Direct first so it wins a collision.
@@ -290,6 +300,63 @@ func (s *RequirementService) resolveReferences(id string) ([]resolvedReference, 
 		r.Note = e.note
 		r.Origin = e.origin
 		out = append(out, r)
+	}
+	return out, nil
+}
+
+// refEntry is one resolved reference before its body is hydrated.
+type refEntry struct {
+	id     string
+	note   string
+	origin string
+}
+
+// reverseReferences finds the requirements whose stored reference set points
+// AT this requirement.
+//
+// Why: references are semantically undirected (「互相参考」), but only the
+// out-edges are stored. Without this pass the "to" side of a pair could never
+// see the "from" side's plan — in a split batch that left the last child of a
+// chain with an EMPTY referenced context.
+//
+// The lookup is a LIKE scan over an unindexed TEXT column, so it is scoped to
+// the same project and every candidate's JSON is parsed to confirm an exact id
+// match. The LIKE alone is never trusted: ids are fixed-length, but the column
+// also carries free-text notes that could contain the same substring.
+//
+// Errors degrade rather than fail the design run.
+func (s *RequirementService) reverseReferences(selfID, projectID string) ([]refEntry, error) {
+	if strings.TrimSpace(selfID) == "" {
+		return nil, nil
+	}
+	pattern := `%"` + selfID + `"%`
+	rows, err := s.db.Query(
+		"SELECT id, referenced_requirements FROM requirements WHERE project_id = ? AND referenced_requirements LIKE ?",
+		projectID, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []refEntry
+	for rows.Next() {
+		var id, blob string
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, err
+		}
+		if id == selfID {
+			continue
+		}
+		for _, r := range decodeReferenceColumn(blob) {
+			if r.RequirementID != selfID {
+				continue
+			}
+			out = append(out, refEntry{id: id, note: r.Note, origin: model.ReferenceOriginReverse})
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
