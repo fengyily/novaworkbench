@@ -1661,7 +1661,18 @@ func (h *WizardHandler) finalizeArchitectRun(
 	//
 	// Only runs that actually had a parent block reach this path; a top-level
 	// requirement's plan is untouched (ParentBlock == "").
-	if p.ParentBlock != "" && !promptpkg.HasParentContextSection(planMarkdown) {
+	//
+	// Two details matter here:
+	//
+	//  1. The check is "did the MODEL write the section", not "does the
+	//     document contain the section". The machine appendix satisfies the
+	//     latter, so using it would let an old appendix suppress its own
+	//     replacement.
+	//  2. Any stale appendix is stripped first. Without the strip, a re-run
+	//     over a plan that already carries an appendix would append a SECOND
+	//     one — the accumulation the prompt package warns about.
+	planMarkdown = promptpkg.StripContextAppendixParent(planMarkdown)
+	if p.ParentBlock != "" && !promptpkg.HasAuthoredParentContextSection(planMarkdown) {
 		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「主需求关联上下文」章节，已自动追加附录（主需求：" + parentTitle(p.Parent) + "）"})
 		if fallback := promptpkg.BuildParentContextFallback(p.Parent); fallback != "" {
 			planMarkdown = planMarkdown + "\n\n" + fallback
@@ -1677,7 +1688,8 @@ func (h *WizardHandler) finalizeArchitectRun(
 	//
 	// Deliberately not a re-run: a second claude invocation to "fix" the
 	// omission would double the token cost of a run that mostly succeeded.
-	if p.ReferencedBlock != "" && !promptpkg.HasReferencedContextSection(planMarkdown) {
+	planMarkdown = promptpkg.StripContextAppendixReferenced(planMarkdown)
+	if p.ReferencedBlock != "" && !promptpkg.HasAuthoredReferencedContextSection(planMarkdown) {
 		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「关联需求上下文」章节，已自动追加附录（" + strconv.Itoa(len(p.ReferencedRefs)) + " 个关联需求）"})
 		if fallback := promptpkg.BuildReferencedContextFallback(p.ReferencedRefs); fallback != "" {
 			planMarkdown = planMarkdown + "\n\n" + fallback

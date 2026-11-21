@@ -24,16 +24,21 @@ import (
 	"strings"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/util"
 )
 
+// ParentContextTitle is the BARE section name the architect must emit in a
+// sub-requirement's plan (no "##" prefix). Matching goes through
+// MatchContextHeading, which tolerates an ordinal prefix ("## 2. 主需求关联上下文")
+// and trailing punctuation.
+const ParentContextTitle = "主需求关联上下文"
+
 // ParentContextHeading is the exact level-2 section title the architect must
-// emit in a sub-requirement's plan. Handlers must compare against this rather
-// than re-spelling the literal, so the contract and the verifier can never
-// drift apart. The match is deliberately prefix-based (see
-// matchesParentContextHeading) so the fallback appendix's
-// 「（自动附录）」 suffix counts too — otherwise a re-run would append a second
-// appendix to an already-augmented plan.
-const ParentContextHeading = "## 主需求关联上下文"
+// emit in a sub-requirement's plan, quoted verbatim inside the output
+// contract. Handlers must compare against ParentContextTitle via
+// MatchContextHeading rather than re-spelling the literal, so the contract and
+// the verifier can never drift apart.
+const ParentContextHeading = "## " + ParentContextTitle
 
 // parentContextFallbackHeading is what BuildParentContextFallback emits. Kept
 // as a level-2 heading (so it satisfies HasParentContextSection and therefore
@@ -132,7 +137,8 @@ func BuildParentContextBlock(parent *model.Requirement, attachManifest string) s
 // refine / apply prompts point at it by name.
 const parentContextContract = "## 输出要求：必须写出「主需求关联上下文」章节\n\n" +
 	"本需求是上述主需求的子需求。请把**与本子需求实现相关**的主需求内容提炼进你自己的技术方案。" +
-	"方案中必须**逐字**包含下面这个二级标题（标题本身不得改写，也不得降级成三级标题）：\n\n" +
+	"方案中必须包含一个**二级标题**，标题文字是「主需求关联上下文」（可以**在前面加序号**，" +
+	"例如 `## 2. 主需求关联上下文`，但**不要改写这几个字**，也**不要降级成三级标题**）。标准写法：\n\n" +
 	ParentContextHeading + "\n\n" +
 	"该章节必须**自包含**：后续开发者只会读本子需求的方案，不会打开主需求，" +
 	"所以凡是实现本子需求时必须遵守的主需求信息，都要写进这一节。\n\n" +
@@ -153,48 +159,34 @@ const parentContextContract = "## 输出要求：必须写出「主需求关联�
 	"- 图示沿用下方既有的「输出图示（Mermaid）」要求，不要为本章节新增图示约定。"
 
 // HasParentContextSection reports whether a plan Markdown already carries the
-// parent-context section. Drives the append-fallback decision in
-// finalizeArchitectRun.
+// parent-context section in ANY form — model-authored or machine appendix.
 //
-// Two things this deliberately gets right:
-//   - Fence-aware: a plan that quotes 「## 主需求关联上下文」 inside a ```json
-//     or ```markdown block is documenting the contract, not satisfying it, and
-//     must not suppress the fallback appendix.
-//   - Strictly level 2: 「### 主需求关联上下文」 is a different section and
-//     does not count.
+// It drives the refine/apply keep-rule (a document carrying the appendix must
+// survive a rewrite, or the next round loses the parent context entirely).
 //
-// A false negative only costs a redundant appendix; a false positive would
-// silently drop the parent context. So the match errs toward false.
+// The matching is fence-aware (a plan that quotes the heading inside a
+// ```json block is documenting the contract, not satisfying it) and strictly
+// level 2 (「### 主需求关联上下文」 is a different section).
 func HasParentContextSection(md string) bool {
-	inFence := false
-	for _, raw := range strings.Split(md, "\n") {
-		line := strings.TrimSpace(raw)
-		// Fence toggling is checked on the trimmed line so an indented fence
-		// (legal inside list items) still flips the state.
-		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
-			inFence = !inFence
-			continue
-		}
-		if inFence {
-			continue
-		}
-		if matchesParentContextHeading(line) {
-			return true
-		}
-	}
-	return false
+	return HasContextSection(md, ParentContextTitle)
 }
 
-// matchesParentContextHeading matches a level-2 heading whose text starts with
-// the section name. Prefix (not equality) so 「## 主需求关联上下文（自动附录）」
-// written by BuildParentContextFallback also matches, keeping the section
-// sticky across subsequent refine / apply passes instead of accumulating
-// appendices on every re-run.
-func matchesParentContextHeading(line string) bool {
-	if !strings.HasPrefix(line, "##") || strings.HasPrefix(line, "###") {
-		return false
-	}
-	return strings.HasPrefix(strings.TrimSpace(line[2:]), "主需求关联上下文")
+// HasAuthoredParentContextSection reports whether the MODEL wrote the
+// parent-context section. The machine fallback appendix does not count.
+//
+// This is the predicate that gates the fallback append in
+// finalizeArchitectRun: append the appendix only when the model wrote
+// nothing. It must be paired with StripContextAppendixParent — otherwise a
+// plan that already carries an appendix would collect a second one on every
+// re-run.
+func HasAuthoredParentContextSection(md string) bool {
+	return HasAuthoredContextSection(md, ParentContextTitle)
+}
+
+// StripContextAppendixParent removes the machine-written fallback appendix
+// from a plan, if present.
+func StripContextAppendixParent(md string) string {
+	return StripContextAppendix(md, ParentContextTitle)
 }
 
 // BuildParentContextFallback renders the machine-written appendix appended to a
@@ -257,15 +249,11 @@ func normalizeLegacyDesign(d string) string {
 // truncateRunes cuts s to at most max runes (not bytes) and appends a visible
 // breadcrumb so a reader can tell the plan is partial. Byte-slicing would cut
 // a Chinese character in half and emit invalid UTF-8 into the prompt.
+//
+// The rune-aware implementation lives in internal/util so the handler layer
+// can share it (the sub-task context builder had its own byte-based cut).
 func truncateRunes(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "\n\n> （已截断，完整内容见主需求）"
+	return util.TruncateRunes(s, max, "\n\n> （已截断，完整内容见主需求）")
 }
 
 // rewriteAttachManifestHeading swaps the manifest's 「## 📎 已附加文件」
