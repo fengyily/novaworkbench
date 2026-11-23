@@ -395,11 +395,22 @@ func main() {
 		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
 	}
 	worktreeH := handler.NewWorktreeHandler(projectSvc, gitCredSvc)
+	// 跨项目需求 (cross-project requirement) — a top-level entity that spans
+	// several projects. Its children are ordinary requirements rows, so they
+	// inherit the whole existing pipeline (analyst / architect / coding /
+	// worktree / PR / review) without any of it being re-implemented.
+	crossReqSvc := service.NewCrossRequirementService(database)
 	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc, settingSvc, worktreeH, gitCredSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
+	// The architect stage injects the cross-project overall design into a
+	// requirement that belongs to one. Optional — nil keeps the existing
+	// design prompt byte-identical.
+	wizardH.SetCrossRequirementSvc(crossReqSvc)
+	crossReqH := handler.NewCrossRequirementHandler(crossReqSvc, reqSvc, projectSvc, llmGateway,
+		sharedJobs, roleSvc, claudeCfgSvc, usageSvc, settingSvc)
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
 	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
@@ -926,6 +937,49 @@ func main() {
 	mux.HandleFunc("GET /api/fs/git-branches", fsB(http.HandlerFunc(fsH.GitBranches)).ServeHTTP)
 
 	// Requirements
+	// 跨项目需求 (cross-project requirement) — a top-level entity spanning
+	// several projects / repositories. The children it creates are ordinary
+	// requirements rows (each in its own project), so the whole existing
+	// development pipeline applies to them unchanged.
+	//
+	//   GET    /api/cross-requirements                       → list + live progress
+	//   POST   /api/cross-requirements                       → create
+	//   GET    /api/cross-requirements/{id}                  → detail
+	//   PUT    /api/cross-requirements/{id}                  → update
+	//   DELETE /api/cross-requirements/{id}                  → delete (children detach)
+	//   PUT    /api/cross-requirements/{id}/projects         → participating projects
+	//   POST   /api/cross-requirements/{id}/design           → start the overall-design job
+	//   GET    /api/cross-requirements/{id}/design/{job}/stream → SSE (result.design)
+	//   PUT    /api/cross-requirements/{id}/design           → save a hand-edited design
+	//   POST   /api/cross-requirements/{id}/split            → start the split job
+	//   GET    /api/cross-requirements/{id}/split/state      → the most recent split run
+	//   GET    /api/cross-requirements/{id}/split/{job}/stream → SSE (result.candidates)
+	//   POST   /api/cross-requirements/{id}/split/confirm    → persist the candidates
+	//   POST   /api/cross-requirements/{id}/phases           → create a phase
+	//   PUT    /api/cross-requirements/{id}/phases/{pid}     → update a phase
+	//   DELETE /api/cross-requirements/{id}/phases/{pid}     → delete a phase
+	//   POST   /api/cross-requirements/{id}/phases/{pid}/verify → start the verification job
+	//   GET    /api/cross-requirements/{id}/phases/{pid}/verify/{job}/stream → SSE
+	crossPerm := middleware.RequirePermission(aclSvc, "menu.cross_requirements")
+	mux.HandleFunc("GET /api/cross-requirements", crossPerm(http.HandlerFunc(crossReqH.List)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements", crossPerm(http.HandlerFunc(crossReqH.Create)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}", crossPerm(http.HandlerFunc(crossReqH.Get)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}", crossPerm(http.HandlerFunc(crossReqH.Update)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}", crossPerm(http.HandlerFunc(crossReqH.Delete)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/projects", crossPerm(http.HandlerFunc(crossReqH.SetProjects)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/design", crossPerm(http.HandlerFunc(crossReqH.StartDesign)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/{job_id}/stream", crossPerm(http.HandlerFunc(crossReqH.StreamDesignJob)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/design", crossPerm(http.HandlerFunc(crossReqH.SaveDesign)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/split", crossPerm(http.HandlerFunc(crossReqH.StartSplit)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/split/state", crossPerm(http.HandlerFunc(crossReqH.SplitState)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/split/{job_id}/stream", crossPerm(http.HandlerFunc(crossReqH.StreamSplitJob)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/split/confirm", crossPerm(http.HandlerFunc(crossReqH.ConfirmSplit)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/phases", crossPerm(http.HandlerFunc(crossReqH.CreatePhase)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/phases/{pid}", crossPerm(http.HandlerFunc(crossReqH.UpdatePhase)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}/phases/{pid}", crossPerm(http.HandlerFunc(crossReqH.DeletePhase)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/phases/{pid}/verify", crossPerm(http.HandlerFunc(crossReqH.StartVerify)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/phases/{pid}/verify/{job_id}/stream", crossPerm(http.HandlerFunc(crossReqH.StreamVerifyJob)).ServeHTTP)
+
 	mux.HandleFunc("GET /api/requirements", reqH.List)
 	mux.HandleFunc("POST /api/requirements", reqH.Create)
 	// Calendar slim endpoint. MUST be registered before the {id} literal

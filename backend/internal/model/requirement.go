@@ -78,6 +78,15 @@ type Requirement struct {
 	// ChildCount is a read-only derived count of non-archived children,
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`
+	// CrossRequirementID links this row to the cross-project requirement
+	// (跨项目需求) it belongs to. Empty = an ordinary requirement.
+	//
+	// NOT the same as ParentID: ParentID is a **hierarchy** edge (one level,
+	// same project, master → children), CrossRequirementID is **ownership**
+	// (this row is one of the sub-requirements of a cross-project
+	// requirement, and the children are PEERS — each lives in its own
+	// project, so there is no master row and ParentID stays empty).
+	CrossRequirementID string `json:"cross_requirement_id"`
 	DesignSessionID     string `json:"design_session_id"`
 	// QATurnCount is a read-only derived count of stage-Q&A turns across both
 	// stages (design + coding), populated by List only. Mirrors ChildCount:
@@ -471,6 +480,14 @@ type CreateRequirementReq struct {
 	// SplitBatchID groups the sub-requirements produced by one "方案拆分" run.
 	// Empty = not a split product. Only the split service writes it.
 	SplitBatchID string `json:"split_batch_id"`
+
+	// CrossRequirementID: the cross-project requirement (跨项目需求) this row
+	// belongs to. Empty = an ordinary requirement.
+	//
+	// Set only by the cross-project split service (service/cross_requirement
+	// _split.go) — the ordinary create path leaves it empty, so existing
+	// requirement flows behave byte-for-byte as before.
+	CrossRequirementID string `json:"cross_requirement_id"`
 
 	// DevDelegated = 1 means development was handed down to the children.
 	// The split service sets it on the master only.

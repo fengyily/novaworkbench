@@ -3,6 +3,7 @@ export const nav = {
   dashboard: 'Dashboard',
   projects: 'Projects',
   requirements: 'Requirements',
+  crossRequirements: 'Cross-project',
   schedules: 'Schedules',
   schedulesShort: 'Cron',
   reports: 'Reports',
@@ -18,6 +19,7 @@ export const nav = {
   section: {
     requirementDetail: 'Requirement detail',
     requirements: 'Requirements',
+    crossRequirements: 'Cross-project',
     addProject: 'Add project',
     projectDetail: 'Project detail',
     projects: 'Projects',

@@ -1879,7 +1879,10 @@ func (s *ProjectService) Purge(id string) error {
 
 	// Grandchildren keyed off the project's requirements — delete before the
 	// requirements rows they reference.
-	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns", "requirement_dirs"}
+	// cross_requirement_phase_items references the project's requirements
+	// through requirement_id — a purged project must not leave dangling
+	// phase members behind.
+	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns", "requirement_dirs", "cross_requirement_phase_items"}
 	for _, tbl := range reqScoped {
 		q := `DELETE FROM ` + tbl + ` WHERE requirement_id IN (SELECT id FROM requirements WHERE project_id = ?)`
 		if _, err := tx.Exec(q, id); err != nil {
@@ -1888,7 +1891,11 @@ func (s *ProjectService) Purge(id string) error {
 	}
 
 	// Direct children keyed off project_id.
-	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements"}
+	// cross_requirement_projects maps a cross-project requirement to its
+	// participating projects — a purged project must leave that mapping
+	// behind, otherwise the cross requirement keeps a participant that no
+	// longer exists.
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements", "cross_requirement_projects"}
 	for _, tbl := range projScoped {
 		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
 			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)

@@ -14,6 +14,7 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_menu_chat", Key: "menu.chat", Name: "AI对话", Module: "menu", SortOrder: 4},
 		{ID: "perm_menu_reports", Key: "menu.reports", Name: "周报", Module: "menu", SortOrder: 5},
 		{ID: "perm_menu_settings", Key: "menu.settings", Name: "设置入口", Module: "menu", SortOrder: 6},
+		{ID: "perm_menu_cross_requirements", Key: "menu.cross_requirements", Name: "跨项目需求", Module: "menu", SortOrder: 7},
 
 		{ID: "perm_proj_manage", Key: "project.manage", Name: "项目管理（增删改）", Module: "project", SortOrder: 10},
 
@@ -56,11 +57,15 @@ func DefaultRolePermissions() map[string][]string {
 	return map[string][]string{
 		"developer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.chat", "menu.reports",
-			"menu.settings", "setting.roles_ai", "setting.preflight",
+			"menu.settings", "menu.cross_requirements", "setting.roles_ai", "setting.preflight",
 			"fs.browse",
 		},
+		// The viewer role gets the menu permission too: the cross-requirement
+		// pages are read-only for it (the write actions are not granted), but
+		// the menu visibility is decided by the permission table — without
+		// the key the observer cannot even see the progress.
 		"viewer": {
-			"menu.dashboard", "menu.projects", "menu.knowledge",
+			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.cross_requirements",
 		},
 	}
 }

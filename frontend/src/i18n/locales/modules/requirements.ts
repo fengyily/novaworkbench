@@ -489,6 +489,7 @@ export const requirements = {
     headerBadgeIdea: '想法 — 仅讨论方案，不进入开发',
     headerBadgeIssue: '问题 — 排查根因并修复',
     headerBadgeRequirement: '需求 — 标准 3 阶段实现',
+    crossRequirementBadge: '跨项目需求',
     headerBadgeWiki: '知识库 — 沉淀可复用的 Markdown 文档',
     // Wiki kind detail-page actions + hints.
     tabWikiDoc: '知识库文档',

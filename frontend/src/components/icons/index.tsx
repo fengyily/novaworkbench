@@ -190,6 +190,14 @@ export const IconRequirements = makeRichIcon(() => [
   <path key="c" d="M8.5 10.5h6M8.5 13.5h6M8.5 16.5h4" />,
 ]);
 
+/** Cross-project requirements — three nodes joined by one contract line. */
+export const IconCrossProjects = makeRichIcon(() => [
+  <circle key="a" cx="6" cy="6.5" r="2.5" />,
+  <circle key="b" cx="6" cy="17.5" r="2.5" />,
+  <circle key="c" cx="18" cy="12" r="2.5" />,
+  <path key="d" d="M8.2 8.2 15.8 11M8.2 15.8 15.8 13" />,
+]);
+
 /** Document with strokes / weekly report — was 📝 */
 export const IconReport = makeRichIcon(() => [
   <path key="a" d="M6 3.5h8.5L18 7v12.5A1.5 1.5 0 0 1 16.5 21h-10A1.5 1.5 0 0 1 5 19.5v-14.5A1.5 1.5 0 0 1 6.5 3.5Z" />,
