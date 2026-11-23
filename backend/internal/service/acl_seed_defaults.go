@@ -28,6 +28,7 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_set_preflight", Key: "setting.preflight", Name: "环境依赖", Module: "setting", SortOrder: 27},
 
 		{ID: "perm_action_fs_browse", Key: "fs.browse", Name: "文件系统浏览（项目目录与 ~/workspace）", Module: "action", SortOrder: 30},
+		{ID: "perm_cross_requirement_manage", Key: "cross_requirement.manage", Name: "跨项目需求管理（创建/编辑/拆分/阶段验证）", Module: "action", SortOrder: 31},
 	}
 }
 
@@ -58,12 +59,14 @@ func DefaultRolePermissions() map[string][]string {
 		"developer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.chat", "menu.reports",
 			"menu.settings", "menu.cross_requirements", "setting.roles_ai", "setting.preflight",
-			"fs.browse",
+			"fs.browse", "cross_requirement.manage",
 		},
 		// The viewer role gets the menu permission too: the cross-requirement
-		// pages are read-only for it (the write actions are not granted), but
-		// the menu visibility is decided by the permission table — without
-		// the key the observer cannot even see the progress.
+		// pages are read-only for it, but the menu visibility is decided by the
+		// permission table — without the key the observer cannot even see the
+		// progress. The write key (cross_requirement.manage) is deliberately
+		// NOT granted here: creating / editing / deleting a cross-requirement
+		// and launching the AI jobs (design, split, verify) are guarded by it.
 		"viewer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.cross_requirements",
 		},
