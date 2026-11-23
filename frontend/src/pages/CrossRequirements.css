@@ -468,33 +468,6 @@
   margin-bottom: 8px;
 }
 
-/* ── 作业面板 ─────────────────────────────────────────────────────────── */
-
-.xreq-job {
-  max-height: 320px;
-  overflow-y: auto;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 10px 12px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
-  white-space: pre-wrap;
-}
-
-.xreq-job-line {
-  margin-bottom: 4px;
-}
-
-.xreq-job-error {
-  color: var(--color-error-deep);
-}
-
-.xreq-job-phase {
-  color: var(--color-primary-hover);
-}
-
 /* ── 弹窗 ─────────────────────────────────────────────────────────────── */
 
 .xreq-modal-overlay {

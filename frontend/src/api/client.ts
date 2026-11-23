@@ -4148,6 +4148,19 @@ export interface CrossSplitState {
   finished_at: number;
 }
 
+/** The state of the most recent overall-design run of a cross requirement. */
+export interface CrossDesignState {
+  /** none | running | done | error */
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  design: string;
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
 export const crossRequirementsApi = {
   list: (params?: { status?: string; keyword?: string }) => {
     const q = new URLSearchParams();
@@ -4182,6 +4195,11 @@ export const crossRequirementsApi = {
   // ── overall design ──────────────────────────────────────────────────────
   startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
     api.post<{ job_id: string }>(`/api/cross-requirements/${id}/design`, body ?? {}),
+  // designState — the most recent overall-design run. The job survives the
+  // page being closed (it lives in the server's JobStore), but its id only
+  // exists in the server's in-process registry — this endpoint is the only
+  // way for a reopened page to find it again.
+  designState: (id: string) => api.get<CrossDesignState>(`/api/cross-requirements/${id}/design/state`),
   streamDesignUrl: (id: string, jobId: string) =>
     `/api/cross-requirements/${id}/design/${jobId}/stream`,
   saveDesign: (id: string, designDocs: string) =>
