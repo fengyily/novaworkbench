@@ -287,12 +287,25 @@ async function writeClipboard(text: string): Promise<boolean> {
 // import CodingLines (it lives inside RequirementDetail.tsx as a private
 // component) so this is a stripped-down equivalent that renders the same
 // {type, content} event shape the SSE pipeline emits.
-function SubTaskLogView({ lines }: { lines: LogLine[] }) {
+function SubTaskLogView({
+  lines,
+  visible = true,
+}: {
+  lines: LogLine[];
+  // Whether the host currently presents this log as visible. A
+  // false → true transition re-anchors the view at the bottom: a card
+  // that comes back from display:none has its scrollTop reset to 0 by
+  // the browser while `lines` stayed the same, so the scroll effect
+  // must re-run on the flip. `visible` is a RE-RUN TRIGGER, never a
+  // gate — a false value must not suppress the scroll, otherwise a host
+  // that passes detailMode={false} would silently lose the auto-scroll.
+  visible?: boolean;
+}) {
   const { t } = useTranslation();
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [lines]);
+  }, [lines, visible]);
   if (lines.length === 0) {
     return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
   }
@@ -754,6 +767,18 @@ interface CardProps {
   archiveBusy?: boolean;
   onArchive: () => void;
   onUnarchive: (kbId: string) => void;
+  // ── Controlled display modes ────────────────────────────────────
+  // The card is presented as the RIGHT-HAND DETAIL card of a split
+  // panel: the body is always open, the header's body-expand arrow is
+  // not rendered, and a header click no longer toggles `expanded`
+  // (otherwise the one and only detail in the column could be folded
+  // away). Deliberately distinct from `expanded` (this card's own body
+  // open/close) and from `isCollapsed` (the shared subtree-fold set):
+  // three unrelated fold semantics must not share one vocabulary.
+  detailMode?: boolean;
+  // The card is NOT the selected one: the body is not rendered at all
+  // (no log DOM inside hidden cards), while the header still is.
+  bodyHidden?: boolean;
 }
 
 // useRestartSubTask encapsulates the "原地翻转" semantics shared by the
@@ -902,6 +927,8 @@ function SubTaskCard({
   archiveBusy = false,
   onArchive,
   onUnarchive,
+  detailMode,
+  bodyHidden,
 }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
@@ -919,6 +946,13 @@ function SubTaskCard({
   const [expanded, setExpanded] = useState<boolean>(
     st.status === 'running' || st.status === 'pending',
   );
+  // The body is open when the host presents this card as the detail card
+  // (detailMode) OR when the user expanded it (expanded). bodyHidden wins
+  // over both: an unselected card renders no body DOM at all (no log DOM
+  // inside hidden cards). detailMode deliberately does NOT rewrite the
+  // `expanded` state — the card keeps its own open/close state and simply
+  // overrides it while it sits in the detail slot.
+  const bodyOpen = (detailMode || expanded) && !bodyHidden;
   const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
   const [lines, setLines] = useState<LogLine[]>([]);
   // v0.5.x: 三阶段（理解 / 实施 / 小结）渲染缓冲。SSE phase / phase_section
@@ -1443,8 +1477,10 @@ function SubTaskCard({
       req.target === 'log' ? logAnchorRef.current :
       null;
     // The panel / log may not have mounted yet (collapsed card, drawer
-    // not open, etc.). Bail out without consuming — the next state flip
-    // will re-fire this effect and the target will be in the DOM by then.
+    // not open, body hidden by the host, etc.). Bail out without
+    // consuming — the next state flip will re-fire this effect and the
+    // target will be in the DOM by then. A null element is a normal
+    // outcome here, never an error.
     if (!el) return;
     const reduceMotion =
       typeof window !== 'undefined' &&
@@ -1468,7 +1504,7 @@ function SubTaskCard({
         window.setTimeout(() => ta.focus(), focusDelay);
       }
     }
-  }, [expanded, adjusting, redoing, streaming, st.status]);
+  }, [expanded, adjusting, redoing, streaming, st.status, bodyHidden]);
 
   // Shared renderer for the four action buttons — extracted so the
   // header (compact, always visible) and the body footer (full-size,
@@ -1678,10 +1714,19 @@ function SubTaskCard({
     >
       <header
         className="sub-card-header"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => { if (detailMode) return; setExpanded((v) => !v); }}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          // Detail mode: the body is always open there, so the header
+          // must not fold it away — the column's single detail card
+          // would disappear. Keyboard is disabled together with click
+          // so no hidden fold entry point survives.
+          if (detailMode) return;
+          setExpanded((v) => !v);
+        }}
       >
         {/* Meta line: status chip + source badge + counter + model + time.
             Sits ABOVE the title so a long user-supplied title never
@@ -1842,7 +1887,14 @@ function SubTaskCard({
               The render helper owns click + keydown stopPropagation so the
               buttons don't accidentally toggle expand/collapse. */}
           {renderActionButtons('header')}
-          <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          {/* The body-expand arrow is meaningless in detail mode — the body
+              is always open there, and a second fold affordance would
+              compete with the left tree's expander. Rendered
+              conditionally (not CSS-hidden) so "the header carries no
+              expand arrow" holds at the DOM level. */}
+          {!detailMode && (
+            <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          )}
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
             Wraps freely so long titles stay fully visible. */}
@@ -1872,7 +1924,7 @@ function SubTaskCard({
         />
       </div>
 
-      {expanded && (
+      {bodyOpen && (
         <div className="sub-card-body">
           {/* v0.5.x: 三段（理解 / 实施 / 小结）折叠区，仅手动触发路径
               （phase_emitted=true）渲染。位于 Live log 之上、Artifact 之下。
@@ -1979,7 +2031,7 @@ function SubTaskCard({
               content, instead of going blank the moment it finished. */}
           {showLog && (
             <div ref={logAnchorRef}>
-              <SubTaskLogView lines={lines} />
+              <SubTaskLogView lines={lines} visible={detailMode} />
             </div>
           )}
 
