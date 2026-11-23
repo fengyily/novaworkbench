@@ -2228,7 +2228,7 @@ export interface RunStatus {
   status: 'running' | 'done' | 'error' | 'stopped';
   job_id: string | null;
   exit_code?: number;
-  log: { type: string; content: string }[];
+  log: { type: string; content: string; at?: number; phase?: string }[];
   started_at?: string;
   finished_at?: string;
   compose_file?: string;
@@ -2245,7 +2245,7 @@ export interface RunJob {
   job_id: string;
   status: 'running' | 'done' | 'error';
   exit_code: number;
-  log: { type: string; content: string }[];
+  log: { type: string; content: string; at?: number; phase?: string }[];
   // Effective model the claude CLI ran with (display value, may be the
   // DefaultModelLabel literal). Present for review jobs; empty for wizard jobs that
   // predate the column or were never given one.

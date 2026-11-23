@@ -29,7 +29,7 @@ import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentityS
 import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
@@ -1026,6 +1026,33 @@ function SubTaskCard({
   // showed exactly one line (a bare "exit status 143") and nothing else.
   const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
+  // "This card has already received any SSE frame in this session." Set on
+  // the first line of the SSE onMessage callback (the job_done terminal
+  // frame counts) — it is the first gate keeping "snapshot replay" and
+  // "live output" mutually exclusive.
+  const gotFrameRef = useRef(false);
+  // "This card is on the live path." Flipped the moment the SSE subscription
+  // is established rather than on the first frame: there is a narrow window
+  // (the card flipped from a terminal state back to live — SSE subscribed
+  // but no frame yet) where gotFrameRef is still false and a stale snapshot
+  // landing would be stacked on top of the subsequent SSE replay.
+  const liveRef = useRef(false);
+  // "The job_id this card is currently bound to." The snapshot's .then reads
+  // it to detect "this row was re-dispatched while the request was in
+  // flight" (a redo / continue overwrites job_id in place), so the previous
+  // run's log never lands on the new one.
+  const boundJobIdRef = useRef(st.job_id);
+  useEffect(() => { boundJobIdRef.current = st.job_id; });
+  // "Which job_id we already pulled a snapshot for" — stops the snapshot
+  // effect from re-running into a duplicate request / loop.
+  const hydratedJobRef = useRef('');
+  // Set when the snapshot pull fails (the historical output genuinely does
+  // not exist — e.g. the process was killed mid-run so job_logs was never
+  // written). Renders an explanation instead of a blank panel.
+  const [logUnavailable, setLogUnavailable] = useState(false);
+  // Whether the log area renders: the live path always renders it; the
+  // replay path renders it as soon as it has content.
+  const showLog = streaming || lines.length > 0;
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
   //
@@ -1072,6 +1099,7 @@ function SubTaskCard({
     esRef.current = createEventStream(
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
+        gotFrameRef.current = true;              // any frame counts (incl. job_done)
         if (!evt || typeof evt !== 'object') return;
         const evtType = evt.type as string;
         if (evtType === 'usage') {
@@ -1148,12 +1176,25 @@ function SubTaskCard({
         }));
       },
       () => {
+        // Release the "live path has taken over" flag once the stream
+        // fails, so the snapshot replay can serve as the fallback.
+        //
+        // Why this cannot stack the snapshot on top of the SSE: the
+        // fail() in createEventStream fires only once (the `finished` flag
+        // in api/stream.ts) and the read loop has already exited by then, so
+        // no further frame can arrive and there is no "live output" left to
+        // stack. A stream that did deliver frames is still blocked by
+        // gotFrameRef; the redo / continue race (this row re-dispatched
+        // while the request was in flight) is still blocked by
+        // boundJobIdRef.
+        liveRef.current = false;                 // a failed stream may fall back to the snapshot
         setStreaming(false);
         subTasksApi.get(st.requirement_id, st.id)
           .then((next) => { setArtifact(next.artifact); onChanged(next); })
           .catch(() => {});
       },
     );
+    liveRef.current = true;                    // the live path has taken over
     return () => { esRef.current?.close(); esRef.current = null; };
   // We deliberately use the minimal dep set — parent re-renders shouldn't
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
@@ -1176,6 +1217,66 @@ function SubTaskCard({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.status, st.job_id]);
+
+  // Historical output replay for a finished sub-task.
+  //
+  // Why it exists: the log area used to render only while streaming, so a
+  // card went blank the moment its run ended; and the live SSE history only
+  // lives in the backend's in-memory JobStore (cap 50), so after a page
+  // refresh even "the output at the time" could not be retrieved. The
+  // snapshot endpoint GET /api/wizard/jobs/{id} returns the full log[] on
+  // an in-memory hit and falls back to the job_logs table otherwise (so it
+  // survives a backend restart).
+  //
+  // Three hard constraints:
+  //   1. Mutually exclusive with the SSE — both paths write the same lines
+  //      state, and stacking them means duplicate rows. gotFrameRef (a
+  //      frame arrived) / liveRef (subscribed) / hydratedJobRef (already
+  //      pulled) are each checked once before the request and once again
+  //      inside .then.
+  //   2. The filter matches the live path verbatim — the live callback
+  //      drops the usage / phase / phase_section frames (they feed the
+  //      usage bar and the three-phase panel respectively), and the
+  //      snapshot drops them too. Otherwise the historical view would
+  //      carry noise rows the live view never shows (and the usage JSON
+  //      payload would be rendered as Markdown by .sub-log-md).
+  //   3. No `cancelled` flag — main.tsx wraps the app in StrictMode, and
+  //      React 19 re-runs effects ("mount → cleanup → mount") in dev. A
+  //      cancelled flag would discard the first round's response while
+  //      hydratedJobRef would stop the second round from re-issuing it,
+  //      so the historical output would never load in dev. Validity is
+  //      decided by "only ever grows" refs instead; a setState after
+  //      unmount is a silent no-op in React 18+.
+  useEffect(() => {
+    if (streaming) return;                    // running: the SSE owns the log
+    if (!st.job_id) return;                   // not dispatched yet: no job
+    if (gotFrameRef.current) return;          // already seen live in this session
+    if (liveRef.current) return;              // the live path has taken over
+    if (hydratedJobRef.current === st.job_id) return;  // loop guard
+    hydratedJobRef.current = st.job_id;
+    wizardApi.getJob(st.job_id)
+      .then((job) => {
+        // Second line of defence: while the request was in flight the card
+        // may have flipped back to live (a redo / continue), or this row
+        // may have been re-dispatched onto another job_id.
+        if (gotFrameRef.current) return;
+        if (liveRef.current) return;
+        if (boundJobIdRef.current !== st.job_id) return;
+        const raw = job.log ?? [];
+        // Same as the live path: usage / phase / phase_section never enter lines[]
+        const kept = raw.filter((l) => l.type !== 'usage'
+          && l.type !== 'phase' && l.type !== 'phase_section');
+        setLines(coalesceLogLines(kept));
+        setLogUnavailable(false);
+      })
+      .catch(() => {
+        // The historical output genuinely does not exist (e.g. the process was
+        // killed mid-run so job_logs was never written) — say so instead of
+        // leaving a blank panel.
+        setLogUnavailable(true);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, st.job_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
@@ -1868,14 +1969,30 @@ function SubTaskCard({
             </section>
           )}
 
-          {/* Live log (streaming) — full-width terminal scrollback.
+          {/* Live log (streaming) / historical replay — full-width terminal scrollback.
               Wrapped in a div with logAnchorRef so the header's
               继续 → "scroll to log" effect can scrollIntoView the
               container without coupling to SubTaskLogView's internal
-              auto-scroll-to-bottom ref. */}
-          {streaming && (
+              auto-scroll-to-bottom ref.
+              showLog = streaming || lines.length > 0 — once the run has
+              ended the area keeps rendering as long as the replay produced
+              content, instead of going blank the moment it finished. */}
+          {showLog && (
             <div ref={logAnchorRef}>
               <SubTaskLogView lines={lines} />
+            </div>
+          )}
+
+          {/* The historical output genuinely does not exist (e.g. the process was
+              killed mid-run so job_logs was never written): say so instead
+              of leaving a blank panel. Reuses the .sub-log-empty look, so
+              no new CSS class. Note it must stay a SIBLING of
+              SubTaskLogView: when lines is empty SubTaskLogView renders
+              its own .sub-log-empty (logEmpty), and nesting this inside
+              would show two empty-state boxes. */}
+          {!streaming && logUnavailable && (
+            <div className="sub-log-empty">
+              {t('components.subTaskCard.logUnavailable')}
             </div>
           )}
 
