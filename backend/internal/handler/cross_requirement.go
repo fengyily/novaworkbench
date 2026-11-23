@@ -390,6 +390,15 @@ func (h *CrossRequirementHandler) Update(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
 		return
 	}
+	// 状态先校验：非法状态必须在写其它字段**之前**被拒，否则会留下写了一半
+	// 的更新（字段改了、状态没改）。
+	status := strings.TrimSpace(body.Status)
+	if status != "" {
+		if err := service.ValidateCrossRequirementStatus(status); err != nil {
+			writeError(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
+			return
+		}
+	}
 	if err := h.svc.Update(id, body); err != nil {
 		if errors.Is(err, service.ErrCrossRequirementNotFound) {
 			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
@@ -398,13 +407,14 @@ func (h *CrossRequirementHandler) Update(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
 		return
 	}
-	if status := strings.TrimSpace(body.Status); status != "" {
+	if status != "" {
+		// 人工设置状态 → 锁定它，读路径的派生刷新不再覆盖（见 SetStatus）。
 		if err := h.svc.SetStatus(id, status); err != nil {
 			writeError(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
 			return
 		}
 	}
-	detail, err := h.svc.Detail(id)
+	detail, err := h.svc.DetailFresh(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
 		return

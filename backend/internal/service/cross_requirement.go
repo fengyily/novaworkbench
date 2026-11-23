@@ -120,12 +120,12 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 // Get reads one cross requirement by id.
 func (s *CrossRequirementService) Get(id string) (*model.CrossRequirement, error) {
 	row := s.db.QueryRow(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,created_by,created_at,updated_at,completed_at
+		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,status_locked,created_by,created_at,updated_at,completed_at
 		 FROM cross_requirements WHERE id = ?`, id)
 	var x model.CrossRequirement
 	var createdAt, updatedAt, completedAt sql.NullString
 	if err := row.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
-		&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.CreatedBy,
+		&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.StatusLocked, &x.CreatedBy,
 		&createdAt, &updatedAt, &completedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrCrossRequirementNotFound
@@ -162,7 +162,7 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,created_by,created_at,updated_at,completed_at
+		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,status_locked,created_by,created_at,updated_at,completed_at
 		 FROM cross_requirements `+where+` ORDER BY updated_at DESC, id DESC`, args...)
 	if err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 		var x model.CrossRequirement
 		var createdAt, updatedAt, completedAt sql.NullString
 		if err := rows.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
-			&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.CreatedBy,
+			&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.StatusLocked, &x.CreatedBy,
 			&createdAt, &updatedAt, &completedAt); err != nil {
 			return nil, err
 		}
@@ -188,31 +188,55 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 
 // Update writes the editable fields of a cross requirement.
 //
-// Only the fields the UI owns are written — status is handled separately
-// (RefreshDerivedStatus / explicit status transitions) so a stale form cannot
-// resurrect a stale lifecycle state.
+// **Partial-update semantics**: an empty field means「本次不修改」, the stored
+// value is kept. Only the fields the UI owns are written — status is handled
+// separately (SetStatus) so a stale form cannot resurrect a stale lifecycle
+// state.
+//
+// 为什么是部分更新：状态与基本信息共用一个 PUT 端点，而「只改状态」是这一路
+// 最常见的调用（归档 / 取消归档）。如果空字段被当成「清空」，那么
+// `PUT {"status":"archived"}` 就会顺手把标题、优先级、类型、验收标准全清成
+// 默认值；如果空标题被当成非法，请求会直接 400，归档在 API 层根本不可用。
+//
+// 验收标准是唯一的例外：它用「字段缺省 = nil，字段给了 = 非 nil（哪怕是空
+// 数组）」区分，所以 `[]` 仍然可以清空它。
 func (s *CrossRequirementService) Update(id string, req model.UpdateCrossRequirementReq) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
-		return fmt.Errorf("cross requirement title is required")
+		title = current.Title
+	}
+	description := req.Description
+	if description == "" {
+		description = current.Description
 	}
 	kind := strings.TrimSpace(req.Kind)
+	if kind == "" {
+		kind = current.Kind
+	}
 	if kind == "" {
 		kind = KindRequirement
 	}
 	priority := strings.TrimSpace(req.Priority)
 	if priority == "" {
+		priority = current.Priority
+	}
+	if priority == "" {
 		priority = "medium"
 	}
-	criteria := "[]"
-	if len(req.AcceptanceCriteria) > 0 {
-		if raw, err := json.Marshal(req.AcceptanceCriteria); err == nil {
+	criteria := current.AcceptanceCriteria
+	if req.AcceptanceCriteria != nil {
+		criteria = "[]"
+		if raw, mErr := json.Marshal(req.AcceptanceCriteria); mErr == nil {
 			criteria = string(raw)
 		}
 	}
 	res, err := s.db.Exec(
 		`UPDATE cross_requirements SET title=?,description=?,priority=?,kind=?,acceptance_criteria=?,updated_at=? WHERE id=?`,
-		title, req.Description, priority, kind, criteria, time.Now(), id)
+		title, description, priority, kind, criteria, time.Now(), id)
 	if err != nil {
 		return err
 	}
@@ -222,14 +246,55 @@ func (s *CrossRequirementService) Update(id string, req model.UpdateCrossRequire
 	return nil
 }
 
-// SetStatus writes the lifecycle status directly (archive / unarchive).
+// SetStatus writes the lifecycle status **by hand** (archive / unarchive /
+// manual "mark as done") and LOCKS it against the derived refresh.
+//
+// 为什么要有锁：读路径会用「子需求 + 阶段」重算生命周期（ApplyDerivedStatus）
+// 并把结果写回。没有锁的话，人工置的 done / integrating 会在下一次 GET 时被
+// 重算覆盖 —— 人工的判断被读路径悄悄推翻，而且用户完全看不出发生过什么。
+//
+// 锁在「事实变了」时释放：
+//   - 离开「已归档」= 把生命周期交回机器（解档 = 继续做事，派生状态重新接管，
+//     否则解档后一直停在人工写的值上）；
+//   - 整体方案被保存 / 拆分产生新子需求（见 SaveDesign / ConfirmSplit）——
+//     这两件事改变了状态所依据的事实。
 func (s *CrossRequirementService) SetStatus(id string, status string) error {
-	switch status {
-	case model.XReqStatusDraft, model.XReqStatusDesigning, model.XReqStatusDesigned,
-		model.XReqStatusDeveloping, model.XReqStatusIntegrating, model.XReqStatusDone,
-		model.XReqStatusArchived:
-	default:
-		return fmt.Errorf("invalid cross requirement status: %q", status)
+	if err := validateCrossStatus(status); err != nil {
+		return err
+	}
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	lock := 1
+	if current.Status == model.XReqStatusArchived && status != model.XReqStatusArchived {
+		lock = 0
+	}
+	now := time.Now()
+	var completedAt interface{}
+	if status == model.XReqStatusDone {
+		completedAt = now
+	}
+	res, err := s.db.Exec(
+		`UPDATE cross_requirements SET status=?,status_locked=?,updated_at=?,completed_at=COALESCE(?,completed_at) WHERE id=?`,
+		status, lock, now, completedAt, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrCrossRequirementNotFound
+	}
+	return nil
+}
+
+// writeDerivedStatus writes a status **computed** from the children + phases.
+//
+// 它**不碰** status_locked：派生路径既不能加锁（否则下一轮刷新会被自己上
+// 一轮的结果豁免），也不该解锁（解锁是「事实变了」时由 SaveDesign /
+// ConfirmSplit 显式做的）。
+func (s *CrossRequirementService) writeDerivedStatus(id string, status string) error {
+	if err := validateCrossStatus(status); err != nil {
+		return err
 	}
 	now := time.Now()
 	var completedAt interface{}
@@ -246,6 +311,36 @@ func (s *CrossRequirementService) SetStatus(id string, status string) error {
 		return ErrCrossRequirementNotFound
 	}
 	return nil
+}
+
+// ClearStatusLock releases the manual lock so the derived lifecycle takes the
+// row back.
+//
+// Called when the facts behind the status change: a new overall design / a new
+// batch of sub-requirements. Those events make a previously manual verdict
+// stale, so the machine must be allowed to recompute it.
+func (s *CrossRequirementService) ClearStatusLock(id string) error {
+	_, err := s.db.Exec(`UPDATE cross_requirements SET status_locked=0 WHERE id=?`, id)
+	return err
+}
+
+// ValidateCrossRequirementStatus rejects an unknown lifecycle status.
+//
+// Exported so the HTTP layer can validate the status **before** writing the
+// other fields: an invalid status must not leave a half-applied update behind.
+func ValidateCrossRequirementStatus(status string) error {
+	return validateCrossStatus(status)
+}
+
+// validateCrossStatus rejects an unknown lifecycle status.
+func validateCrossStatus(status string) error {
+	switch status {
+	case model.XReqStatusDraft, model.XReqStatusDesigning, model.XReqStatusDesigned,
+		model.XReqStatusDeveloping, model.XReqStatusIntegrating, model.XReqStatusDone,
+		model.XReqStatusArchived:
+		return nil
+	}
+	return fmt.Errorf("invalid cross requirement status: %q", status)
 }
 
 // Delete removes a cross requirement and detaches (never deletes) its
@@ -654,6 +749,11 @@ func (s *CrossRequirementService) ApplyDerivedStatus(
 	progress model.CrossRequirementProgress,
 	phases []model.CrossRequirementPhase,
 ) (string, error) {
+	// 人工锁定的状态不被派生逻辑覆盖 —— 人工的判断不能被读路径悄悄推翻
+	// （见 SetStatus 的说明）。
+	if x.StatusLocked {
+		return x.Status, nil
+	}
 	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖。
 	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived {
 		return x.Status, nil
@@ -692,7 +792,7 @@ func (s *CrossRequirementService) ApplyDerivedStatus(
 	if next == x.Status {
 		return next, nil
 	}
-	if err := s.SetStatus(x.ID, next); err != nil {
+	if err := s.writeDerivedStatus(x.ID, next); err != nil {
 		return "", err
 	}
 	// 状态变了 → 行上的时间戳也变了（updated_at / completed_at）。重新读一次，
@@ -730,6 +830,9 @@ func phasesPendingConclusion(phases []model.CrossRequirementPhase) bool {
 // design_docs is stored as a JSON array (same shape as requirements.design_docs)
 // so the frontend can reuse the same Markdown renderer. The incoming Markdown
 // is wrapped into a one-element array.
+//
+// 保存方案 = 状态所依据的事实变了，所以这里顺带**释放人工锁**：机器重新接管
+// 生命周期（调用方随后会刷新一次派生状态）。
 func (s *CrossRequirementService) SaveDesign(id string, markdown string, sessionID string, jobID string) error {
 	docs := "[]"
 	if trimmed := strings.TrimSpace(markdown); trimmed != "" {
@@ -738,7 +841,7 @@ func (s *CrossRequirementService) SaveDesign(id string, markdown string, session
 		}
 	}
 	res, err := s.db.Exec(
-		`UPDATE cross_requirements SET design_docs=?,design_session_id=?,design_job_id=?,updated_at=? WHERE id=?`,
+		`UPDATE cross_requirements SET design_docs=?,design_session_id=?,design_job_id=?,status_locked=0,updated_at=? WHERE id=?`,
 		docs, strings.TrimSpace(sessionID), strings.TrimSpace(jobID), time.Now(), id)
 	if err != nil {
 		return err

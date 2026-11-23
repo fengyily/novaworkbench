@@ -463,3 +463,52 @@ func TestCrossRequirementHandler_StartSplitAfterSplit(t *testing.T) {
 		t.Fatalf("error code = %v, want XREQ_ALREADY_SPLIT", errObj["code"])
 	}
 }
+
+// 只改状态的 PUT 必须成功（不 400），且不得清空其它字段。
+//
+// 这是 P1-4 的接口层回归测试：`PUT {"status":"archived"}` 过去会先走
+// service.Update，而 Update 当时要求非空标题 → 400，归档在 API 层不可用。
+func TestCrossRequirementHandler_StatusOnlyUpdate(t *testing.T) {
+	h, d, _ := newCrossHandlerTest(t)
+	p1 := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title: "归档语义", Description: "原描述", Priority: "high",
+		ProjectIDs: []string{p1},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	// 只带 status 的 PUT。
+	code, env = callCross(t, h.Update, http.MethodPut, "/api/cross-requirements/"+id,
+		model.UpdateCrossRequirementReq{Status: model.XReqStatusArchived})
+	if code != http.StatusOK {
+		t.Fatalf("status-only update = %d, body = %v", code, env)
+	}
+	detail, _ := env["data"].(map[string]any)
+	if detail["status"] != model.XReqStatusArchived {
+		t.Fatalf("status = %v, want %q", detail["status"], model.XReqStatusArchived)
+	}
+	if detail["title"] != "归档语义" {
+		t.Fatalf("title = %v, want the original title", detail["title"])
+	}
+	if detail["description"] != "原描述" {
+		t.Fatalf("description = %v, want the original description", detail["description"])
+	}
+	if detail["priority"] != "high" {
+		t.Fatalf("priority = %v, want high", detail["priority"])
+	}
+
+	// 人工设置的状态不会被读路径的派生刷新改写。
+	code, env = callCross(t, h.Get, http.MethodGet, "/api/cross-requirements/"+id, nil)
+	if code != http.StatusOK {
+		t.Fatalf("get status = %d", code)
+	}
+	detail, _ = env["data"].(map[string]any)
+	if detail["status"] != model.XReqStatusArchived {
+		t.Fatalf("status after the read = %v, want %q", detail["status"], model.XReqStatusArchived)
+	}
+}

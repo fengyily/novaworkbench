@@ -511,3 +511,214 @@ func TestCrossRequirement_FailedPhaseKeepsIntegrating(t *testing.T) {
 		t.Fatalf("status = %q, want %q", row.Status, model.XReqStatusDone)
 	}
 }
+
+// 人工设置的状态必须活过读路径的派生刷新 —— 否则「手动标记完成」会在下一次
+// GET 时被重算覆盖（人工的判断被读路径悄悄推翻）。
+func TestCrossRequirement_ManualStatusSurvivesRefresh(t *testing.T) {
+	svc, reqSvc, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+	p2 := seedCrossProject(t, projSvc, "api-svc")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "人工状态",
+		ProjectIDs: []string{p1.ID, p2.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	children, err := svc.ConfirmSplit(x.ID, []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+		{Title: "订单服务", ProjectID: p2.ID, Order: 2},
+	})
+	if err != nil {
+		t.Fatalf("confirm split: %v", err)
+	}
+
+	// 子需求还没做完 → 派生状态是「进行中」。
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Status != model.XReqStatusDeveloping {
+		t.Fatalf("status = %q, want developing", row.Status)
+	}
+
+	// 人工标记完成 → 锁定。
+	if err := svc.SetStatus(x.ID, model.XReqStatusDone); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	row, err = svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !row.StatusLocked {
+		t.Fatal("a manual status did not lock the row")
+	}
+
+	// 读路径的派生刷新不得覆盖它。
+	for i := 0; i < 3; i++ {
+		if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+			t.Fatalf("refresh %d: %v", i, err)
+		}
+	}
+	row, err = svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Status != model.XReqStatusDone {
+		t.Fatalf("status = %q, want done (the manual verdict must survive the refresh)", row.Status)
+	}
+
+	// 详情读路径（DetailFresh）同样不得覆盖它。
+	detail, err := svc.DetailFresh(x.ID)
+	if err != nil {
+		t.Fatalf("detail fresh: %v", err)
+	}
+	if detail.Status != model.XReqStatusDone {
+		t.Fatalf("detail status = %q, want done", detail.Status)
+	}
+
+	// 子需求在别处完成后，人工锁依然生效（事实没变，机器不接管）。
+	markDone(t, reqSvc, children[0].ID)
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err = svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Status != model.XReqStatusDone {
+		t.Fatalf("status = %q, want done (the manual lock must hold)", row.Status)
+	}
+}
+
+// 人工锁在「事实变了」时释放：保存整体方案 / 拆分产生新子需求。
+func TestCrossRequirement_ManualLockReleasedWhenFactsChange(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{Title: "解锁", ProjectIDs: []string{p1.ID}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetStatus(x.ID, model.XReqStatusDone); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	// 保存整体方案 → 解锁 → 派生状态重新接管（回到「已设计」）。
+	if err := svc.SaveDesign(x.ID, "## 需求目标\n\n目标\n\n## 跨项目接口契约\n\nGET /api/x\n", "", ""); err != nil {
+		t.Fatalf("save design: %v", err)
+	}
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.StatusLocked {
+		t.Fatal("saving the design did not release the manual lock")
+	}
+	if row.Status != model.XReqStatusDesigned {
+		t.Fatalf("status = %q, want designed", row.Status)
+	}
+}
+
+// 只改状态的 PUT 不能 400，也不能顺手清空其它字段。
+func TestCrossRequirement_UpdateKeepsUntouchedFields(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:              "原标题",
+		Description:        "原描述",
+		ProjectIDs:         []string{p1.ID},
+		Priority:           "high",
+		AcceptanceCriteria: []string{"验收点一"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 空标题 → 保留原值（不报错）。
+	if err := svc.Update(x.ID, model.UpdateCrossRequirementReq{
+		Title: "",
+	}); err != nil {
+		t.Fatalf("update with an empty title: %v", err)
+	}
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Title != "原标题" {
+		t.Fatalf("title = %q, want the original title", row.Title)
+	}
+	if row.Description != "原描述" {
+		t.Fatalf("description = %q, want the original description", row.Description)
+	}
+	if row.Priority != "high" {
+		t.Fatalf("priority = %q, want high", row.Priority)
+	}
+	if row.Kind != KindRequirement {
+		t.Fatalf("kind = %q, want requirement", row.Kind)
+	}
+	if !strings.Contains(row.AcceptanceCriteria, "验收点一") {
+		t.Fatalf("acceptance criteria = %q, want the original list", row.AcceptanceCriteria)
+	}
+
+	// 给了空数组 → 清空验收标准（显式的空与缺省可区分）。
+	if err := svc.Update(x.ID, model.UpdateCrossRequirementReq{
+		AcceptanceCriteria: []string{},
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	row, err = svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.AcceptanceCriteria != "[]" {
+		t.Fatalf("acceptance criteria = %q, want []", row.AcceptanceCriteria)
+	}
+}
+
+// 解档 = 把生命周期交回机器：派生状态重新接管（否则解档后一直停在人工写的值上）。
+func TestCrossRequirement_UnarchiveHandsLifecycleBack(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "解档",
+		ProjectIDs: []string{p1.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.ConfirmSplit(x.ID, []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+	}); err != nil {
+		t.Fatalf("confirm split: %v", err)
+	}
+	if err := svc.SetStatus(x.ID, model.XReqStatusArchived); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	// 解档。
+	if err := svc.SetStatus(x.ID, model.XReqStatusDone); err != nil {
+		t.Fatalf("unarchive: %v", err)
+	}
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.StatusLocked {
+		t.Fatal("unarchiving did not release the manual lock")
+	}
+	// 子需求还没做完 → 派生状态是「进行中」，不是人工写的 done。
+	if row.Status != model.XReqStatusDeveloping {
+		t.Fatalf("status = %q, want developing", row.Status)
+	}
+}

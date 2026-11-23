@@ -174,6 +174,13 @@ CREATE TABLE IF NOT EXISTS cross_requirements (
     -- 用一条带条件的 UPDATE 抢占它（条件里还带 NOT EXISTS(子需求)），并发
     -- 重复确认只有一方能抢到 —— 另一方拿到 0 行受影响，整批回滚。
     split_batch_id      TEXT NOT NULL DEFAULT '',
+    -- status_locked: 生命周期状态被**人工**设置过（归档 / 手动标记完成 …），
+    -- 标记为 1 时读路径的派生刷新不得改动它 —— 人工的判断不能被下一次 GET
+    -- 悄悄重算掉。0 = 状态由派生逻辑接管。
+    --
+    -- 锁在「事实变了」时释放：整体方案被保存 / 拆分产生新子需求 —— 这两件事
+    -- 改变了状态所依据的事实，机器重新接管生命周期。
+    status_locked       INTEGER NOT NULL DEFAULT 0,
     created_by          TEXT NOT NULL DEFAULT 'user',
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1945,6 +1952,13 @@ var alterColumns = []string{
 	// 为了让已经跑过早期构建的开发库补齐（alterColumns 会吞掉「duplicate
 	// column」错误，所以重复执行是安全的）。
 	`ALTER TABLE cross_requirements ADD COLUMN split_batch_id TEXT NOT NULL DEFAULT ''`,
+	// status_locked: 生命周期状态是否被人工锁定（1 = 人工设置，派生刷新不得
+	// 改动它；0 = 状态由派生逻辑接管）。
+	//
+	// 没有这一列时，手动置的 done / integrating 会在下一次 GET 时被派生逻辑
+	// 重算掉 —— 人工的判断被读路径悄悄推翻。同 alterColumns 的其它条目：
+	// 「duplicate column」错误会被吞掉，重复执行安全。
+	`ALTER TABLE cross_requirements ADD COLUMN status_locked INTEGER NOT NULL DEFAULT 0`,
 	// error_kind: 答疑轮的失败分类（empty-result /
 	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
 	// timeout）。空串 = 成功。有了它，下一次同类故障从一行日志就能判断是

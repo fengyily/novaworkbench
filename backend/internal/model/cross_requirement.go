@@ -80,6 +80,18 @@ type CrossRequirement struct {
 	// UPDATE），并发重复确认只有一方能成功，另一方拿到 409。前端据此禁用
 	// 「按项目拆分」按钮，不再让用户走到一个必然被拒的请求。
 	SplitBatchID string `json:"split_batch_id"`
+	// StatusLocked reports that the lifecycle status was set **by a human**
+	// (archive / manual "mark as done") and must not be recomputed by the
+	// read-path derivation.
+	//
+	// Without it, a manual status is silently overwritten by the next read:
+	// the derivation recomputes draft/designed/developing/integrating/done
+	// from the children + phases and writes the result back, so a manually
+	// set "done" flips back to "developing" as soon as a child is still open.
+	//
+	// The lock is released when the facts behind the status change (a new
+	// overall design / a new batch of sub-requirements).
+	StatusLocked bool   `json:"status_locked"`
 	CreatedBy    string `json:"created_by"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`

@@ -224,6 +224,13 @@ func (s *CrossRequirementService) ConfirmSplit(
 		return nil, err
 	}
 
+	// 新子需求 = 状态所依据的事实变了 → 释放人工锁，机器重新接管生命周期。
+	// （不解锁的话，之前人工置的 done 会一直压着这批新工作，列表页显示的
+	// 状态与实际情况不符。）
+	if err := s.ClearStatusLock(xreqID); err != nil {
+		return nil, err
+	}
+
 	// The lifecycle status follows from the children that now exist.
 	if err := s.RefreshDerivedStatus(xreqID); err != nil {
 		return nil, err

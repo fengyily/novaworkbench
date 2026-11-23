@@ -4148,8 +4148,10 @@ export const crossRequirementsApi = {
     project_ids?: string[];
   }) => api.post<CrossRequirement>('/api/cross-requirements', data),
   get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
+  // Partial update: an omitted (or empty) field keeps the stored value, so a
+  // status-only call never clobbers the title / priority / kind.
   update: (id: string, data: {
-    title: string;
+    title?: string;
     description?: string;
     priority?: string;
     kind?: string;
