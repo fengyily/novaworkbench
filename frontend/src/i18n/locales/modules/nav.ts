@@ -3,6 +3,7 @@ export const nav = {
   dashboard: '仪表盘',
   projects: '项目',
   requirements: '需求',
+  crossRequirements: '跨项目需求',
   schedules: '定时任务',
   schedulesShort: '定时',
   reports: '周报',
@@ -18,6 +19,7 @@ export const nav = {
   section: {
     requirementDetail: '需求详情',
     requirements: '需求',
+    crossRequirements: '跨项目需求',
     addProject: '添加项目',
     projectDetail: '项目详情',
     projects: '项目',

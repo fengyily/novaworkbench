@@ -200,6 +200,14 @@ type designRunParams struct {
 	// this doubles as the "does this run need parent handling at all" flag
 	// for finalizeArchitectRun.
 	ParentBlock string
+	// CrossBlock is the pre-rendered 「跨项目上下文」 prompt block: the
+	// cross-project requirement's overall design (including the mandatory
+	// 「跨项目接口契约」 section) plus the participating project list.
+	//
+	// Empty = this requirement does not belong to a cross-project
+	// requirement (the common case) — the prompt is then byte-identical to
+	// what it was before the feature existed.
+	CrossBlock string
 	// ReferencedBlock is the pre-rendered 「关联需求上下文」 prompt block: the
 	// referenced requirements' descriptions + existing plans plus the output
 	// contract. Empty = this run has no usable references, and the prompt is
@@ -912,6 +920,13 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// inside prepareDesignWorkspace.
 	referencedBlock, referencedRefs := h.buildReferencedBlock(req)
 
+	// Cross-project context: a requirement that belongs to a cross-project
+	// requirement must see the overall (cross-repository) design — above all
+	// the interface contract — so it does not invent its own interface.
+	// Empty for every ordinary requirement, so the prompt of the existing
+	// flows stays byte-identical.
+	crossBlock := h.buildCrossBlock(req)
+
 	// --add-dir 授权 = 用户手工授权的目录 + 本需求的附件目录 + （子需求时）
 	// 父需求的附件目录。
 	//
@@ -939,6 +954,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		NewDesignSID:    newDesignSID,
 		Parent:          parent,
 		ParentBlock:     parentBlock,
+		CrossBlock:      crossBlock,
 		ReferencedBlock: referencedBlock,
 		ReferencedRefs:  referencedRefs,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
@@ -1003,6 +1019,41 @@ func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Require
 	}
 	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
 	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir)), dir
+}
+
+// buildCrossBlock renders the cross-project context block for a requirement
+// that belongs to a cross-project requirement.
+//
+// Empty for every ordinary requirement — so the design prompt of the existing
+// flows stays byte-identical.
+//
+// The block carries the overall design (the 「跨项目接口契约」 section above
+// all) plus the participating project list. The child's own description
+// already embeds the contract (it was persisted at split time — see
+// service.buildCrossDescription); this block is the **refresh**: it carries
+// the CURRENT version of the overall design, so a re-designed contract
+// reaches the child without rewriting every child's description.
+func (h *WizardHandler) buildCrossBlock(req *model.Requirement) string {
+	if req == nil || h.crossReqSvc == nil {
+		return ""
+	}
+	xreqID := strings.TrimSpace(req.CrossRequirementID)
+	if xreqID == "" {
+		return ""
+	}
+	xreq, err := h.crossReqSvc.Get(xreqID)
+	if err != nil || xreq == nil {
+		return ""
+	}
+	projects, err := h.crossReqSvc.ListProjects(xreqID)
+	if err != nil {
+		projects = nil
+	}
+	refs := make([]promptpkg.CrossProjectRef, 0, len(projects))
+	for _, p := range projects {
+		refs = append(refs, promptpkg.CrossProjectRef{ID: p.ProjectID, Name: p.ProjectName, Role: p.Role})
+	}
+	return promptpkg.BuildCrossContextBlock(service.DesignDocsToMarkdown(xreq.DesignDocs), refs, req.Title)
 }
 
 // buildReferencedBlock renders the 「关联需求上下文」 prompt block for the
@@ -1258,6 +1309,13 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// execution without touching wizard_remote.go.
 	if p.ParentBlock != "" {
 		prompt += "\n\n" + p.ParentBlock
+	}
+	// Cross-project context: the overall design + interface contract of the
+	// cross-project requirement this row belongs to. Appended at the same
+	// point as the parent block, so all three design paths (analyst-resume /
+	// fresh / compressed-summary) carry it identically.
+	if p.CrossBlock != "" {
+		prompt += "\n\n" + p.CrossBlock
 	}
 	// Referenced requirements: append their description + existing plan plus
 	// the 「关联需求上下文」 output contract. Placed right after the parent

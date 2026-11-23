@@ -108,6 +108,12 @@ func (s *spyProjectSvc) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, er
 	return nil, nil
 }
 
+// ReadDiskClaudeDoc reports no CLAUDE.md in the checkout — the spy stands
+// for a repository that ships none.
+func (s *spyProjectSvc) ReadDiskClaudeDoc(projectPath string) (string, bool, error) {
+	return "", false, nil
+}
+
 // runEnsureProjectDir is the shared test body for the four
 // call-site-specific top-level tests. It exercises the helper exactly the
 // way each call-site does:

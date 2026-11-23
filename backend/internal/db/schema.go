@@ -143,6 +143,98 @@ CREATE TABLE IF NOT EXISTS requirement_dependencies (
 );
 CREATE INDEX IF NOT EXISTS idx_req_deps_depends_on ON requirement_dependencies(depends_on_id);
 
+-- ── 跨项目需求 (cross-project requirement) ─────────────────────────────────
+--
+-- 一个横跨多个项目 / 仓库的顶层需求实体。它与 requirements **并存**而不是
+-- 合并：requirements.project_id 是 NOT NULL + FK + CASCADE，且既有数十条路径
+-- 假设「一需求一项目」（worktree 隔离 / git 分支 / PR / review / 子任务编排 /
+-- token 统计），把 project_id 改成可空会波及全部路径。
+--
+-- 子需求仍然是普通的 requirements 行（各归各的项目），通过
+-- requirements.cross_requirement_id 挂回本实体 —— 这样子需求自动继承现有的
+-- analyst / architect / coding 三阶段与全部下游能力，不重复造轮子。
+--
+-- MySQL 不能索引裸 TEXT 列 —— cross_requirement_id / phase_id 必须进
+-- mysqlIndexedCol 白名单，否则 CREATE TABLE 在 MySQL 上直接失败。
+CREATE TABLE IF NOT EXISTS cross_requirements (
+    id                  TEXT PRIMARY KEY,
+    title               TEXT NOT NULL,
+    description         TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'draft',
+    priority            TEXT NOT NULL DEFAULT 'medium',
+    kind                TEXT NOT NULL DEFAULT 'requirement',
+    acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+    -- 整体方案（JSON 数组，形状与 requirements.design_docs 一致）
+    design_docs         TEXT NOT NULL DEFAULT '[]',
+    design_session_id   TEXT NOT NULL DEFAULT '',
+    design_job_id       TEXT NOT NULL DEFAULT '',
+    -- 拆分批次 id（spb_xxx）：标记这个跨项目需求已经被拆分过。'' = 从未拆分。
+    --
+    -- 它是「一个跨项目需求只能拆一次」这条不变量的**原子**载体：确认拆分时
+    -- 用一条带条件的 UPDATE 抢占它（条件里还带 NOT EXISTS(子需求)），并发
+    -- 重复确认只有一方能抢到 —— 另一方拿到 0 行受影响，整批回滚。
+    split_batch_id      TEXT NOT NULL DEFAULT '',
+    -- status_locked: 生命周期状态被**人工**设置过（归档 / 手动标记完成 …），
+    -- 标记为 1 时读路径的派生刷新不得改动它 —— 人工的判断不能被下一次 GET
+    -- 悄悄重算掉。0 = 状态由派生逻辑接管。
+    --
+    -- 锁在「事实变了」时释放：整体方案被保存 / 拆分产生新子需求 —— 这两件事
+    -- 改变了状态所依据的事实，机器重新接管生命周期。
+    status_locked       INTEGER NOT NULL DEFAULT 0,
+    created_by          TEXT NOT NULL DEFAULT 'user',
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at        DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_xreq_status ON cross_requirements(status);
+
+-- 参与项目映射。role 是自由文本（前端 / 后端 / 移动端 …），用于 UI 展示。
+--
+-- base_branch: 该参与项目的**基础分支** —— 这个仓库里的子需求从哪条分支
+-- 开发。跨项目需求里每个仓库可能处在不同的发布线上（A 走 develop、B 走
+-- release/2026q1），所以基础分支必须**逐项目**指定，不能全局一个值。
+--
+-- 空串 = 不指定：子需求沿用该项目的默认分支（projects.default_branch）。
+-- 拆分时这个值会被盖到子需求的 requirements.base_branch 上（来源标记
+-- 'cross_project'），子需求自己显式选过的基础分支不受影响。
+CREATE TABLE IF NOT EXISTS cross_requirement_projects (
+    id                   TEXT PRIMARY KEY,
+    cross_requirement_id TEXT NOT NULL,
+    project_id           TEXT NOT NULL,
+    role                 TEXT NOT NULL DEFAULT '',
+    base_branch          TEXT NOT NULL DEFAULT '',
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(cross_requirement_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_xrp_cross ON cross_requirement_projects(cross_requirement_id);
+
+-- 阶段（联调 / 集成测试单元）。verify_report 存 Markdown 验证结论（落库，
+-- 不依赖 JobStore 内存环，后端重启后仍可回看）。
+CREATE TABLE IF NOT EXISTS cross_requirement_phases (
+    id                   TEXT PRIMARY KEY,
+    cross_requirement_id TEXT NOT NULL,
+    name                 TEXT NOT NULL,
+    description          TEXT NOT NULL DEFAULT '',
+    sort_order           INTEGER NOT NULL DEFAULT 0,
+    status               TEXT NOT NULL DEFAULT 'pending',
+    verify_job_id        TEXT NOT NULL DEFAULT '',
+    verify_report        TEXT NOT NULL DEFAULT '',
+    verified_at          DATETIME,
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_xphase_cross ON cross_requirement_phases(cross_requirement_id);
+
+-- 阶段包含哪些子需求。
+CREATE TABLE IF NOT EXISTS cross_requirement_phase_items (
+    id             TEXT PRIMARY KEY,
+    phase_id       TEXT NOT NULL,
+    requirement_id TEXT NOT NULL,
+    UNIQUE(phase_id, requirement_id)
+);
+CREATE INDEX IF NOT EXISTS idx_xpi_phase ON cross_requirement_phase_items(phase_id);
+
 -- Per-requirement file attachments. Each row is one file uploaded against a
 -- requirement — the wizard's three role-gated stages (analyst / architect /
 -- developer) all share this single set, and Claude ingests each via Read
@@ -1847,6 +1939,42 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN analyst_effort TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_effort TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN architect_effort TEXT NOT NULL DEFAULT ''`,
+	// cross_requirement_id: 该需求所属的跨项目需求 id。'' = 普通需求。
+	//
+	// 与 parent_id（主/子层级，同项目，仅一层）是两件事，两者互不干扰：
+	// parent_id 表达「层级」，cross_requirement_id 表达「归属哪个跨项目
+	// 需求」。跨项目需求的子需求**没有** master 行，所以 parent_id 恒为空。
+	//
+	// 刻意**不建索引**：MySQL 下这一列由 ALTER 追加时仍是 TEXT（canonical
+	// 块里的列定义不会被 rewrite 到 legacy 库），建索引会报 "BLOB/TEXT
+	// column used in key specification" 并让 migrate() 直接失败。查询侧用
+	// `WHERE cross_requirement_id = ?` 全表扫描即可（requirements 行数量级
+	// 为百~千，详情页每次 1 次）。
+	`ALTER TABLE requirements ADD COLUMN cross_requirement_id TEXT NOT NULL DEFAULT ''`,
+	// split_batch_id: 跨项目需求的拆分批次 id（spb_xxx）。'' = 从未拆分。
+	//
+	// 它承载「一个跨项目需求只能拆一次」这条不变量 —— 确认拆分时用一条带
+	// 条件的 UPDATE 抢占它，并发重复确认只有一方能抢到（见
+	// service.CrossRequirementService.ConfirmSplit）。
+	//
+	// 跨_requirements 表是本特性新建的，正常不会缺这一列；这条 ALTER 只是
+	// 为了让已经跑过早期构建的开发库补齐（alterColumns 会吞掉「duplicate
+	// column」错误，所以重复执行是安全的）。
+	`ALTER TABLE cross_requirements ADD COLUMN split_batch_id TEXT NOT NULL DEFAULT ''`,
+	// status_locked: 生命周期状态是否被人工锁定（1 = 人工设置，派生刷新不得
+	// 改动它；0 = 状态由派生逻辑接管）。
+	//
+	// 没有这一列时，手动置的 done / integrating 会在下一次 GET 时被派生逻辑
+	// 重算掉 —— 人工的判断被读路径悄悄推翻。同 alterColumns 的其它条目：
+	// 「duplicate column」错误会被吞掉，重复执行安全。
+	`ALTER TABLE cross_requirements ADD COLUMN status_locked INTEGER NOT NULL DEFAULT 0`,
+	// base_branch: 参与项目的基础分支（逐项目指定）。空串 = 该子需求沿用项目
+	// 默认分支。
+	//
+	// 它是**每个仓库各写各的**的那条线：A 仓库在 develop 上开发、B 仓库在
+	// release/2026q1 上开发 —— 一个全局值表达不了。拆分时它被盖到子需求的
+	// requirements.base_branch 上（来源 'cross_project'）。
+	`ALTER TABLE cross_requirement_projects ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`,
 	// error_kind: 答疑轮的失败分类（empty-result /
 	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
 	// timeout）。空串 = 成功。有了它，下一次同类故障从一行日志就能判断是
@@ -1927,7 +2055,9 @@ var (
 	// idx_qa_req_stage) — the same trap, one column further down.
 	// `depends_on_id` joined the list with requirement_dependencies (indexed as
 	// part of its UNIQUE(requirement_id, depends_on_id) constraint).
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
+	// `cross_requirement_id` / `phase_id` joined the list with the cross-
+	// requirement tables (indexed as part of their UNIQUE constraints).
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|cross_requirement_id|phase_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// md_content holds a whole CLAUDE.md, which routinely exceeds MySQL's
 	// 64KB TEXT ceiling → MEDIUMTEXT (16MB). Applied BEFORE mysqlTextDefault

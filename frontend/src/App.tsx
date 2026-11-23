@@ -32,6 +32,8 @@ import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
 import ProjectIssueMonitor from './pages/ProjectIssueMonitor';
 import SchedulesPage from './pages/SchedulesPage';
+import CrossRequirementsList from './pages/CrossRequirementsList';
+import CrossRequirementDetail from './pages/CrossRequirementDetail';
 
 // RequireAuth gates the authenticated app: while the session is being
 // restored it shows a minimal loader; once restored with no user it bounces
@@ -110,6 +112,12 @@ export default function App() {
                路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}
             <Route path="requirements/calendar" element={<RequirementsCalendar />} />
             <Route path="requirements/:id" element={<RequirementDetailWithId />} />
+            {/* Cross-project requirements — a top-level entity spanning
+                several projects. The literal segment "cross-requirements"
+                is a different prefix from "requirements", so there is no
+                ordering conflict with the routes above. */}
+            <Route path="cross-requirements" element={<CrossRequirementsList />} />
+            <Route path="cross-requirements/:id" element={<CrossRequirementDetail />} />
             <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />

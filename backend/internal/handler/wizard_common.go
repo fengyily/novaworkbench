@@ -42,6 +42,11 @@ type projectService interface {
 	// has none). It is injected into the stages that need the project's
 	// conventions — see claudeDocBlock in project_claude_doc.go.
 	ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error)
+	// ReadDiskClaudeDoc reads the CLAUDE.md that already sits in a
+	// repository checkout (empty when there is none). The cross-requirement
+	// jobs run in a scratch directory, so the CLI cannot load it for them —
+	// they read it themselves — see handler/cross_claude_doc.go.
+	ReadDiskClaudeDoc(projectPath string) (string, bool, error)
 	OriginURL(projectID string) (string, error)
 	DiscoverAndCacheClaudeProjectSlug(id, localPath string) (string, error)
 	UpdateSyncStatus(id, status, commit string)

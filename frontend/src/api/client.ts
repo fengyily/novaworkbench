@@ -1117,6 +1117,11 @@ export interface Requirement {
   // ParentID nests this row under a master requirement (one level, same
   // project). Empty / undefined = top level. Unrelated to source_requirement_id.
   parent_id?: string;
+  // CrossRequirementID links this row to the cross-project requirement
+  // (cross-project requirement) it belongs to. Empty = an ordinary requirement. NOT a
+  // hierarchy edge: the cross-project children are PEERS, each living in
+  // its own project, so ParentID stays empty for them.
+  cross_requirement_id?: string;
   // Derived by List only: number of non-archived children.
   child_count?: number;
   // Derived by List only: how many stage-Q&A turns (方案/开发答疑) this
@@ -3996,4 +4001,214 @@ export const projectClaudeDocApi = {
     api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/revisions/${revId}/restore`, {}),
   streamJobUrl: (projectId: string, jobId: string) =>
     `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
+};
+
+// ── Cross-project requirements ─────────────────────────────────────────────
+//
+// 一个横跨多个项目 / 仓库的顶层需求实体。它的子需求是**普通的** requirements
+// 行（各归各的项目），所以子需求在各自的项目里走完全一样的开发流程 —— 前端
+// 只需要知道它们带一个 cross_requirement_id 徽章。
+
+export interface CrossRequirement {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  kind: string;
+  acceptance_criteria: string;
+  design_docs: string;
+  design_session_id: string;
+  design_job_id: string;
+  // split_batch_id — the id of the split batch that produced this
+  // requirement's children. Empty = never split. A cross-project
+  // requirement is split at most once, so a non-empty value means the
+  // split button must stay disabled.
+  split_batch_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string;
+}
+
+export interface CrossRequirementProjectProgress {
+  project_id: string;
+  project_name: string;
+  role: string;
+  // base_branch — the base branch of this participating project (its
+  // sub-requirements are developed from this branch). Empty = the project's
+  // own default branch.
+  base_branch: string;
+  total: number;
+  done: number;
+  blocked: number;
+}
+
+// CrossRequirementProjectInput — one participating project (id + role + base
+// branch).
+export interface CrossRequirementProjectInput {
+  project_id: string;
+  role?: string;
+  base_branch?: string;
+}
+
+export interface CrossRequirementProgress {
+  total: number;
+  done: number;
+  blocked: number;
+  percent: number;
+  projects: CrossRequirementProjectProgress[];
+  status_counts: Record<string, number>;
+}
+
+export interface CrossRequirementChild {
+  id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: string;
+  priority: string;
+  split_order: number;
+  // base_branch — the base branch this sub-requirement actually uses
+  // (inherited from its participating project's base branch).
+  base_branch: string;
+  depends_on: string[];
+  blocked_by: string[];
+}
+
+export interface CrossRequirementDependency {
+  requirement_id: string;
+  depends_on_id: string;
+  requirement_title: string;
+  depends_on_title: string;
+  cross_project: boolean;
+  met: boolean;
+}
+
+export interface CrossRequirementPhaseItem {
+  id: string;
+  phase_id: string;
+  requirement_id: string;
+  status: string;
+}
+
+export interface CrossRequirementPhase {
+  id: string;
+  cross_requirement_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  status: string;
+  verify_job_id: string;
+  verify_report: string;
+  verified_at: string;
+  created_at: string;
+  updated_at: string;
+  items: CrossRequirementPhaseItem[];
+}
+
+export interface CrossRequirementDetail extends CrossRequirement {
+  projects: CrossRequirementProjectProgress[];
+  children: CrossRequirementChild[];
+  dependencies: CrossRequirementDependency[];
+  phases: CrossRequirementPhase[];
+  progress: CrossRequirementProgress;
+}
+
+export interface CrossRequirementListPayload {
+  items: CrossRequirement[];
+  progress: Record<string, CrossRequirementProgress>;
+}
+
+/** A candidate sub-requirement produced by the cross-project split. */
+export interface CrossSplitCandidate {
+  title: string;
+  description: string;
+  scope: string[];
+  acceptance: string[];
+  boundary: string;
+  /** The project name the model proposed (display only). */
+  project: string;
+  /** The resolved project id — the server rejects the batch when it is empty
+   *  or points outside the participating project set. */
+  project_id: string;
+  order: number;
+  /** Prerequisites, expressed as batch-local ordinals (1-based). */
+  depends_on: number[];
+}
+
+export interface CrossSplitState {
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  candidates: CrossSplitCandidate[];
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
+export const crossRequirementsApi = {
+  list: (params?: { status?: string; keyword?: string }) => {
+    const q = new URLSearchParams();
+    Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
+    return api.get<CrossRequirementListPayload>(`/api/cross-requirements?${q.toString()}`);
+  },
+  create: (data: {
+    title: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    project_ids?: string[];
+    // projects — the participating projects in full (each may carry its own
+    // base branch). Takes precedence over project_ids when present.
+    projects?: CrossRequirementProjectInput[];
+  }) => api.post<CrossRequirement>('/api/cross-requirements', data),
+  get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
+  // Partial update: an omitted (or empty) field keeps the stored value, so a
+  // status-only call never clobbers the title / priority / kind.
+  update: (id: string, data: {
+    title?: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    status?: string;
+  }) => api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}`, data),
+  remove: (id: string) => api.delete<void>(`/api/cross-requirements/${id}`),
+  setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
+    api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
+  // ── overall design ──────────────────────────────────────────────────────
+  startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/design`, body ?? {}),
+  streamDesignUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/design/${jobId}/stream`,
+  saveDesign: (id: string, designDocs: string) =>
+    api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}/design`, { design_docs: designDocs }),
+  // ── split ───────────────────────────────────────────────────────────────
+  startSplit: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/split`, body ?? {}),
+  splitState: (id: string) => api.get<CrossSplitState>(`/api/cross-requirements/${id}/split/state`),
+  streamSplitUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/split/${jobId}/stream`,
+  confirmSplit: (id: string, candidates: CrossSplitCandidate[]) =>
+    api.post<{ children: CrossRequirementChild[]; detail: CrossRequirementDetail }>(
+      `/api/cross-requirements/${id}/split/confirm`, { candidates }),
+  // ── phases ──────────────────────────────────────────────────────────────
+  createPhase: (id: string, data: { name: string; description?: string; requirement_ids?: string[] }) =>
+    api.post<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases`, data),
+  updatePhase: (id: string, phaseId: string, data: {
+    name?: string;
+    description?: string;
+    requirement_ids?: string[];
+    status?: string;
+    verify_report?: string;
+  }) => api.put<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases/${phaseId}`, data),
+  deletePhase: (id: string, phaseId: string) =>
+    api.delete<void>(`/api/cross-requirements/${id}/phases/${phaseId}`),
+  startVerify: (id: string, phaseId: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/phases/${phaseId}/verify`, body ?? {}),
+  streamVerifyUrl: (id: string, phaseId: string, jobId: string) =>
+    `/api/cross-requirements/${id}/phases/${phaseId}/verify/${jobId}/stream`,
 };

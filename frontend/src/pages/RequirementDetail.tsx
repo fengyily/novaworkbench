@@ -4331,6 +4331,14 @@ export default function RequirementDetail() {
             {t('requirements.detail2.closedBadge')}
           </span>
         )}
+        {/* Cross-project requirement: this row is one of the sub-requirements
+            of a 跨项目需求. Rendered as a link so the user can jump back to
+            the overall design / the progress of the sibling repositories. */}
+        {req.cross_requirement_id && (
+          <Link to={`/cross-requirements/${req.cross_requirement_id}`} className="status-badge">
+            {t('requirements.detail2.crossRequirementBadge')}
+          </Link>
+        )}
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         {/* Marks (preset chip selector) — inline 多选切换。位于 priority 与
             claude-status 之间，避免与 status-badge 视觉冲撞；颜色由 preset
