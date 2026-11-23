@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import MarkdownRender from '../components/MarkdownRender';
+import CrossJobPanel, { type CrossJobLine } from '../components/CrossJobPanel';
 import { createEventStream, type EventStream } from '../api/stream';
 import {
   crossRequirementsApi,
@@ -15,6 +16,7 @@ import {
 } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import { crossPhaseBadgeClass, crossPhaseCanVerify, crossStatusBadgeClass } from '../utils/crossStatus';
+import '../styles/markdown-prose.css';
 import './CrossRequirements.css';
 
 // 跨项目需求详情页。
@@ -45,10 +47,53 @@ function designMarkdown(raw: string): string {
   return trimmed;
 }
 
-/** job log line kinds the SSE panel renders. */
-interface JobLine {
-  type: string;
-  content: string;
+// ── Jobs (overall design / project split / phase verification) ────────────
+//
+// All three jobs look the same on the page: start → attach one SSE stream →
+// echo the log by kind → wrap up. They differ only in their product and in
+// whether they can be recovered, so they share one mechanism:
+//
+//   * The job lives on the SERVER (JobStore). Closing the tab or reloading
+//     does not kill it — the backend runs it with context.Background(),
+//     detached from the request that started it.
+//   * Its job id, however, only exists in the server's in-process registry,
+//     so "find that job again" needs an anchor: the overall design and the
+//     project split each have a state endpoint; phase verification has none.
+//   * A dropped link is NOT a failure: judging a still-running job as failed
+//     because the network hiccuped is the worst possible outcome. The page
+//     converges through "backoff reconnect → fall back to polling the state",
+//     and only a terminal state counts as the end of the job.
+
+/** Which cross-requirement job a panel is showing. */
+type CrossJobKind = 'design' | 'split' | 'verify';
+
+/** The state payload shared by the design / split state endpoints. */
+interface CrossJobState {
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  design?: string;
+  candidates?: CrossSplitCandidate[];
+}
+
+/** Everything the job driver needs to run / recover one kind of job. */
+interface CrossJobBinding {
+  kind: CrossJobKind;
+  /** The SSE endpoint of one job. */
+  streamUrl: (jobId: string) => string;
+  /** The state endpoint used to recover / poll the job (absent = not recoverable). */
+  state?: () => Promise<CrossJobState>;
+  /** Maps a state payload to the same result shape the SSE terminal frame carries. */
+  resultFromState?: (st: CrossJobState) => unknown;
+  /** Called once the job finished successfully. */
+  onDone: (result: any) => void;
+}
+
+/** The two halves of the job driver (they call each other — see driverRef). */
+interface CrossJobDriver {
+  attach: (jobId: string, binding: CrossJobBinding, attempt: number) => void;
+  poll: (jobId: string, binding: CrossJobBinding) => void;
 }
 
 export default function CrossRequirementDetailPage() {
@@ -102,10 +147,29 @@ export default function CrossRequirementDetailPage() {
   // branch name by hand.
   const [branchOptions, setBranchOptions] = useState<Record<string, string[]>>({});
 
-  // job panel
-  const [jobLines, setJobLines] = useState<JobLine[]>([]);
+  // ── job panel ─────────────────────────────────────────────────────────
+  //
+  // jobLines — the log lines of the running job.
+  // jobReconnecting — the SSE link dropped; the job is still alive and the
+  //   page is retrying. NOT a failure.
+  // jobPolling — the reconnects gave up; the job state is being polled.
+  // jobLost — the job could not be found any more (server restarted).
+  const [jobLines, setJobLines] = useState<CrossJobLine[]>([]);
   const [jobRunning, setJobRunning] = useState(false);
+  const [jobReconnecting, setJobReconnecting] = useState(false);
+  const [jobPolling, setJobPolling] = useState(false);
+  const [jobLost, setJobLost] = useState(false);
+  const [jobKind, setJobKind] = useState<CrossJobKind | null>(null);
   const esRef = useRef<EventStream | null>(null);
+  // streamToken — every attach bumps it. A stream whose token is stale
+  // (superseded by a reconnect, or the page unmounted) must not touch the
+  // state any more.
+  const streamTokenRef = useRef(0);
+  // pollTimerRef — the pending state poll, cleared on unmount.
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // driverRef — the job driver (attach / poll). It is a ref because the two
+  // halves call each other; see the CrossJobDriver comment.
+  const driverRef = useRef<CrossJobDriver>({ attach: () => {}, poll: () => {} });
 
   // allProjects — every project (used for its local_path when fetching the
   // branch candidates, and to render the project picker).
@@ -177,7 +241,95 @@ export default function CrossRequirementDetailPage() {
     return () => { cancelled = true; };
   }, [editingProjects, draftProjectKey, allProjects]);
 
-  useEffect(() => () => { esRef.current?.close(); esRef.current = null; }, []);
+  useEffect(() => () => {
+    // Invalidate the pending callbacks of any stream / poll, then tear down.
+    streamTokenRef.current++;
+    esRef.current?.close();
+    esRef.current = null;
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  // ── Re-attach to a running job after the page was reopened ─────────────
+  //
+  // The job lives on the server (closing the tab or reloading does not kill
+  // it), but its job id only exists in the server's in-process registry — the
+  // state endpoint is the only way to find it again. After re-attaching the
+  // panel REPLAYS the whole history and continues live; it never starts a
+  // second run of the same job.
+  useEffect(() => {
+    if (!xreqId) return;
+    let cancelled = false;
+
+    const designBinding: CrossJobBinding = {
+      kind: 'design',
+      streamUrl: jobId => crossRequirementsApi.streamDesignUrl(xreqId, jobId),
+      state: () => crossRequirementsApi.designState(xreqId),
+      resultFromState: st => ({ design: st.design || '' }),
+      onDone: () => setToast(t('crossRequirements.detail.designSaved')),
+    };
+    const splitBinding: CrossJobBinding = {
+      kind: 'split',
+      streamUrl: jobId => crossRequirementsApi.streamSplitUrl(xreqId, jobId),
+      state: () => crossRequirementsApi.splitState(xreqId),
+      resultFromState: st => ({ candidates: st.candidates || [] }),
+      onDone: (result) => {
+        const list = Array.isArray(result?.candidates) ? result.candidates : [];
+        setCandidates(list);
+        setConfirming(true);
+      },
+    };
+
+    void (async () => {
+      try {
+        const [design, split] = await Promise.all([
+          crossRequirementsApi.designState(xreqId),
+          crossRequirementsApi.splitState(xreqId),
+        ]);
+        if (cancelled) return;
+
+        if (design.status === 'running' && design.job_id) {
+          driverRef.current.attach(design.job_id, designBinding, 0);
+        } else if (design.status === 'error') {
+          setJobKind('design');
+          appendLine({
+            type: 'error',
+            content: design.error_message || t('crossRequirements.job.failed'),
+          });
+        }
+
+        if (split.status === 'running' && split.job_id) {
+          // A split that is already running wins over a design recovery —
+          // only one job can drive the panel at a time.
+          driverRef.current.attach(split.job_id, splitBinding, 0);
+        } else if (split.status === 'done' && (split.candidates || []).length > 0) {
+          // The split finished but the user has not confirmed the candidates
+          // yet — offer them again. (Confirming consumes the run, so the state
+          // endpoint answers "none" afterwards and the modal does not pop up
+          // a second time.)
+          setCandidates(split.candidates || []);
+          setConfirming(true);
+        } else if (split.status === 'error') {
+          setJobKind('split');
+          appendLine({
+            type: 'error',
+            content: split.error_message || t('crossRequirements.job.failed'),
+          });
+        }
+      } catch {
+        // The state endpoints are unavailable (older backend) — degrade to the
+        // previous behaviour instead of blocking the page.
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // The recovery runs ONCE per cross requirement: re-running it on every
+    // `t` change (a language switch) would re-attach the stream and rebuild
+    // the panel for no reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xreqId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -207,76 +359,208 @@ export default function CrossRequirementDetailPage() {
 
   // ── jobs ────────────────────────────────────────────────────────────────
 
-  const appendLine = useCallback((line: JobLine) => {
+  const appendLine = useCallback((line: CrossJobLine) => {
     setJobLines(prev => [...prev, line]);
   }, []);
 
-  const runJob = useCallback(
-    (start: () => Promise<{ job_id: string }>, streamUrl: (jobId: string) => string,
-      onDone: (result: any) => void) => {
-      setJobRunning(true);
-      setJobLines([]);
-      start()
-        .then(({ job_id }) => {
-          esRef.current = createEventStream(
-            streamUrl(job_id),
-            (data) => {
-              if (data.type === 'job_done') {
-                esRef.current?.close();
-                esRef.current = null;
-                setJobRunning(false);
-                if (data.status === 'done') {
-                  onDone(data.result || {});
-                  load();
-                } else {
-                  appendLine({
-                    type: 'error',
-                    content: data.error_message || t('crossRequirements.job.failed'),
-                  });
-                }
-              } else if (data.content) {
-                appendLine({ type: data.type || 'message', content: String(data.content) });
-              }
-            },
-            () => {
-              setJobRunning(false);
-              appendLine({ type: 'error', content: t('crossRequirements.job.failed') });
-            },
-          );
-        })
-        .catch(err => {
+  // attachJob opens (or re-opens) the SSE stream of a job.
+  //
+  // A dropped link is NOT a failure: the job keeps running on the server, the
+  // link is what broke. The page converges through "backoff reconnect
+  // (1s→2s→4s→8s) → fall back to polling the state"; only a terminal state
+  // (job_done / state=error) ends the job.
+  //
+  // Every attach clears the line array first: the backend's Subscribe
+  // pre-seeds the channel with ALL existing log lines, so a reconnect
+  // rebuilds the panel completely — no duplicated lines, and no extra
+  // snapshot request.
+  const attachJob = useCallback<CrossJobDriver['attach']>((jobId, binding, attempt) => {
+    esRef.current?.close();
+    esRef.current = null;
+    const token = ++streamTokenRef.current;
+
+    setJobKind(binding.kind);
+    setJobRunning(true);
+    setJobLost(false);
+    setJobPolling(false);
+    setJobReconnecting(attempt > 0);
+    setJobLines([]);
+
+    const es = createEventStream(
+      binding.streamUrl(jobId),
+      (data) => {
+        if (streamTokenRef.current !== token) return;
+        if (data.type === 'job_done') {
+          es.close();
+          if (esRef.current === es) esRef.current = null;
           setJobRunning(false);
-          appendLine({ type: 'error', content: errorMessage(err) });
-        });
-    },
-    [appendLine, load, t],
-  );
+          setJobReconnecting(false);
+          setJobPolling(false);
+          if (data.status === 'done') {
+            binding.onDone(data.result || {});
+            load();
+          } else {
+            appendLine({
+              type: 'error',
+              content: data.error_message || t('crossRequirements.job.failed'),
+            });
+          }
+          return;
+        }
+        if (data.content) {
+          appendLine({ type: data.type || 'message', content: String(data.content) });
+        }
+      },
+      () => {
+        if (streamTokenRef.current !== token) return;
+        // The link dropped mid-flight. The job keeps running on the server,
+        // so this is a reconnect — never a failure.
+        setJobReconnecting(true);
+        if (attempt < 4) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+          setTimeout(() => {
+            if (streamTokenRef.current !== token) return;
+            driverRef.current.attach(jobId, binding, attempt + 1);
+          }, delay);
+          return;
+        }
+        if (binding.state) {
+          setJobReconnecting(false);
+          setJobPolling(true);
+          driverRef.current.poll(jobId, binding);
+          return;
+        }
+        // No state endpoint to fall back to (phase verification) — the job
+        // cannot be recovered, so the page stops waiting for it.
+        setJobRunning(false);
+        setJobReconnecting(false);
+        appendLine({ type: 'error', content: t('crossRequirements.job.failed') });
+      },
+    );
+    esRef.current = es;
+  }, [appendLine, load, t]);
+
+  // pollJobState is the fallback once the reconnects gave up: it asks the
+  // server whether the job is still alive and, if it is, re-attaches the
+  // stream (so the live output resumes as soon as the link comes back).
+  const pollJobState = useCallback<CrossJobDriver['poll']>((jobId, binding) => {
+    const state = binding.state;
+    if (!state) return;
+    const token = streamTokenRef.current;
+
+    const tick = async () => {
+      if (streamTokenRef.current !== token) return;
+      let st: CrossJobState | null = null;
+      try {
+        st = await state();
+      } catch {
+        st = null;
+      }
+      if (streamTokenRef.current !== token) return;
+      if (!st) {
+        // Transient failure — keep polling.
+        pollTimerRef.current = setTimeout(() => { void tick(); }, 3000);
+        return;
+      }
+      if (st.status === 'done') {
+        setJobRunning(false);
+        setJobPolling(false);
+        setJobReconnecting(false);
+        binding.onDone(binding.resultFromState ? binding.resultFromState(st) : {});
+        load();
+        return;
+      }
+      if (st.status === 'error') {
+        setJobRunning(false);
+        setJobPolling(false);
+        appendLine({ type: 'error', content: st.error_message || t('crossRequirements.job.failed') });
+        return;
+      }
+      if (st.status === 'running') {
+        // Still alive — re-attach the stream (the backend replays the whole
+        // history, so the panel rebuilds itself from scratch).
+        driverRef.current.attach(st.job_id || jobId, binding, 0);
+        return;
+      }
+      // status = none → the job is gone (server restarted, or it was evicted).
+      setJobRunning(false);
+      setJobPolling(false);
+      setJobLost(true);
+      appendLine({ type: 'error', content: t('crossRequirements.job.lost') });
+    };
+
+    void tick();
+  }, [appendLine, load, t]);
+
+  // Keep the driver ref pointing at the current closures.
+  useEffect(() => {
+    driverRef.current = { attach: attachJob, poll: pollJobState };
+  }, [attachJob, pollJobState]);
+
+  // startJob launches a job and attaches its stream.
+  const startJob = useCallback((
+    binding: CrossJobBinding,
+    start: () => Promise<{ job_id: string }>,
+  ) => {
+    setJobRunning(true);
+    setJobLines([]);
+    setJobKind(binding.kind);
+    setJobLost(false);
+    setJobReconnecting(false);
+    setJobPolling(false);
+    start()
+      .then(({ job_id }) => {
+        driverRef.current.attach(job_id, binding, 0);
+      })
+      .catch(err => {
+        setJobRunning(false);
+        appendLine({ type: 'error', content: errorMessage(err) });
+      });
+  }, [appendLine]);
 
   const startDesign = () => {
-    runJob(
+    startJob(
+      {
+        kind: 'design',
+        streamUrl: jobId => crossRequirementsApi.streamDesignUrl(xreqId, jobId),
+        state: () => crossRequirementsApi.designState(xreqId),
+        resultFromState: st => ({ design: st.design || '' }),
+        onDone: () => setToast(t('crossRequirements.detail.designSaved')),
+      },
       () => crossRequirementsApi.startDesign(xreqId),
-      jobId => crossRequirementsApi.streamDesignUrl(xreqId, jobId),
-      () => setToast(t('crossRequirements.detail.designSaved')),
     );
   };
 
   const startSplit = () => {
-    runJob(
-      () => crossRequirementsApi.startSplit(xreqId),
-      jobId => crossRequirementsApi.streamSplitUrl(xreqId, jobId),
-      (result) => {
-        const list = Array.isArray(result?.candidates) ? result.candidates : [];
-        setCandidates(list);
-        setConfirming(true);
+    startJob(
+      {
+        kind: 'split',
+        streamUrl: jobId => crossRequirementsApi.streamSplitUrl(xreqId, jobId),
+        state: () => crossRequirementsApi.splitState(xreqId),
+        resultFromState: st => ({ candidates: st.candidates || [] }),
+        onDone: (result) => {
+          const list = Array.isArray(result?.candidates) ? result.candidates : [];
+          setCandidates(list);
+          setConfirming(true);
+        },
       },
+      () => crossRequirementsApi.startSplit(xreqId),
     );
   };
 
   const startVerify = (phaseId: string) => {
-    runJob(
+    startJob(
+      {
+        // Phase verification has no state endpoint yet (its job id is
+        // persisted on the phase but is never cleared on completion, so
+        // "id present" cannot mean "running"). The job is therefore not
+        // recoverable across a page reload — but a dropped link inside one
+        // session still reconnects.
+        kind: 'verify',
+        streamUrl: jobId => crossRequirementsApi.streamVerifyUrl(xreqId, phaseId, jobId),
+        onDone: () => setToast(t('crossRequirements.detail.verdictSaved')),
+      },
       () => crossRequirementsApi.startVerify(xreqId, phaseId),
-      jobId => crossRequirementsApi.streamVerifyUrl(xreqId, phaseId, jobId),
-      () => setToast(t('crossRequirements.detail.verdictSaved')),
     );
   };
 
@@ -419,6 +703,12 @@ export default function CrossRequirementDetailPage() {
   const design = designMarkdown(detail.design_docs);
   const progress = detail.progress;
   const projectRows = detail.projects || [];
+  // The panel title names the job that is currently driving it.
+  const jobTitle = jobKind === 'split'
+    ? t('crossRequirements.job.splitTitle')
+    : jobKind === 'verify'
+      ? t('crossRequirements.job.verifyTitle')
+      : t('crossRequirements.job.designTitle');
   // Already split? Two sources: the batch id on the parent row (the normal
   // path) and the children themselves (rows written by an earlier build
   // carry no batch id). Either way the server refuses a second split.
@@ -826,13 +1116,16 @@ export default function CrossRequirementDetailPage() {
       </section>
 
       {/* ── job panel ────────────────────────────────────────────────── */}
-      {jobLines.length > 0 && (
+      {(jobRunning || jobLines.length > 0 || jobReconnecting || jobPolling) && (
         <section className="xreq-section">
-          <div className="xreq-job">
-            {jobLines.map((line, i) => (
-              <div key={i} className={`xreq-job-line xreq-job-${line.type}`}>{line.content}</div>
-            ))}
-          </div>
+          <CrossJobPanel
+            title={jobTitle}
+            running={jobRunning}
+            reconnecting={jobReconnecting}
+            polling={jobPolling}
+            lost={jobLost}
+            lines={jobLines}
+          />
         </section>
       )}
 

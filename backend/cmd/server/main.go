@@ -949,6 +949,7 @@ func main() {
 	//   DELETE /api/cross-requirements/{id}                  → delete (children detach)
 	//   PUT    /api/cross-requirements/{id}/projects         → participating projects
 	//   POST   /api/cross-requirements/{id}/design           → start the overall-design job
+	//   GET    /api/cross-requirements/{id}/design/state     → the most recent design run
 	//   GET    /api/cross-requirements/{id}/design/{job}/stream → SSE (result.design)
 	//   PUT    /api/cross-requirements/{id}/design           → save a hand-edited design
 	//   POST   /api/cross-requirements/{id}/split            → start the split job
@@ -973,6 +974,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/cross-requirements/{id}", crossWritePerm(http.HandlerFunc(crossReqH.Delete)).ServeHTTP)
 	mux.HandleFunc("PUT /api/cross-requirements/{id}/projects", crossWritePerm(http.HandlerFunc(crossReqH.SetProjects)).ServeHTTP)
 	mux.HandleFunc("POST /api/cross-requirements/{id}/design", crossWritePerm(http.HandlerFunc(crossReqH.StartDesign)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/state", crossReadPerm(http.HandlerFunc(crossReqH.DesignState)).ServeHTTP)
 	mux.HandleFunc("GET /api/cross-requirements/{id}/design/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamDesignJob)).ServeHTTP)
 	mux.HandleFunc("PUT /api/cross-requirements/{id}/design", crossWritePerm(http.HandlerFunc(crossReqH.SaveDesign)).ServeHTTP)
 	mux.HandleFunc("POST /api/cross-requirements/{id}/split", crossWritePerm(http.HandlerFunc(crossReqH.StartSplit)).ServeHTTP)

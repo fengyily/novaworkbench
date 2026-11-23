@@ -471,6 +471,55 @@ func (h *CrossRequirementHandler) SplitState(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// DesignState reports the most recent overall-design run of a cross requirement.
+//
+// 「没跑过」是正常状态不是错误：回 200 + {"status":"none"}。
+//
+// This endpoint is the ONLY way for a reopened page to find the job it left
+// behind: the job itself lives in the JobStore (closing the page does not
+// kill it — runDesign uses context.Background()), but its job id only exists
+// in the in-process registry.
+//
+// It deliberately does NOT read cross_requirements.design_job_id: that column
+// means "the job that produced the current design" (SaveDesign writes it
+// only on success) — empty while the job runs, filled once it finished. Using
+// it as "the running job" would leave the page without an anchor for exactly
+// the window that matters.
+func (h *CrossRequirementHandler) DesignState(w http.ResponseWriter, r *http.Request) {
+	xreqID := r.PathValue("id")
+	run := h.runs.latestFor(crossRunDesign, xreqID, "")
+	if run == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":        "none",
+			"job_id":        "",
+			"running":       false,
+			"error_message": "",
+			"design":        "",
+			"model":         "",
+			"created_at":    int64(0),
+			"finished_at":   int64(0),
+		})
+		return
+	}
+	var created, finished int64
+	if !run.CreatedAt.IsZero() {
+		created = run.CreatedAt.UnixMilli()
+	}
+	if !run.FinishedAt.IsZero() {
+		finished = run.FinishedAt.UnixMilli()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        string(run.Status),
+		"job_id":        run.JobID,
+		"running":       run.Status == store.JobRunning,
+		"error_message": run.Error,
+		"design":        run.Design,
+		"model":         run.Model,
+		"created_at":    created,
+		"finished_at":   finished,
+	})
+}
+
 // ── 阶段验证 ───────────────────────────────────────────────────────────────
 
 // StartVerify launches the phase-verification job.
@@ -649,6 +698,10 @@ func (h *CrossRequirementHandler) StreamDesignJob(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		return
 	}
+	if !crossJobBelongsTo(job, r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		return
+	}
 	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
 		var result any
 		var errMsg string
@@ -666,6 +719,10 @@ func (h *CrossRequirementHandler) StreamSplitJob(w http.ResponseWriter, r *http.
 	jobID := r.PathValue("job_id")
 	job, ok := h.jobs.Get(jobID)
 	if !ok {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		return
+	}
+	if !crossJobBelongsTo(job, r.PathValue("id")) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		return
 	}
@@ -693,6 +750,10 @@ func (h *CrossRequirementHandler) StreamVerifyJob(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		return
 	}
+	if !crossJobBelongsTo(job, r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		return
+	}
 	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
 		var result any
 		var errMsg string
@@ -702,6 +763,19 @@ func (h *CrossRequirementHandler) StreamVerifyJob(w http.ResponseWriter, r *http
 		}
 		return crossDoneFrame(job, status, exitCode, errMsg, result)
 	})
+}
+
+// crossJobBelongsTo reports whether a job was created for a cross requirement.
+//
+// The SSE endpoints look a job up by id alone. Without this check a job id
+// (which is only 8 hex chars and therefore guessable) would let anyone with
+// read access to one cross requirement stream the output of another. The job
+// carries the owning id in RequirementID (set by JobStore.Create).
+func crossJobBelongsTo(job *store.Job, xreqID string) bool {
+	if job == nil {
+		return false
+	}
+	return job.RequirementID == xreqID
 }
 
 // crossDoneFrame builds the terminal SSE frame of a cross-requirement job.
