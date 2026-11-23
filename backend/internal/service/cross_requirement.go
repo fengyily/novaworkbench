@@ -618,15 +618,7 @@ func (s *CrossRequirementService) RefreshDerivedStatus(id string) error {
 		next = model.XReqStatusDeveloping
 	default:
 		// 全部子需求完成：有阶段就等阶段结论。
-		pending := false
-		for _, p := range phases {
-			if p.Status == model.PhaseStatusPending || p.Status == model.PhaseStatusReady ||
-				p.Status == model.PhaseStatusVerifying || p.Status == model.PhaseStatusPendingReview {
-				pending = true
-				break
-			}
-		}
-		if pending {
+		if phasesPendingConclusion(phases) {
 			next = model.XReqStatusIntegrating
 		} else {
 			next = model.XReqStatusDone
@@ -637,6 +629,24 @@ func (s *CrossRequirementService) RefreshDerivedStatus(id string) error {
 		return nil
 	}
 	return s.SetStatus(id, next)
+}
+
+// phasesPendingConclusion reports whether any phase still lacks a final
+// verdict, i.e. the cross requirement is not finished yet.
+//
+// 只有 passed / skipped 是终态。pending / ready / verifying / pending_review
+// 表示阶段还在跑；**failed 也算未完成** —— 联调不通过意味着要返工，整体需求
+// 不能被标成 done，否则列表页会把「联调失败」显示成 100% 完成。
+func phasesPendingConclusion(phases []model.CrossRequirementPhase) bool {
+	for _, p := range phases {
+		switch p.Status {
+		case model.PhaseStatusPending, model.PhaseStatusReady,
+			model.PhaseStatusVerifying, model.PhaseStatusPendingReview,
+			model.PhaseStatusFailed:
+			return true
+		}
+	}
+	return false
 }
 
 // ── 整体方案 ───────────────────────────────────────────────────────────────

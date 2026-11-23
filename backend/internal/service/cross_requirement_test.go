@@ -445,3 +445,69 @@ func TestCrossRequirement_RefreshIsIdempotent(t *testing.T) {
 			before.UpdatedAt, after.UpdatedAt)
 	}
 }
+
+// 阶段联调不通过时，整体需求不能被标成 done —— 必须停在「联调中」。
+func TestCrossRequirement_FailedPhaseKeepsIntegrating(t *testing.T) {
+	svc, reqSvc, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+	p2 := seedCrossProject(t, projSvc, "api-svc")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "跨项目联调",
+		ProjectIDs: []string{p1.ID, p2.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	children, err := svc.ConfirmSplit(x.ID, []model.CrossRequirementSplitCandidate{
+		{Title: "前端联调", ProjectID: p1.ID, Order: 1},
+		{Title: "后端联调", ProjectID: p2.ID, Order: 2},
+	})
+	if err != nil {
+		t.Fatalf("confirm split: %v", err)
+	}
+	for _, c := range children {
+		markDone(t, reqSvc, c.ID)
+	}
+	phase, err := svc.CreatePhase(x.ID, model.CrossRequirementPhaseReq{
+		Name:           "阶段一",
+		RequirementIDs: []string{children[0].ID, children[1].ID},
+	})
+	if err != nil {
+		t.Fatalf("create phase: %v", err)
+	}
+	if _, err := svc.UpdatePhase(x.ID, phase.ID, model.UpdateCrossRequirementPhaseReq{
+		Status: model.PhaseStatusFailed,
+	}); err != nil {
+		t.Fatalf("fail phase: %v", err)
+	}
+
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Status != model.XReqStatusIntegrating {
+		t.Fatalf("status = %q, want %q (a failed phase must not complete the requirement)",
+			row.Status, model.XReqStatusIntegrating)
+	}
+
+	// 阶段改成通过之后，整体需求才收敛到 done。
+	if _, err := svc.UpdatePhase(x.ID, phase.ID, model.UpdateCrossRequirementPhaseReq{
+		Status: model.PhaseStatusPassed,
+	}); err != nil {
+		t.Fatalf("pass phase: %v", err)
+	}
+	if err := svc.RefreshDerivedStatus(x.ID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row, err = svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Status != model.XReqStatusDone {
+		t.Fatalf("status = %q, want %q", row.Status, model.XReqStatusDone)
+	}
+}
