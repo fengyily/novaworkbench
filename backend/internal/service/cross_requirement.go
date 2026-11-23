@@ -527,74 +527,15 @@ func (s *CrossRequirementService) AlreadySplit(id string) (bool, error) {
 // Ordered by split_order (the order the user arranged in the confirm dialog)
 // then created_at — the same convention as the ordinary child list, because
 // one split batch shares a single created_at.
+//
+// 前置依赖随子需求**一次性**取回（一条 JOIN），不再为每个子需求单跑一次查询
+// —— 那正是列表页 N+1 的根因。
 func (s *CrossRequirementService) ListChildren(id string) ([]model.CrossRequirementChild, error) {
-	rows, err := s.db.Query(
-		`SELECT r.id,r.project_id,COALESCE(p.name,''),r.title,r.status,r.priority,r.split_order
-		 FROM requirements r
-		 LEFT JOIN projects p ON p.id = r.project_id
-		 WHERE r.cross_requirement_id = ?
-		 ORDER BY CASE WHEN r.split_order > 0 THEN 0 ELSE 1 END ASC, r.split_order ASC, r.created_at ASC, r.id ASC`, id)
+	agg, err := s.loadChildAggregate([]string{id})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []model.CrossRequirementChild{}
-	for rows.Next() {
-		var c model.CrossRequirementChild
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.ProjectName, &c.Title, &c.Status, &c.Priority, &c.SplitOrder); err != nil {
-			return nil, err
-		}
-		c.DependsOn = []string{}
-		c.BlockedBy = []string{}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Attach the dependency edges + which prerequisites are still unmet.
-	// The dependency table has NO project constraint — it is already a
-	// cross-project DAG — so the edges between children are read directly.
-	for i := range out {
-		deps, err := s.requirementDependencies(out[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		out[i].DependsOn = deps.dependsOn
-		out[i].BlockedBy = deps.unmet
-	}
-	return out, nil
-}
-
-// requirementDependencies reads a requirement's prerequisites plus which of
-// them are not done yet.
-type reqDeps struct {
-	dependsOn []string
-	unmet     []string
-}
-
-func (s *CrossRequirementService) requirementDependencies(reqID string) (reqDeps, error) {
-	out := reqDeps{dependsOn: []string{}, unmet: []string{}}
-	rows, err := s.db.Query(
-		`SELECT d.depends_on_id, COALESCE(r.status,'') FROM requirement_dependencies d
-		 LEFT JOIN requirements r ON r.id = d.depends_on_id
-		 WHERE d.requirement_id = ? ORDER BY d.created_at ASC, d.id ASC`, reqID)
-	if err != nil {
-		return out, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var depID, status string
-		if err := rows.Scan(&depID, &status); err != nil {
-			return out, err
-		}
-		out.dependsOn = append(out.dependsOn, depID)
-		if status != "done" {
-			out.unmet = append(out.unmet, depID)
-		}
-	}
-	return out, rows.Err()
+	return agg.Children[id], nil
 }
 
 // ListDependencies returns the dependency edges among the children.
@@ -634,76 +575,17 @@ func (s *CrossRequirementService) ListDependencies(id string) ([]model.CrossRequ
 //
 // Nothing is read from a stored counter — the numbers are computed from the
 // children rows on every call, so they can never drift from reality.
+//
+// 子需求状态与前置依赖一次性取回（批量聚合），语句数与子需求个数无关。
 func (s *CrossRequirementService) Progress(id string) (model.CrossRequirementProgress, error) {
-	progress := model.CrossRequirementProgress{
-		Projects:     []model.CrossRequirementProjectProgress{},
-		StatusCounts: map[string]int{},
-	}
-
-	projects, err := s.ListProjects(id)
+	agg, err := s.loadChildAggregate([]string{id})
 	if err != nil {
-		return progress, err
+		return model.CrossRequirementProgress{
+			Projects:     []model.CrossRequirementProjectProgress{},
+			StatusCounts: map[string]int{},
+		}, err
 	}
-	byProject := map[string]*model.CrossRequirementProjectProgress{}
-	for _, p := range projects {
-		progress.Projects = append(progress.Projects, model.CrossRequirementProjectProgress{
-			ProjectID:   p.ProjectID,
-			ProjectName: p.ProjectName,
-			Role:        p.Role,
-		})
-	}
-	for i := range progress.Projects {
-		byProject[progress.Projects[i].ProjectID] = &progress.Projects[i]
-	}
-
-	rows, err := s.db.Query(
-		`SELECT project_id,status,COUNT(1) FROM requirements WHERE cross_requirement_id = ? GROUP BY project_id,status`, id)
-	if err != nil {
-		return progress, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var projectID, status string
-		var count int
-		if err := rows.Scan(&projectID, &status, &count); err != nil {
-			return progress, err
-		}
-		progress.StatusCounts[status] = progress.StatusCounts[status] + count
-		progress.Total += count
-		if status == "done" {
-			progress.Done += count
-		}
-		if p, ok := byProject[projectID]; ok {
-			p.Total += count
-			if status == "done" {
-				p.Done += count
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return progress, err
-	}
-
-	// Blocked = children whose prerequisites are not done yet. Reuses the same
-	// rule as the coding gate (UnmetDependencies) — a child is blocked iff some
-	// prerequisite row is not 'done'.
-	children, err := s.ListChildren(id)
-	if err != nil {
-		return progress, err
-	}
-	for _, c := range children {
-		if len(c.BlockedBy) > 0 {
-			progress.Blocked++
-			if p, ok := byProject[c.ProjectID]; ok {
-				p.Blocked++
-			}
-		}
-	}
-
-	if progress.Total > 0 {
-		progress.Percent = progress.Done * 100 / progress.Total
-	}
-	return progress, nil
+	return agg.Progress[id], nil
 }
 
 // RefreshDerivedStatus recomputes the coarse lifecycle status from the
@@ -889,70 +771,14 @@ func DesignDocsToMarkdown(docs string) string {
 // a phase is ready when every member requirement is done and its
 // prerequisites are met. passed / failed / skipped are human verdicts and are
 // stored as-is — a refresh never overwrites them.
+//
+// 阶段成员一次性取回（一条 JOIN），不再为每个阶段单跑一次查询。
 func (s *CrossRequirementService) ListPhases(id string) ([]model.CrossRequirementPhase, error) {
-	rows, err := s.db.Query(
-		`SELECT id,cross_requirement_id,name,description,sort_order,status,verify_job_id,verify_report,verified_at,created_at,updated_at
-		 FROM cross_requirement_phases WHERE cross_requirement_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC`, id)
+	phases, err := s.loadPhaseAggregate([]string{id})
 	if err != nil {
 		return nil, err
 	}
-	items := []model.CrossRequirementPhase{}
-	for rows.Next() {
-		var p model.CrossRequirementPhase
-		var verifiedAt, createdAt, updatedAt sql.NullString
-		if err := rows.Scan(&p.ID, &p.CrossRequirementID, &p.Name, &p.Description, &p.SortOrder, &p.Status,
-			&p.VerifyJobID, &p.VerifyReport, &verifiedAt, &createdAt, &updatedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		p.VerifiedAt = verifiedAt.String
-		p.CreatedAt = createdAt.String
-		p.UpdatedAt = updatedAt.String
-		p.Items = []model.CrossRequirementPhaseItem{}
-		items = append(items, p)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	for i := range items {
-		members, err := s.phaseMembers(items[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		items[i].Items = members
-		items[i].Status = derivePhaseStatus(items[i].Status, members)
-	}
-	return items, nil
-}
-
-// phaseMembers returns the phase's member requirements with their statuses.
-type phaseMember struct {
-	requirementID string
-	status        string
-	blocked       bool
-}
-
-func (s *CrossRequirementService) phaseMembers(phaseID string) ([]model.CrossRequirementPhaseItem, error) {
-	rows, err := s.db.Query(
-		`SELECT i.requirement_id, COALESCE(r.status,'')
-		 FROM cross_requirement_phase_items i
-		 LEFT JOIN requirements r ON r.id = i.requirement_id
-		 WHERE i.phase_id = ? ORDER BY r.split_order ASC, r.created_at ASC, i.id ASC`, phaseID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []model.CrossRequirementPhaseItem{}
-	for rows.Next() {
-		var item model.CrossRequirementPhaseItem
-		if err := rows.Scan(&item.RequirementID, &item.Status); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, rows.Err()
+	return phases[id], nil
 }
 
 // derivePhaseStatus computes the effective status of a phase.
@@ -1188,20 +1014,15 @@ func (s *CrossRequirementService) DetailFresh(id string) (*model.CrossRequiremen
 }
 
 // Detail assembles the full detail payload of a cross requirement.
+//
+// 子需求、进展、阶段来自**同一份**批量聚合 —— 不再把 Progress 与
+// ListChildren 各跑一遍（那是详情页的第二个 N+1）。
 func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDetail, error) {
 	x, err := s.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	projects, err := s.ListProjects(id)
-	if err != nil {
-		return nil, err
-	}
-	progress, err := s.Progress(id)
-	if err != nil {
-		return nil, err
-	}
-	children, err := s.ListChildren(id)
+	agg, err := s.LoadAggregate([]string{id})
 	if err != nil {
 		return nil, err
 	}
@@ -1209,29 +1030,13 @@ func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDeta
 	if err != nil {
 		return nil, err
 	}
-	phases, err := s.ListPhases(id)
-	if err != nil {
-		return nil, err
-	}
 
-	detail := &model.CrossRequirementDetail{
+	return &model.CrossRequirementDetail{
 		CrossRequirement: *x,
-		Projects:         progress.Projects,
-		Children:         children,
+		Projects:         agg.Progress[id].Projects,
+		Children:         agg.Children[id],
 		Dependencies:     deps,
-		Phases:           phases,
-		Progress:         progress,
-	}
-	// The per-project role comes from the mapping (the progress aggregate
-	// only knows counts).
-	roleByProject := map[string]string{}
-	for _, p := range projects {
-		roleByProject[p.ProjectID] = p.Role
-	}
-	for i := range detail.Projects {
-		if role, ok := roleByProject[detail.Projects[i].ProjectID]; ok {
-			detail.Projects[i].Role = role
-		}
-	}
-	return detail, nil
+		Phases:           agg.Phases[id],
+		Progress:         agg.Progress[id],
+	}, nil
 }

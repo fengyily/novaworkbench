@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/dbtest"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
@@ -535,5 +537,110 @@ func TestCrossRequirementHandler_StatusOnlyUpdate(t *testing.T) {
 	detail, _ = env["data"].(map[string]any)
 	if detail["status"] != model.XReqStatusArchived {
 		t.Fatalf("status after the read = %v, want %q", detail["status"], model.XReqStatusArchived)
+	}
+}
+
+// newCountingCrossHandlerTest wires the cross-requirement handler over a
+// throwaway SQLite database whose SQL statements are counted.
+//
+// The counting pool replaces the migration pool AFTER the schema is in place,
+// so only the statements the test itself triggers are counted.
+func newCountingCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB, *int64) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	d, err := db.Init(db.Config{Driver: string(db.SQLite), SQLitePath: path})
+	if err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	count, err := dbtest.NewCountingDB(d, path)
+	if err != nil {
+		t.Fatalf("counting db: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	projSvc := service.NewProjectService(d, nil, nil)
+	reqSvc := service.NewRequirementService(d, nil)
+	crossSvc := service.NewCrossRequirementService(d)
+	h := NewCrossRequirementHandler(crossSvc, reqSvc, projSvc, nil, store.NewJobStore(16),
+		nil, nil, nil)
+	return h, d, count
+}
+
+// TestCrossRequirementHandler_ListQueryCountIsConstant 是列表页 N+1 的回归
+// 测试。
+//
+// 修复前：列表页对**每条**跨项目需求跑一次聚合，而聚合内部又为**每个子需求**
+// 单跑一次前置依赖查询 —— 20 条需求 × 10 个子需求 ≈ 200+ 条语句，每刷新一次
+// 页面就重来一遍。
+//
+// 修复后：整页只跑固定的几条语句 —— 语句数与需求条数、子需求个数都无关。
+func TestCrossRequirementHandler_ListQueryCountIsConstant(t *testing.T) {
+	h, d, count := newCountingCrossHandlerTest(t)
+	crossSvc := service.NewCrossRequirementService(d)
+
+	// 装一条跨项目需求 + 若干子需求（依赖链跨两个项目）。
+	seedListFixture := func(t *testing.T, title string, children int) {
+		t.Helper()
+		p1 := seedCrossProject(t, d, "web-"+title)
+		p2 := seedCrossProject(t, d, "api-"+title)
+		x, err := crossSvc.Create(model.CreateCrossRequirementReq{
+			Title:      title,
+			ProjectIDs: []string{p1, p2},
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		cands := make([]model.CrossRequirementSplitCandidate, 0, children)
+		for i := 0; i < children; i++ {
+			projectID := p1
+			if i%2 == 1 {
+				projectID = p2
+			}
+			cand := model.CrossRequirementSplitCandidate{
+				Title:     title + "-子需求",
+				ProjectID: projectID,
+				Order:     i + 1,
+			}
+			if i > 0 {
+				cand.DependsOn = []int{i}
+			}
+			cands = append(cands, cand)
+		}
+		if _, err := crossSvc.ConfirmSplit(x.ID, cands); err != nil {
+			t.Fatalf("confirm split %s: %v", title, err)
+		}
+	}
+	seedListFixture(t, "一条", 10)
+
+	// 先跑一次让派生状态落定（第一次调用会写库），之后每次刷新的语句数才是
+	// 可比的。
+	if code, _ := callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil); code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+
+	atomic.StoreInt64(count, 0)
+	if code, _ := callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil); code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	oneReq := atomic.LoadInt64(count)
+	if oneReq == 0 {
+		t.Fatal("no statement was counted — the counter is not wired")
+	}
+
+	// 再加一条需求 + 10 个子需求。
+	seedListFixture(t, "两条", 10)
+	if code, _ := callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil); code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+
+	atomic.StoreInt64(count, 0)
+	if code, _ := callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil); code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	twoReqs := atomic.LoadInt64(count)
+
+	if twoReqs != oneReq {
+		t.Fatalf("list statement count grew with the number of rows: %d for one requirement, %d for two — the N+1 is back",
+			oneReq, twoReqs)
 	}
 }

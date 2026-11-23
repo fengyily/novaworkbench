@@ -309,21 +309,36 @@ func (h *CrossRequirementHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	progress := map[string]model.CrossRequirementProgress{}
 	out := make([]model.CrossRequirement, 0, len(items))
+
+	// 进展 / 阶段**一次性**聚合：整页只跑固定的几条语句，与行数、子需求个数
+	// 无关。原来是对每条需求各跑一次聚合，而聚合内部又为每个子需求单跑一次
+	// 前置依赖查询 —— 20 条需求 × 10 个子需求 ≈ 200+ 条语句，每刷新一次页面
+	// 就重来一遍。
+	ids := make([]string, 0, len(items))
+	for i := range items {
+		ids = append(ids, items[i].ID)
+	}
+	agg, aggErr := h.svc.LoadAggregate(ids)
+	if aggErr != nil {
+		log.Printf("[xreq] load aggregate: %v", aggErr)
+	}
+
 	for i := range items {
 		item := &items[i]
-		p, pErr := h.svc.Progress(item.ID)
-		if pErr == nil {
+		if aggErr == nil {
 			// 刷新派生状态（幂等：状态没变就不写库），并把生效的状态回填到
 			// 响应里 —— 否则列表页显示的是子需求在别处完成前的旧状态。
-			if _, sErr := h.svc.ApplyDerivedStatus(item, p, nil); sErr != nil {
+			//
+			// 阶段随聚合一起取回，所以这里不必再让服务层单独查一次。
+			if _, sErr := h.svc.ApplyDerivedStatus(item, agg.Progress[item.ID], agg.Phases[item.ID]); sErr != nil {
 				log.Printf("[xreq] refresh derived status %s: %v", item.ID, sErr)
 			}
 		}
 		if status != "" && status != "all" && item.Status != status {
 			continue
 		}
-		if pErr == nil {
-			progress[item.ID] = p
+		if aggErr == nil {
+			progress[item.ID] = agg.Progress[item.ID]
 		}
 		out = append(out, *item)
 	}
