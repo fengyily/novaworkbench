@@ -410,7 +410,7 @@ func main() {
 	// design prompt byte-identical.
 	wizardH.SetCrossRequirementSvc(crossReqSvc)
 	crossReqH := handler.NewCrossRequirementHandler(crossReqSvc, reqSvc, projectSvc, llmGateway,
-		sharedJobs, roleSvc, claudeCfgSvc, usageSvc, settingSvc)
+		sharedJobs, roleSvc, claudeCfgSvc, usageSvc)
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
 	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so

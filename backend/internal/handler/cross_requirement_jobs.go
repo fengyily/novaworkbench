@@ -47,6 +47,108 @@ type crossJobReq struct {
 	Effort string `json:"effort"`
 }
 
+// crossJobSpec — 一个跨项目作业的 claude 调用参数。
+type crossJobSpec struct {
+	// Prompt — 已经组装好的提示词（**含各参与仓库的项目约定**）。
+	Prompt string
+	// WorkDir — 临时工作区（作业不在任何仓库里跑）。
+	WorkDir string
+	// SystemPrompt — persona（architect）。
+	SystemPrompt string
+	// Model — 生效的模型（空 = CLI 默认）。
+	Model string
+	// Effort — 推理档位。
+	Effort string
+	// ClaudeConfigID — 生效的 claude 配置（空 = 当前激活配置）。
+	ClaudeConfigID string
+	// CrossRequirementID — 跨项目需求 id（用来解析要授权的参与仓库）。
+	CrossRequirementID string
+}
+
+// crossStreamOpts 组装一个跨项目作业的 claude 调用参数。
+//
+// 三个作业（整体方案 / 按项目拆分 / 阶段验证）的调用参数只差提示词与工作目录，
+// 所以它们共用这一个构造器 —— 约定（参与仓库的项目级 CLAUDE.md）必须**在**
+// 提示词里，而提示词是在**调用本函数之前**组装好的。
+//
+// 为什么单独抽出来：llm.StreamOpts.Prompt 是**值拷贝**。提示词组装好之后
+// 再去改那个字符串（比如事后追加一段约定）对已经构造好的 opts 没有任何影响 ——
+// 约定就那样静默地留在了本地变量里，模型永远看不到。参数集中在这里之后，
+// 「提示词在构造 opts 之前就已经完整」这件事由类型和调用顺序共同保证，
+// 并且可以被一个测试直接断言（见 handler/cross_requirement_test.go）。
+func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamOpts {
+	return llm.StreamOpts{
+		Prompt:         spec.Prompt,
+		WorkDir:        spec.WorkDir,
+		SystemPrompt:   spec.SystemPrompt,
+		Model:          cliModelArg(spec.Model),
+		Effort:         spec.Effort,
+		ClaudeConfigID: spec.ClaudeConfigID,
+		// The participating repositories must be readable, otherwise the
+		// model cannot ground the contract in real file paths.
+		AddDirs: h.crossProjectDirs(spec.CrossRequirementID),
+		// Read-only: producing a design / a split / a verification report
+		// must not touch any repository.
+		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
+	}
+}
+
+// ── 项目约定的送达方式 ─────────────────────────────────────────────────────
+// 项目约定（CLAUDE.md）在跨项目作业里的送达方式 —— 为什么走提示词而不是原生通道。
+//
+// 单项目阶段由 claudeDocInjection 决定怎么送：
+//
+//   - native 模式：把受管副本 materialize 成一份真实的 CLAUDE.md，通过
+//     --add-dir 授权 + CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD 让 CLI 自己
+//     加载（llm.StreamOpts.ClaudeMdDir）。
+//   - prompt 模式：把文档正文拼进提示词。
+//
+// 跨项目作业**只能走 prompt 模式**，原因是原生通道一次只能带**一份**文档：
+// llm.StreamOpts.ClaudeMdDir 是单个目录，N 个参与仓库的受管副本没法都放进去
+// （后一个会覆盖前一个）。而且原生通道不带归属标注 —— 跨仓库方案必须让模型
+// 知道「哪份约定约束哪个仓库」，一份无标注的文档表达不了这件事。
+//
+// 所以约定随提示词一起送达，每个参与仓库一节、标题带仓库名（见
+// handler/cross_claude_doc.go 与 prompt/cross_claude_doc.go）。代价是受管副本
+// 不再经过 CLI 自己的项目记忆通道 —— 但那份通道在跨项目作业里本来就用不上：
+// 作业跑在临时目录里，CLI 没有任何项目文档可读（--add-dir 只给读权限，不让
+// CLI 加载目录里的 CLAUDE.md；要它加载必须打开那个进程级的环境变量，而打开
+// 它会让 gateway 把所有 --add-dir 目录的 CLAUDE.md 都算进排除列表）。
+//
+// 结论：这里刻意**不**调用 claudeDocInjection.ApplyTo —— 它会设置
+// opts.ClaudeMdDir，于是 gateway 打开那个环境变量、并把参与仓库目录里的
+// CLAUDE.md 排除掉；受管副本只会有最后一个被 CLI 加载（其余 N-1 份仍然只
+// 在提示词里），而那最后一份会在提示词与原生通道里各出现一次。
+
+// ── 三个作业的提示词组装 ───────────────────────────────────────────────────
+//
+// 每个作业的提示词都必须带上**参与仓库的项目级 CLAUDE.md 约定**：跨项目作业
+// 跑在临时目录里，CLI 的项目记忆通道读不到任何项目文档（见上一节），约定只能
+// 随提示词一起送达。
+//
+// 提示词在**构造 llm.StreamOpts 之前**组装完毕 —— StreamOpts.Prompt 是值拷贝，
+// 事后往那个字符串上追加内容对已经构造好的 opts 没有任何影响。
+
+// crossDesignPrompt 组装整体方案的提示词。
+func (h *CrossRequirementHandler) crossDesignPrompt(xreq *model.CrossRequirement, projects []prompt.CrossProjectInput, previousDesign string) string {
+	return prompt.BuildCrossDesignPrompt(xreq.Title, xreq.Description,
+		crossAcceptance(xreq.AcceptanceCriteria), projects, previousDesign, h.crossConventions(xreq.ID))
+}
+
+// crossSplitPrompt 组装按项目拆分的提示词。
+func (h *CrossRequirementHandler) crossSplitPrompt(xreq *model.CrossRequirement, design string, projects []prompt.CrossProjectInput) string {
+	return prompt.BuildCrossSplitPrompt(xreq.Title, design, projects, h.crossConventions(xreq.ID))
+}
+
+// crossPhasePrompt 组装阶段验证的提示词。
+//
+// 只有本阶段涉及的仓库贡献约定 —— 阶段验证的是这一片交付物，拿别的仓库的
+// 规矩去判它，结论就没有意义。
+func (h *CrossRequirementHandler) crossPhasePrompt(xreq *model.CrossRequirement, phase *model.CrossRequirementPhase, members []prompt.CrossPhaseMember) string {
+	return prompt.BuildCrossPhasePrompt(phase.Name, phase.Description, members,
+		service.DesignDocsToMarkdown(xreq.DesignDocs), h.crossPhaseConventions(members))
+}
+
 // ── 整体方案 ───────────────────────────────────────────────────────────────
 
 // StartDesign launches the overall-design job.
@@ -134,7 +236,7 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 		return
 	}
 	previous := service.DesignDocsToMarkdown(xreq.DesignDocs)
-	promptText := prompt.BuildCrossDesignPrompt(xreq.Title, xreq.Description, crossAcceptance(xreq.AcceptanceCriteria), projects, previous)
+	promptText := h.crossDesignPrompt(xreq, projects, previous)
 
 	workDir, cleanup, err := crossWorkDir("design")
 	if err != nil {
@@ -143,20 +245,15 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 	}
 	defer cleanup()
 
-	opts := llm.StreamOpts{
-		Prompt:         promptText,
-		WorkDir:        workDir,
-		SystemPrompt:   systemPrompt,
-		Model:          cliModelArg(modelName),
-		Effort:         resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID: configID,
-		// The participating repositories must be readable, otherwise the
-		// model cannot ground the contract in real file paths.
-		AddDirs: h.crossProjectDirs(xreq.ID),
-		// Read-only: producing a design must not touch any repository.
-		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
-	}
-	promptText += h.crossClaudeDocBlock(xreq.ID, workDir)
+	opts := h.crossStreamOpts(crossJobSpec{
+		Prompt:             promptText,
+		WorkDir:            workDir,
+		SystemPrompt:       systemPrompt,
+		Model:              modelName,
+		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID:     configID,
+		CrossRequirementID: xreq.ID,
+	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧭 正在生成跨项目整体方案…"})
 
@@ -277,7 +374,7 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 		}
 	}()
 
-	promptText := prompt.BuildCrossSplitPrompt(xreq.Title, design, projects)
+	promptText := h.crossSplitPrompt(xreq, design, projects)
 
 	workDir, cleanup, err := crossWorkDir("split")
 	if err != nil {
@@ -286,17 +383,15 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 	}
 	defer cleanup()
 
-	opts := llm.StreamOpts{
-		Prompt:          promptText,
-		WorkDir:         workDir,
-		SystemPrompt:    systemPrompt,
-		Model:           cliModelArg(modelName),
-		Effort:          resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID:  configID,
-		AddDirs:         h.crossProjectDirs(xreq.ID),
-		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
-	}
-	promptText += h.crossClaudeDocBlock(xreq.ID, workDir)
+	opts := h.crossStreamOpts(crossJobSpec{
+		Prompt:             promptText,
+		WorkDir:            workDir,
+		SystemPrompt:       systemPrompt,
+		Model:              modelName,
+		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID:     configID,
+		CrossRequirementID: xreq.ID,
+	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在按项目拆分整体方案…"})
 
@@ -437,8 +532,7 @@ func (h *CrossRequirementHandler) runVerify(job *store.Job, xreqID, phaseID stri
 	}
 
 	members := h.crossPhaseMembers(xreqID, phase)
-	promptText := prompt.BuildCrossPhasePrompt(phase.Name, phase.Description, members,
-		service.DesignDocsToMarkdown(xreq.DesignDocs))
+	promptText := h.crossPhasePrompt(xreq, phase, members)
 
 	workDir, cleanup, err := crossWorkDir("verify")
 	if err != nil {
@@ -447,17 +541,15 @@ func (h *CrossRequirementHandler) runVerify(job *store.Job, xreqID, phaseID stri
 	}
 	defer cleanup()
 
-	opts := llm.StreamOpts{
-		Prompt:          promptText,
-		WorkDir:         workDir,
-		SystemPrompt:    systemPrompt,
-		Model:           cliModelArg(modelName),
-		Effort:          resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID:  configID,
-		AddDirs:         h.crossProjectDirs(xreqID),
-		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
-	}
-	promptText += h.crossClaudeDocBlock(xreqID, workDir)
+	opts := h.crossStreamOpts(crossJobSpec{
+		Prompt:             promptText,
+		WorkDir:            workDir,
+		SystemPrompt:       systemPrompt,
+		Model:              modelName,
+		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID:     configID,
+		CrossRequirementID: xreqID,
+	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在做阶段验证…"})
 
@@ -511,6 +603,7 @@ func (h *CrossRequirementHandler) crossPhaseMembers(xreqID string, phase *model.
 		member := prompt.CrossPhaseMember{
 			RequirementID: child.ID,
 			Title:         child.Title,
+			ProjectID:     child.ProjectID,
 			ProjectName:   child.ProjectName,
 			Status:        child.Status,
 		}
@@ -661,37 +754,4 @@ func (h *CrossRequirementHandler) crossUsageCtx(step, xreqID, jobID, modelName, 
 		Summary:        "跨项目需求",
 	}
 	return ctx
-}
-
-// crossClaudeDocBlock renders the participating projects' CLAUDE.md
-// conventions as a prompt block.
-//
-// The cross-requirement run works in a **scratch** directory, so the CLI's own
-// project-memory channel has nothing to load — the conventions have to travel
-// through the prompt. Each participating project contributes its own block
-// (prefixed with the project name), because the model must know WHICH
-// repository's conventions apply to which part of the design.
-func (h *CrossRequirementHandler) crossClaudeDocBlock(xreqID, workDir string) string {
-	if h.projectSvc == nil {
-		return ""
-	}
-	projects, err := h.svc.ListProjects(xreqID)
-	if err != nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, p := range projects {
-		doc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, p.ProjectID, workDir)
-		block := doc.Block()
-		if strings.TrimSpace(block) == "" {
-			continue
-		}
-		name := strings.TrimSpace(p.ProjectName)
-		if name == "" {
-			name = p.ProjectID
-		}
-		b.WriteString("\n\n## 项目约定 · " + name + "\n")
-		b.WriteString(block)
-	}
-	return b.String()
 }

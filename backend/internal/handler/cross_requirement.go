@@ -41,7 +41,6 @@ type CrossRequirementHandler struct {
 	roleSvc    *service.RoleService
 	claudeCfg  *service.ClaudeConfigService
 	usageSvc   usageRecorder
-	settingSvc *service.SettingService
 	// runs — 进程内的作业登记处（状态 / 产物 / 并发闸门）。
 	runs *crossRequirementRuns
 }
@@ -56,7 +55,6 @@ func NewCrossRequirementHandler(
 	roleSvc *service.RoleService,
 	claudeCfg *service.ClaudeConfigService,
 	usageSvc usageRecorder,
-	settingSvc *service.SettingService,
 ) *CrossRequirementHandler {
 	return &CrossRequirementHandler{
 		svc:        svc,
@@ -67,7 +65,6 @@ func NewCrossRequirementHandler(
 		roleSvc:    roleSvc,
 		claudeCfg:  claudeCfg,
 		usageSvc:   usageSvc,
-		settingSvc: settingSvc,
 		runs:       newCrossRequirementRuns(crossRunsCap),
 	}
 }

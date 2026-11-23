@@ -58,6 +58,8 @@ type CrossPhaseMember struct {
 	RequirementID string
 	// Title — 子需求标题。
 	Title string
+	// ProjectID — 所属项目 id。
+	ProjectID string
 	// ProjectName — 所属项目名。
 	ProjectName string
 	// ProjectPath — 所属项目在磁盘上的路径。
@@ -70,10 +72,16 @@ type CrossPhaseMember struct {
 
 // BuildCrossPhasePrompt renders the phase-verification prompt.
 //
-// Inputs: the phase (name / description), its member sub-requirements and
-// the overall design (so the contract the report must check against is in
-// front of the model).
-func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPhaseMember, designMarkdown string) string {
+// Inputs: the phase (name / description), its member sub-requirements, the
+// overall design (so the contract the report must check against is in front
+// of the model) and the CLAUDE.md conventions of the projects the phase
+// touches.
+//
+// The conventions go BEFORE the output contract: the model reads the
+// contract last, and it must read the conventions before it starts
+// verifying — a verdict against the wrong repository's rules is worse than
+// no verdict at all.
+func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPhaseMember, designMarkdown string, conventions []CrossProjectDoc) string {
 	var b strings.Builder
 
 	b.WriteString("请对下面这个阶段做跨项目验证。\n\n")
@@ -110,6 +118,12 @@ func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPh
 	if design := strings.TrimSpace(designMarkdown); design != "" {
 		b.WriteString("## 整体方案（含跨项目接口契约 —— 验证的依据）\n\n")
 		b.WriteString(truncateRunes(design, 16*1024))
+		b.WriteString("\n\n")
+	}
+
+	// 本阶段涉及仓库的项目级 CLAUDE.md —— 验证结论必须按各仓库自己的约定判。
+	if section := BuildCrossProjectConventionSection(conventions); section != "" {
+		b.WriteString(section)
 		b.WriteString("\n\n")
 	}
 

@@ -184,7 +184,7 @@ func TestBuildCrossContextBlock_Empty(t *testing.T) {
 // 整体方案的 prompt 必须带上参与项目与契约要求。
 func TestBuildCrossDesignPrompt(t *testing.T) {
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
-		[]string{"接口契约可核对"}, crossTestProjects(), "")
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil)
 	if !strings.Contains(p, "跨仓库订单重构") {
 		t.Fatalf("prompt lost the title: %q", p)
 	}
@@ -193,5 +193,21 @@ func TestBuildCrossDesignPrompt(t *testing.T) {
 	}
 	if !strings.Contains(p, "跨项目接口契约") {
 		t.Fatalf("prompt lost the contract requirement: %q", p)
+	}
+}
+
+// 整体方案的 prompt 必须带上参与仓库的项目约定 —— 约定不到达模型，各仓库就会
+// 各自按自己的习惯实现，跨仓库的接口对不上。
+func TestBuildCrossDesignPrompt_CarriesConventions(t *testing.T) {
+	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
+		[]string{"接口契约可核对"}, crossTestProjects(), "", []CrossProjectDoc{
+			{ProjectName: "web-app", Content: "前端约定：组件必须写单测。"},
+		})
+	if !strings.Contains(p, "前端约定：组件必须写单测。") {
+		t.Fatalf("prompt lost the project convention: %q", p)
+	}
+	// 约定在输出契约**之前**：模型先读约定，再读契约。
+	if strings.Index(p, "前端约定") > strings.Index(p, "跨项目接口契约") {
+		t.Fatalf("the convention section must come before the output contract: %q", p)
 	}
 }

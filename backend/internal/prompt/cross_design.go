@@ -83,10 +83,15 @@ type CrossProjectInput struct {
 // BuildCrossDesignPrompt renders the overall-design prompt.
 //
 // Inputs: the cross requirement itself (title / description / acceptance),
-// the participating projects and the overall design document produced by a
+// the participating projects, the overall design document produced by a
 // previous run (empty on the first run — the "regenerate" path feeds it back
-// so the model can refine instead of starting from scratch).
-func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string) string {
+// so the model can refine instead of starting from scratch) and the
+// participating projects' CLAUDE.md conventions.
+//
+// The conventions go BEFORE the output contract: the model reads the
+// contract last, and it must read the conventions before it starts
+// designing.
+func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string, conventions []CrossProjectDoc) string {
 	var b strings.Builder
 
 	b.WriteString("请为下面这个**横跨多个仓库**的需求编写一份整体技术方案。\n\n")
@@ -134,6 +139,12 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 	if prev := strings.TrimSpace(previousDesign); prev != "" {
 		b.WriteString("## 上一版整体方案\n\n")
 		b.WriteString(truncateRunes(prev, 16*1024))
+		b.WriteString("\n\n")
+	}
+
+	// 各参与仓库的项目级 CLAUDE.md —— 整体方案必须逐仓库对齐各自的约定。
+	if section := BuildCrossProjectConventionSection(conventions); section != "" {
+		b.WriteString(section)
 		b.WriteString("\n\n")
 	}
 

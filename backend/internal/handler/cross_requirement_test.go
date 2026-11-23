@@ -22,7 +22,7 @@ import (
 // The AI jobs are NOT exercised here (they need the claude CLI) — this test
 // covers the REST surface: routing, the JSON envelope, and the write paths
 // that the UI depends on.
-func newCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB) {
+func newCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB, *service.ProjectService) {
 	t.Helper()
 	d, err := db.Init(db.Config{Driver: string(db.SQLite), SQLitePath: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
@@ -34,8 +34,8 @@ func newCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB) {
 	reqSvc := service.NewRequirementService(d, nil)
 	crossSvc := service.NewCrossRequirementService(d)
 	h := NewCrossRequirementHandler(crossSvc, reqSvc, projSvc, nil, store.NewJobStore(16),
-		nil, nil, nil, nil)
-	return h, d
+		nil, nil, nil)
+	return h, d, projSvc
 }
 
 // seedCrossProject inserts a project row directly (ProjectService.Add insists
@@ -102,7 +102,7 @@ func splitPath(target string) []string {
 
 // The REST surface: create → list → detail → split confirm → phases.
 func TestCrossRequirementHandler_REST(t *testing.T) {
-	h, d := newCrossHandlerTest(t)
+	h, d, _ := newCrossHandlerTest(t)
 	p1 := seedCrossProject(t, d, "web-app")
 	p2 := seedCrossProject(t, d, "api-svc")
 
@@ -222,7 +222,7 @@ func TestCrossRequirementHandler_REST(t *testing.T) {
 
 // 缺少「跨项目接口契约」章节的方案不能保存。
 func TestCrossRequirementHandler_SaveDesignRequiresContract(t *testing.T) {
-	h, d := newCrossHandlerTest(t)
+	h, d, _ := newCrossHandlerTest(t)
 	p1 := seedCrossProject(t, d, "web-app")
 
 	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
@@ -254,7 +254,7 @@ func TestCrossRequirementHandler_SaveDesignRequiresContract(t *testing.T) {
 // 子需求在别处完成之后，读路径必须返回**刷新后**的生命周期状态 ——
 // 详情页和列表页都不能显示刷新前的旧值。
 func TestCrossRequirementHandler_ReadPathReturnsFreshStatus(t *testing.T) {
-	h, d := newCrossHandlerTest(t)
+	h, d, _ := newCrossHandlerTest(t)
 	p1 := seedCrossProject(t, d, "web-app")
 
 	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
@@ -337,7 +337,7 @@ func TestCrossRequirementHandler_ReadPathReturnsFreshStatus(t *testing.T) {
 
 // 归档是用户显式状态：派生逻辑不改它，而且归档行只在「已归档」筛选里出现。
 func TestCrossRequirementHandler_ListArchivedFilter(t *testing.T) {
-	h, d := newCrossHandlerTest(t)
+	h, d, _ := newCrossHandlerTest(t)
 	p1 := seedCrossProject(t, d, "web-app")
 
 	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
