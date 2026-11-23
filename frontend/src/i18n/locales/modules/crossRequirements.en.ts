@@ -92,6 +92,8 @@ export const crossRequirements = {
     phaseDelete: 'Delete phase',
     phaseDeleted: 'Phase deleted',
     verify: 'Start verification',
+    reverify: 'Verify again',
+    phaseReset: 'Reset to ready after rework',
     verifying: 'Verifying…',
     verifyReport: 'Verification report',
     verifyReportEmpty: 'No verification report yet',

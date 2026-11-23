@@ -229,6 +229,74 @@ func TestCrossRequirement_PhaseReadiness(t *testing.T) {
 	}
 }
 
+// 联调不通过之后，阶段必须能回到「就绪」—— 否则它永远停在 failed，既跑不了
+// 下一轮验证，也没法改判。
+func TestCrossRequirement_PhaseCanBeResetToReady(t *testing.T) {
+	svc, reqSvc, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+	p2 := seedCrossProject(t, projSvc, "api-svc")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "返工重验",
+		ProjectIDs: []string{p1.ID, p2.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	children, err := svc.ConfirmSplit(x.ID, []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+		{Title: "订单服务", ProjectID: p2.ID, Order: 2},
+	})
+	if err != nil {
+		t.Fatalf("confirm split: %v", err)
+	}
+	phase, err := svc.CreatePhase(x.ID, model.CrossRequirementPhaseReq{
+		Name:           "阶段一：接口打通",
+		RequirementIDs: []string{children[0].ID, children[1].ID},
+	})
+	if err != nil {
+		t.Fatalf("create phase: %v", err)
+	}
+	for _, c := range children {
+		markDone(t, reqSvc, c.ID)
+	}
+
+	// 人工判定不通过。
+	if _, err := svc.UpdatePhase(x.ID, phase.ID, model.UpdateCrossRequirementPhaseReq{
+		Status: model.PhaseStatusFailed,
+	}); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	phase, err = svc.GetPhase(x.ID, phase.ID)
+	if err != nil {
+		t.Fatalf("get phase: %v", err)
+	}
+	if phase.Status != model.PhaseStatusFailed {
+		t.Fatalf("phase status = %q, want failed", phase.Status)
+	}
+
+	// 返工之后重置为「就绪」—— 这是「再跑一轮验证」的前提。
+	if _, err := svc.UpdatePhase(x.ID, phase.ID, model.UpdateCrossRequirementPhaseReq{
+		Status: model.PhaseStatusReady,
+	}); err != nil {
+		t.Fatalf("reset to ready: %v", err)
+	}
+	phase, err = svc.GetPhase(x.ID, phase.ID)
+	if err != nil {
+		t.Fatalf("get phase: %v", err)
+	}
+	if phase.Status != model.PhaseStatusReady {
+		t.Fatalf("phase status = %q, want ready", phase.Status)
+	}
+
+	// 非法状态仍然被拒（ready 是唯一新增的可写状态）。
+	if _, err := svc.UpdatePhase(x.ID, phase.ID, model.UpdateCrossRequirementPhaseReq{
+		Status: model.PhaseStatusPendingReview,
+	}); err == nil {
+		t.Fatal("pending_review accepted as a writable phase status, want an error")
+	}
+}
+
 // T9 — 删除 XReq：子需求保留且 cross_requirement_id 置空。
 func TestCrossRequirement_DeleteDetachesChildren(t *testing.T) {
 	svc, reqSvc, projSvc := newCrossFixture(t)

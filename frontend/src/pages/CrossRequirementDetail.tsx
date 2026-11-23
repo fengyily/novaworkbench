@@ -11,7 +11,7 @@ import {
   type CrossSplitCandidate,
 } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
-import { crossPhaseBadgeClass, crossStatusBadgeClass } from '../utils/crossStatus';
+import { crossPhaseBadgeClass, crossPhaseCanVerify, crossStatusBadgeClass } from '../utils/crossStatus';
 import './CrossRequirements.css';
 
 // 跨项目需求详情页。
@@ -568,10 +568,24 @@ export default function CrossRequirementDetailPage() {
                     type="button"
                     className="btn btn-sm"
                     onClick={() => startVerify(phase.id)}
-                    disabled={jobRunning || phase.status !== 'ready'}
+                    disabled={jobRunning || !crossPhaseCanVerify(phase.status)}
                   >
-                    {t('crossRequirements.detail.verify')}
+                    {phase.verify_report
+                      ? t('crossRequirements.detail.reverify')
+                      : t('crossRequirements.detail.verify')}
                   </button>
+                  {/* Rework: a failed phase has to be able to go back to the
+                      ready state — otherwise it is stuck on the verdict
+                      forever: no new verification round, no way to re-judge. */}
+                  {phase.status === 'failed' && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setPhaseStatus(phase, 'ready')}
+                    >
+                      {t('crossRequirements.detail.phaseReset')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn btn-sm"

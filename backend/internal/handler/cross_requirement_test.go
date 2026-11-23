@@ -208,6 +208,31 @@ func TestCrossRequirementHandler_REST(t *testing.T) {
 		t.Fatalf("phase status = %v, want passed", updated["status"])
 	}
 
+	// 联调不通过之后要能把阶段放回「就绪」，否则跑不了下一轮验证。
+	//
+	// 先把阶段成员做完 —— 「就绪」是**派生**状态：成员全部 done 才算就绪
+	// （成员没做完时 reset 只是把 verdict 清掉，阶段仍然是「待完成」）。
+	if _, err := h.reqSvc.UpdateStatus(childID, "developing"); err != nil {
+		t.Fatalf("mark developing: %v", err)
+	}
+	if _, err := h.reqSvc.UpdateStatus(childID, "done"); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	code, env = callCross(t, h.UpdatePhase, http.MethodPut, "/api/cross-requirements/"+id+"/phases/"+phaseID,
+		model.UpdateCrossRequirementPhaseReq{Status: model.PhaseStatusFailed})
+	if code != http.StatusOK {
+		t.Fatalf("mark failed status = %d, body = %v", code, env)
+	}
+	code, env = callCross(t, h.UpdatePhase, http.MethodPut, "/api/cross-requirements/"+id+"/phases/"+phaseID,
+		model.UpdateCrossRequirementPhaseReq{Status: model.PhaseStatusReady})
+	if code != http.StatusOK {
+		t.Fatalf("reset to ready status = %d, body = %v", code, env)
+	}
+	updated, _ = env["data"].(map[string]any)
+	if updated["status"] != model.PhaseStatusReady {
+		t.Fatalf("phase status = %v, want ready", updated["status"])
+	}
+
 	// delete detaches the children instead of removing them.
 	code, env = callCross(t, h.Delete, http.MethodDelete, "/api/cross-requirements/"+id, nil)
 	if code != http.StatusOK {

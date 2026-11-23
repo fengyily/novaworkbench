@@ -92,6 +92,8 @@ export const crossRequirements = {
     phaseDelete: '删除阶段',
     phaseDeleted: '阶段已删除',
     verify: '开始验证',
+    reverify: '重新验证',
+    phaseReset: '返工后重置为就绪',
     verifying: '验证中…',
     verifyReport: '验证报告',
     verifyReportEmpty: '尚未生成验证报告',

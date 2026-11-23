@@ -1034,7 +1034,12 @@ func (s *CrossRequirementService) UpdatePhase(id string, phaseID string, req mod
 	status := strings.TrimSpace(req.Status)
 	if status != "" {
 		switch status {
-		case model.PhaseStatusPassed, model.PhaseStatusFailed, model.PhaseStatusSkipped:
+		case model.PhaseStatusReady,
+			model.PhaseStatusPassed, model.PhaseStatusFailed, model.PhaseStatusSkipped:
+			// ready 是**可写**的：联调不通过（failed）之后要能返工重来，
+			// 必须有一个把阶段放回「就绪」的入口 —— 否则阶段永远停在 failed，
+			// 既跑不了下一轮验证，也没法改判。写回 ready 后，状态重新由读路径
+			// 按成员完成情况派生（成员没做完就是 pending）。
 		default:
 			return nil, fmt.Errorf("invalid phase status: %q", status)
 		}
