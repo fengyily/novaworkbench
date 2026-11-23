@@ -250,3 +250,132 @@ func TestCrossRequirementHandler_SaveDesignRequiresContract(t *testing.T) {
 		t.Fatalf("save design status = %d, want 200", code)
 	}
 }
+
+// 子需求在别处完成之后，读路径必须返回**刷新后**的生命周期状态 ——
+// 详情页和列表页都不能显示刷新前的旧值。
+func TestCrossRequirementHandler_ReadPathReturnsFreshStatus(t *testing.T) {
+	h, d := newCrossHandlerTest(t)
+	p1 := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title: "跨仓库状态刷新", ProjectIDs: []string{p1},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	// 拆出一个子需求 —— 拆分之后整体状态进入「开发中」。
+	code, env = callCross(t, h.ConfirmSplit, http.MethodPost, "/api/cross-requirements/"+id+"/split/confirm",
+		model.ConfirmCrossRequirementSplitReq{
+			Candidates: []model.CrossRequirementSplitCandidate{
+				{Title: "子需求", ProjectID: p1, Order: 1},
+			},
+		})
+	if code != http.StatusOK {
+		t.Fatalf("confirm split status = %d, body = %v", code, env)
+	}
+	confirmData, _ := env["data"].(map[string]any)
+	children, _ := confirmData["children"].([]any)
+	childMap, _ := children[0].(map[string]any)
+	childID, _ := childMap["id"].(string)
+	if childID == "" {
+		t.Fatalf("confirm split returned no child: %v", env)
+	}
+
+	// 子需求在**别处**（另一个项目 / 另一条路径）被完成 —— 跨项目需求的落库状态
+	// 不会自动更新，仍然停在「开发中」。
+	if _, err := d.Exec(`UPDATE requirements SET status='done' WHERE id=?`, childID); err != nil {
+		t.Fatalf("mark child done: %v", err)
+	}
+	var stored string
+	if err := d.QueryRow(`SELECT status FROM cross_requirements WHERE id=?`, id).Scan(&stored); err != nil {
+		t.Fatalf("read stored status: %v", err)
+	}
+	if stored != model.XReqStatusDeveloping {
+		t.Fatalf("stored status = %q, want %q (the child completion must not touch it)",
+			stored, model.XReqStatusDeveloping)
+	}
+
+	// 详情页：读路径刷新状态，响应里必须带刷新后的值。
+	code, env = callCross(t, h.Get, http.MethodGet, "/api/cross-requirements/"+id, nil)
+	if code != http.StatusOK {
+		t.Fatalf("detail status = %d, body = %v", code, env)
+	}
+	detail, _ := env["data"].(map[string]any)
+	if detail["status"] != model.XReqStatusDone {
+		t.Fatalf("detail status = %v, want %q", detail["status"], model.XReqStatusDone)
+	}
+
+	// 列表页：同样不能显示旧状态。
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	listData, _ := env["data"].(map[string]any)
+	items, _ := listData["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("list items = %d, want 1", len(items))
+	}
+	itemMap, _ := items[0].(map[string]any)
+	if itemMap["status"] != model.XReqStatusDone {
+		t.Fatalf("list item status = %v, want %q", itemMap["status"], model.XReqStatusDone)
+	}
+
+	// 按状态筛选也要按刷新后的状态来 —— 否则「已完成」筛选里看不到刚完成的行。
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements?status=done", nil)
+	if code != http.StatusOK {
+		t.Fatalf("filtered list status = %d", code)
+	}
+	listData, _ = env["data"].(map[string]any)
+	items, _ = listData["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("filtered list items = %d, want 1", len(items))
+	}
+}
+
+// 归档是用户显式状态：派生逻辑不改它，而且归档行只在「已归档」筛选里出现。
+func TestCrossRequirementHandler_ListArchivedFilter(t *testing.T) {
+	h, d := newCrossHandlerTest(t)
+	p1 := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title: "归档语义", ProjectIDs: []string{p1},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	if _, err := d.Exec(`UPDATE cross_requirements SET status='archived' WHERE id=?`, id); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	// 默认列表不含归档行。
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	listData, _ := env["data"].(map[string]any)
+	items, _ := listData["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("default list items = %d, want 0 (archived rows are hidden)", len(items))
+	}
+
+	// 「已归档」筛选里能看到它，且状态不被派生逻辑改写。
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements?status=archived", nil)
+	if code != http.StatusOK {
+		t.Fatalf("archived list status = %d", code)
+	}
+	listData, _ = env["data"].(map[string]any)
+	items, _ = listData["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("archived list items = %d, want 1", len(items))
+	}
+	itemMap, _ := items[0].(map[string]any)
+	if itemMap["status"] != model.XReqStatusArchived {
+		t.Fatalf("archived item status = %v, want %q", itemMap["status"], model.XReqStatusArchived)
+	}
+}

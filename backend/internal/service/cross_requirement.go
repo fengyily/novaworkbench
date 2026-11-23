@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -591,18 +592,51 @@ func (s *CrossRequirementService) RefreshDerivedStatus(id string) error {
 	if err != nil {
 		return err
 	}
-	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖。
+	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖 —— 早退，省掉
+	// 一次没必要的进展聚合。
 	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived {
 		return nil
 	}
-
 	progress, err := s.Progress(id)
 	if err != nil {
 		return err
 	}
-	phases, err := s.ListPhases(id)
-	if err != nil {
-		return err
+	_, err = s.ApplyDerivedStatus(x, progress, nil)
+	return err
+}
+
+// ApplyDerivedStatus recomputes the lifecycle status of a cross requirement
+// from an already-loaded row + progress, writes it back when it changed, and
+// returns the effective status.
+//
+// 读路径（列表页 / 详情页）已经算好了 progress，直接复用它即可 —— 不用
+// 为了刷新状态再跑一遍聚合。
+//
+// phases 可以传 nil（此时按需加载阶段），也可以传调用方已经查好的阶段列表
+// —— 详情页已经把阶段装进载荷里了，不必再查一次。
+//
+// 返回值是**刷新后生效的状态**：刷新可能因为「状态没变」而跳过写入，但读
+// 路径仍要把当前生效的状态回填到响应里，否则详情页 / 列表页会显示旧值。
+// 状态真的变了时，x 会被就地更新（含 updated_at / completed_at），调用方
+// 不必再查一次库。
+func (s *CrossRequirementService) ApplyDerivedStatus(
+	x *model.CrossRequirement,
+	progress model.CrossRequirementProgress,
+	phases []model.CrossRequirementPhase,
+) (string, error) {
+	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖。
+	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived {
+		return x.Status, nil
+	}
+
+	// 阶段只在「子需求全部完成」时才会影响结论（否则不是 developing，就是
+	// 还没走到阶段那一步），所以不用每次都去查阶段。
+	if phases == nil && progress.Total > 0 && progress.Done == progress.Total {
+		var err error
+		phases, err = s.ListPhases(x.ID)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	next := x.Status
@@ -626,9 +660,19 @@ func (s *CrossRequirementService) RefreshDerivedStatus(id string) error {
 	}
 
 	if next == x.Status {
-		return nil
+		return next, nil
 	}
-	return s.SetStatus(id, next)
+	if err := s.SetStatus(x.ID, next); err != nil {
+		return "", err
+	}
+	// 状态变了 → 行上的时间戳也变了（updated_at / completed_at）。重新读一次，
+	// 保证调用方拿到的结构体与库里的行完全一致。
+	fresh, err := s.Get(x.ID)
+	if err != nil {
+		return "", err
+	}
+	*x = *fresh
+	return next, nil
 }
 
 // phasesPendingConclusion reports whether any phase still lacks a final
@@ -983,6 +1027,27 @@ func (s *CrossRequirementService) requireChildren(id string, requirementIDs []st
 }
 
 // ── 详情聚合 ───────────────────────────────────────────────────────────────
+
+// DetailFresh assembles the full detail payload **and** refreshes the derived
+// lifecycle status, so the payload never carries a stale status.
+//
+// 刷新在装配之后进行，但刷新结果会回填到载荷的 status 字段 —— 子需求在别处
+// 完成后，详情页立刻显示新状态，而不是刷新前的旧值。
+//
+// 刷新失败不会让读取失败（退回库里存的状态），这跟读路径的其它聚合一致。
+func (s *CrossRequirementService) DetailFresh(id string) (*model.CrossRequirementDetail, error) {
+	detail, err := s.Detail(id)
+	if err != nil {
+		return nil, err
+	}
+	status, err := s.ApplyDerivedStatus(&detail.CrossRequirement, detail.Progress, detail.Phases)
+	if err != nil {
+		log.Printf("[xreq] refresh derived status %s: %v", id, err)
+		return detail, nil
+	}
+	detail.Status = status
+	return detail, nil
+}
 
 // Detail assembles the full detail payload of a cross requirement.
 func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDetail, error) {

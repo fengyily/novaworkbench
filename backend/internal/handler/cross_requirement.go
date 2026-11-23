@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -292,21 +293,45 @@ func (h *CrossRequirementHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
-	items, err := h.svc.List(status, keyword)
+
+	// 生命周期状态是**派生**的：子需求在别处完成之后，落库的状态可能还是旧的
+	// （状态只在写路径上刷新）。所以列表页在读路径上把状态刷新一遍，并按
+	// **刷新后的**状态做筛选 —— 否则筛选条件与页面上显示的状态会互相矛盾。
+	//
+	// 「已归档」是用户显式状态，派生逻辑不会改动它，所以按状态筛选时归档行
+	// 单独查。
+	queryStatus := ""
+	if status == model.XReqStatusArchived {
+		queryStatus = model.XReqStatusArchived
+	}
+	items, err := h.svc.List(queryStatus, keyword)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 		return
 	}
+
 	progress := map[string]model.CrossRequirementProgress{}
-	for _, item := range items {
+	out := make([]model.CrossRequirement, 0, len(items))
+	for i := range items {
+		item := &items[i]
 		p, pErr := h.svc.Progress(item.ID)
-		if pErr != nil {
+		if pErr == nil {
+			// 刷新派生状态（幂等：状态没变就不写库），并把生效的状态回填到
+			// 响应里 —— 否则列表页显示的是子需求在别处完成前的旧状态。
+			if _, sErr := h.svc.ApplyDerivedStatus(item, p, nil); sErr != nil {
+				log.Printf("[xreq] refresh derived status %s: %v", item.ID, sErr)
+			}
+		}
+		if status != "" && status != "all" && item.Status != status {
 			continue
 		}
-		progress[item.ID] = p
+		if pErr == nil {
+			progress[item.ID] = p
+		}
+		out = append(out, *item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":    items,
+		"items":    out,
 		"progress": progress,
 	})
 }
@@ -338,7 +363,13 @@ func (h *CrossRequirementHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	detail, err := h.svc.Detail(id)
+	// The lifecycle status is refreshed on the read path (idempotent — only
+	// writes when it actually changed), so the detail page never shows a
+	// stale status after a child requirement was completed elsewhere.
+	//
+	// 刷新结果会回填进载荷（DetailFresh），所以响应里的 status 一定是刷新
+	// **之后**的值 —— 先装配再刷新的话，响应里带的永远是刷新前的旧值。
+	detail, err := h.svc.DetailFresh(id)
 	if err != nil {
 		if errors.Is(err, service.ErrCrossRequirementNotFound) {
 			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
@@ -346,13 +377,6 @@ func (h *CrossRequirementHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
 		return
-	}
-	// The lifecycle status is refreshed on the read path (idempotent — only
-	// writes when it actually changed), so the detail page never shows a
-	// stale status after a child requirement was completed elsewhere.
-	if err := h.svc.RefreshDerivedStatus(id); err != nil {
-		// A failed refresh must not break the read.
-		_ = err
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
