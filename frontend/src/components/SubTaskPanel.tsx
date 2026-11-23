@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
@@ -37,6 +37,7 @@ import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload
 import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDescriptionEditor/imageIngest';
 import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
+import { SubTaskTree, type SubTaskTreeNode, type SubTaskTreeKind } from './SubTaskTree';
 import EffortBar, { type EffortTier } from './EffortBar';
 import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
@@ -114,6 +115,17 @@ interface Props {
 // legacy rows pre-dating the column render unchanged as roots.
 type TreeNode = { node: SubTask; depth: number; children: TreeNode[] };
 
+// Newest-first comparator. Lives at module scope so the tree builder and
+// the panel's own "which row is the newest" derivation share ONE rule —
+// two copies of the same comparison would eventually drift apart and the
+// panel would select a row the tree does not consider newest.
+function sortNewest(a: SubTask, b: SubTask): number {
+  const at = new Date(a.created_at).getTime();
+  const bt = new Date(b.created_at).getTime();
+  if (at !== bt) return bt - at;
+  return (b.id ?? '').localeCompare(a.id ?? '');
+}
+
 function buildTree(items: SubTask[]): TreeNode[] {
   const byParent = new Map<string, SubTask[]>();
   for (const it of items) {
@@ -122,12 +134,6 @@ function buildTree(items: SubTask[]): TreeNode[] {
     arr.push(it);
     byParent.set(k, arr);
   }
-  const sortNewest = (a: SubTask, b: SubTask) => {
-    const at = new Date(a.created_at).getTime();
-    const bt = new Date(b.created_at).getTime();
-    if (at !== bt) return bt - at;
-    return (b.id ?? '').localeCompare(a.id ?? '');
-  };
   const build = (key: string, depth: number): TreeNode[] =>
     (byParent.get(key) ?? []).slice().sort(sortNewest).map((n) => ({
       node: n, depth, children: build(n.id, depth + 1),
@@ -2321,6 +2327,30 @@ function clampAutoRounds(n: number): number {
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [], allowReview = false }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
+  // ── Split-panel selection ───────────────────────────────────────────────
+  // The panel is a master–detail workbench: the left column lists every
+  // sub-task as a tree, the right column shows ONE of them in full (live
+  // log + result + actions). The selection is held as an ID, never as a
+  // node object — the list is re-fetched every 5s, and a stored object
+  // would be a stale snapshot of a row that has since changed.
+  const [selectedId, setSelectedId] = useState<string>('');
+  // Whether the right column tracks the running sub-task. On by default:
+  // the project gate runs one child at a time, so "the one that is
+  // running" is unambiguous and the user should not have to click first.
+  const [followRunning, setFollowRunning] = useState<boolean>(true);
+  // The newest requirement the panel has been told about. loadList closes
+  // over the requirementId it was created for, so a request still in flight
+  // when the user switches requirements would otherwise land the PREVIOUS
+  // requirement's rows (and its count, and its batch) on the new one.
+  //
+  // The ref is written during render on purpose: an effect would run after
+  // the commit, and a promise resolution queued in between would still see
+  // the old id — exactly the window the guard has to cover.
+  const latestReqIdRef = useRef<string>(requirementId);
+  latestReqIdRef.current = requirementId;
+  // Deadline of the startup poll window (see the effect further down).
+  // Declared here because the requirement-switch reset restarts it.
+  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
   // Configured automatic-redo cap (设置 → 子任务). Read once per mount purely to
   // give the per-card retry badge a denominator; a failure is non-fatal (the
   // badge falls back to a count-only wording), so no error state is kept.
@@ -2705,7 +2735,16 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // indented under their parent. The `collapsed` Set tracks which parent
   // ids have their subtree hidden; when a parent collapses, its entire
   // descendant chain is skipped from `flat` until the user expands again.
-  const tree = useMemo(() => buildTree(items ?? []), [items]);
+  //
+  // Only the CURRENT requirement's rows enter the tree. The list endpoint
+  // is already scoped by requirementId and loadList drops stale in-flight
+  // responses (see the guard there), so this filter is the second line of
+  // defence — it keeps a stray row out of the tree even if it slipped past.
+  const visibleItems = useMemo(
+    () => (items ?? []).filter((i) => i.requirement_id === requirementId),
+    [items, requirementId],
+  );
+  const tree = useMemo(() => buildTree(visibleItems), [visibleItems]);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const flat: TreeNode[] = useMemo(() => {
     const out: TreeNode[] = [];
@@ -2718,11 +2757,193 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     walk(tree);
     return out;
   }, [tree, collapsed]);
+  // Collapse-independent pre-order list. The RIGHT column renders one card
+  // per entry of THIS list: a folded subtree's cards must stay mounted, or
+  // their SSE connections drop and their log buffers are lost — the exact
+  // regression the split panel must not introduce. The left column keeps
+  // using `flat`, which skips folded subtrees.
+  const flatAll: TreeNode[] = useMemo(() => {
+    const out: TreeNode[] = [];
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        out.push(n);
+        walk(n.children);
+      }
+    };
+    walk(tree);
+    return out;
+  }, [tree]);
+  // Position of every row in `flatAll` (1-based). The tree rows and the
+  // cards quote the SAME number, so the panel never shows two counters.
+  const posOf = useMemo(() => {
+    const m = new Map<string, number>();
+    flatAll.forEach((n, i) => m.set(n.node.id, i + 1));
+    return m;
+  }, [flatAll]);
+  // Ancestor index: child id → parent id. Read from the FULL tree, never
+  // from `flat` — `flat` skips the descendants of a folded node, so the
+  // ancestor chain of a hidden row cannot be read back out of it.
+  const parentOf = useMemo(() => {
+    const m = new Map<string, string>();
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        for (const c of n.children) {
+          m.set(c.node.id, n.node.id);
+          walk([c]);
+        }
+      }
+    };
+    walk(tree);
+    return m;
+  }, [tree]);
   // sortedItems alias kept for downstream derivations that still iterate
   // the flat list by .status (polling, latestArtifactStale, summary CTA).
   // It points at the same array as `flat` so those consumers don't need
   // any tree-aware logic — only the renderer walks the tree.
   const sortedItems = flat.map((n) => n.node);
+
+  // ── Split-panel selection wiring ───────────────────────────────────────
+
+  // Requirement switch: the parent switches requirements by changing a
+  // prop; this component is NOT remounted (neither mount site passes a
+  // `key`), so every per-requirement piece of state has to be reset by
+  // hand. Without this the panel keeps showing the previous requirement's
+  // rows — and its batch marker would swallow the new requirement's
+  // freshly dispatched children.
+  useEffect(() => {
+    setSelectedId('');
+    setFollowRunning(true);
+    setItems(null);
+    setActiveBatch(null);
+    // Keep the SAME set when nothing is folded: a fresh empty set would
+    // look like a change to React and cost an extra render on mount.
+    setCollapsed((prev) => (prev.size === 0 ? prev : new Set<string>()));
+    lastReportedCountRef.current = -1;
+    startupDeadlineRef.current = Date.now() + 5 * 60_000;
+  }, [requirementId]);
+
+  // Selection derivation. The selection is held by ID, so the 5s poll
+  // (which replaces the whole array) never makes the right column jump:
+  // the ID still resolves to the same row.
+  useEffect(() => {
+    const list = visibleItems;
+    if (list.length === 0) {
+      setSelectedId('');
+      return;
+    }
+    // Following: pick the running task — the newest one, so the pick is
+    // stable from poll to poll.
+    if (followRunning) {
+      const running = list.filter((i) => i.status === 'running').sort(sortNewest)[0];
+      if (running) {
+        setSelectedId(running.id);
+        return;
+      }
+    }
+    setSelectedId((prev) => {
+      if (prev && list.some((i) => i.id === prev)) return prev;
+      // Fallback: the newest row. NOT the first entry of the flattened
+      // tree — that is the newest ROOT, while an adjustment row is a
+      // CHILD and can be newer than every root.
+      return list.slice().sort(sortNewest)[0].id;
+    });
+  }, [visibleItems, followRunning]);
+
+  // The selected row must be VISIBLE in the tree. The flattened tree skips
+  // the descendants of a folded node, so a selection hidden inside a
+  // folded subtree would leave the tree highlighting a row the user
+  // cannot see. Unfold the ancestors whenever the selection changes.
+  useEffect(() => {
+    if (!selectedId) return;
+    const chain: string[] = [];
+    let cur = parentOf.get(selectedId);
+    while (cur) {
+      chain.push(cur);
+      cur = parentOf.get(cur);
+    }
+    if (chain.length === 0) return;
+    setCollapsed((prev) => {
+      if (!chain.some((id) => prev.has(id))) return prev; // unchanged
+      const next = new Set(prev);
+      for (const id of chain) next.delete(id);
+      return next;
+    });
+  }, [selectedId, parentOf]);
+
+  // A manual pick in the tree closes the follow switch. ANY click does —
+  // including a click on the row that happens to be the running one.
+  // Otherwise the view would jump away the moment the next task starts,
+  // taking the detail the user just opened with it.
+  const handleTreeSelect = useCallback((id: string) => {
+    setSelectedId(id);
+    setFollowRunning(false);
+  }, []);
+
+  // Fold / unfold a subtree. The tree's caret and the card header's
+  // subtree button drive this one handler, so the two never disagree.
+  //
+  // Folding a subtree that CONTAINS the selection would hide the selected
+  // row from the tree, leaving the highlight and the detail card naming
+  // different tasks. Move the selection up to the node being folded.
+  const toggleCollapse = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setSelectedId((prev) => {
+      if (!prev || prev === id) return prev;
+      let cur = parentOf.get(prev);
+      while (cur) {
+        if (cur === id) return id;
+        cur = parentOf.get(cur);
+      }
+      return prev;
+    });
+  }, [parentOf]);
+
+  // The tree rows the left column renders. Everything the tree needs is
+  // derived here — the component itself holds no data and no selection.
+  const treeNodes: SubTaskTreeNode[] = useMemo(() => flat.map((tn) => {
+    const node = tn.node;
+    // Same source rules as the card's own badges, so a row and its card
+    // never disagree about what kind of task this is.
+    const kind: SubTaskTreeKind | undefined =
+      node.task_kind === 'review'
+        ? 'review'
+        : (node.source === 'auto' || (!node.source && node.batch_id)) ? 'auto' : undefined;
+    return {
+      id: node.id,
+      title: node.title || t('components.subTaskCard.noTitle'),
+      status: node.status,
+      depth: tn.depth,
+      // countDescendants counts the node itself, so more than one means
+      // it has descendants.
+      hasChildren: countDescendants(tn) > 1,
+      index: posOf.get(node.id) ?? 0,
+      total: flatAll.length,
+      kind,
+      durationText: node.duration_seconds > 0 ? fmtDuration(node.duration_seconds) : '',
+      jobId: node.job_id,
+      batchId: node.batch_id,
+    };
+  }), [flat, flatAll, posOf, t]);
+
+  // Rows whose job is live. The tree colours them as running even when the
+  // persisted status still says pending.
+  const runningIds = useMemo(
+    () => new Set(visibleItems.filter((i) => i.status === 'running').map((i) => i.id)),
+    [visibleItems],
+  );
+
+  // The right-hand detail column. Switching cards changes the container's
+  // scrollHeight in the same commit, so the scroll is reset BEFORE paint:
+  // the new card never appears half-scrolled from the old card's position.
+  const detailRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+  }, [selectedId]);
 
   // latestArtifactStale: derived from the freshest sub-task's artifact.
   // Used to auto-select the 「带上下文」 radio on follow-up clicks when the
@@ -2779,6 +3000,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const loadList = useCallback(async () => {
     try {
       const list = await subTasksApi.list(requirementId);
+      // Stale response: the user switched requirements while this request
+      // was in flight. Dropping it here also drops the three side effects
+      // below (the parent count, the batch marker, the error state) — the
+      // previous requirement's rows must never land on the new one.
+      if (requirementId !== latestReqIdRef.current) return;
       setItems(list);
       // Forward the new count to the parent so the page can flip
       // hasSubTasks and hide the requirement-level "Follow-up" composer.
@@ -2834,7 +3060,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // mounts in developing/done states and the startup poll only fires
   // while items.length === 0, so the cost of a longer window is at most
   // ~150 extra 5ms GETs per requirement.
-  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
+  //
+  // The ref itself is declared with the other panel-level refs above (the
+  // requirement-switch reset has to restart the window).
   useEffect(() => {
     if (items === null) return; // not yet loaded
     if (items.length > 0) return; // already have data, nothing to do
@@ -3926,54 +4154,108 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         </div>
       </div>
 
-      <div className="sub-list">
-        {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
-        {items && items.length === 0 && (
-          <div className="sub-list-empty">
-            <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
-            <div>{t('components.subTaskPanel.empty')}</div>
+      {/* Split workbench: a tree of every sub-task on the left, the
+          selected one in full on the right. Each column clamps its OWN
+          height and scrolls by itself, so a long log can no longer push
+          the page apart and the tree stays in view. */}
+      <div className="sub-split">
+        <aside className="sub-split-aside" aria-label={t('components.subTaskPanel.split.asideTitle')}>
+          <div className="sub-split-head">
+            <span className="sub-split-head-title">{t('components.subTaskPanel.split.asideTitle')}</span>
+            <button
+              type="button"
+              className={`sub-split-follow${followRunning ? ' is-on' : ''}`}
+              onClick={() => setFollowRunning((v) => !v)}
+              aria-pressed={followRunning}
+              title={t('components.subTaskPanel.split.followHint')}
+            >
+              {followRunning
+                ? t('components.subTaskPanel.split.followOn')
+                : t('components.subTaskPanel.split.followOff')}
+            </button>
           </div>
-        )}
-        {flat.length > 0 && flat.map((tn, i) => (
-          <SubTaskCard
-            key={tn.node.id}
-            st={tn.node}
-            index={i}
-            total={flat.length}
-            requirementId={requirementId}
-            isLatestReviewRound={isLatestReviewRound(tn.node)}
-            depth={tn.depth}
-            childCount={countDescendants(tn)}
-            isCollapsed={collapsed.has(tn.node.id)}
-            onToggleCollapse={() => setCollapsed((prev) => {
-              const next = new Set(prev);
-              if (next.has(tn.node.id)) next.delete(tn.node.id);
-              else next.add(tn.node.id);
-              return next;
-            })}
-            onChanged={onItemChanged}
-            onCreated={loadList}
-            onRestarted={handleSubTaskRestarted}
-            onDeleted={handleSubTaskDeleted}
-            // Per-card: this child's OWN effective environment decides whether
-            // Stop is offered. `?? agent_server_id` is the same old-backend
-            // fallback the environment badge above uses.
-            canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
-            adjustModel={adjustModel}
-            // Per-card runs (Redo / Continue / Adjust) reuse the panel's
-            // picked reasoning-effort tier — they are implementation work,
-            // same as the composer. The RAW pick is passed (not the
-            // displayed default): an unpicked run must leave the field off
-            // so the backend resolves the configured stage default.
-            effort={composerEffort ?? undefined}
-            onAdjustModelChange={setAdjustModel}
-            retryMax={retryMax}
-            archivedKbId={archives[tn.node.id]}
-            archiveBusy={!!archiveBusy[tn.node.id]}
-            onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
-            onUnarchive={handleUnarchiveReport}
-          />
-        ))}
+          <div className="sub-split-aside-scroll">
+            {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
+            {items !== null && visibleItems.length === 0 && (
+              <div className="sub-list-empty">
+                <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
+                <div>{t('components.subTaskPanel.empty')}</div>
+              </div>
+            )}
+            {visibleItems.length > 0 && (
+              // The key remounts the tree on a requirement switch: the
+              // component's internal focus state then starts empty instead
+              // of pointing at a row of the previous requirement.
+              <SubTaskTree
+                key={requirementId}
+                nodes={treeNodes}
+                selectedId={selectedId}
+                onSelect={handleTreeSelect}
+                collapsed={collapsed}
+                onToggleCollapse={toggleCollapse}
+                runningIds={runningIds}
+              />
+            )}
+          </div>
+        </aside>
+        <div className="sub-split-detail" ref={detailRef}>
+          {/* EVERY card stays mounted — the unselected ones are merely
+              hidden. Unmounting them would drop their SSE connections and
+              clear their log buffers, which is exactly the regression the
+              split panel must not introduce. `flatAll` is collapse-
+              independent for the same reason: folding a subtree must not
+              unload the cards below it. */}
+          {flatAll.map((tn, i) => {
+            const isSelected = tn.node.id === selectedId;
+            return (
+              <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
+                <SubTaskCard
+                  st={tn.node}
+                  index={i}
+                  total={flatAll.length}
+                  requirementId={requirementId}
+                  isLatestReviewRound={isLatestReviewRound(tn.node)}
+                  // The right column is flat: the hierarchy is the tree's
+                  // job now, so no card is indented and no card draws the
+                  // vertical connector line.
+                  depth={0}
+                  childCount={countDescendants(tn)}
+                  isCollapsed={collapsed.has(tn.node.id)}
+                  onToggleCollapse={() => toggleCollapse(tn.node.id)}
+                  onChanged={onItemChanged}
+                  onCreated={loadList}
+                  onRestarted={handleSubTaskRestarted}
+                  onDeleted={handleSubTaskDeleted}
+                  // Per-card: this child's OWN effective environment decides whether
+                  // Stop is offered. `?? agent_server_id` is the same old-backend
+                  // fallback the environment badge above uses.
+                  canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
+                  adjustModel={adjustModel}
+                  // Per-card runs (Redo / Continue / Adjust) reuse the panel's
+                  // picked reasoning-effort tier — they are implementation work,
+                  // same as the composer. The RAW pick is passed (not the
+                  // displayed default): an unpicked run must leave the field off
+                  // so the backend resolves the configured stage default.
+                  effort={composerEffort ?? undefined}
+                  onAdjustModelChange={setAdjustModel}
+                  retryMax={retryMax}
+                  archivedKbId={archives[tn.node.id]}
+                  archiveBusy={!!archiveBusy[tn.node.id]}
+                  onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
+                  onUnarchive={handleUnarchiveReport}
+                  // The selected card is the detail card: its body is
+                  // always open and its header arrow is gone. The others
+                  // render no body at all.
+                  detailMode={isSelected}
+                  bodyHidden={!isSelected}
+                />
+              </div>
+            );
+          })}
+          {!selectedId && (
+            <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
+          )}
+        </div>
       </div>
     </section>
   );

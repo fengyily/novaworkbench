@@ -227,6 +227,18 @@ export const components = {
     archiveOk: '✅ Archived to knowledge base',
     archiveErrPrefix: '❌ Archive failed: ',
     unarchiveOk: '✅ Removed from knowledge base',
+    // Split panel (tree on the left, detail on the right). The left column
+    // lists every sub-task as a tree, the right column shows the selected
+    // one in full.
+    split: {
+      asideTitle: 'Sub-tasks',
+      followOn: 'Following running',
+      followOff: 'Follow running: off',
+      followHint: 'The running sub-task appears on the right automatically',
+      emptyDetail: 'Pick a sub-task on the left to see its live output and result',
+      logUnavailable: 'Output record unavailable for this sub-task',
+      historyBadge: 'History',
+    },
   },
   subTaskCard: {
     statusPending: 'Queued',
