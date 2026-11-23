@@ -298,6 +298,11 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 
 // StartSplit launches the cross-project split job.
 //
+// 拆分**只能做一次**：已经拆过的跨项目需求 → 409 XREQ_ALREADY_SPLIT。
+// 在这里就拒绝（而不是等到确认那一步）有两个理由：
+//   - 用户立刻知道「不能再拆了」，而不是白等一次 AI 作业；
+//   - 反复拆分累积子需求的路径从入口就被堵死。
+//
 // Returns {"job_id": ...}; the candidate list arrives on the job's SSE stream
 // and can also be polled through GET .../split/state.
 func (h *CrossRequirementHandler) StartSplit(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +323,15 @@ func (h *CrossRequirementHandler) StartSplit(w http.ResponseWriter, r *http.Requ
 	}
 	if xreq.Status == model.XReqStatusArchived {
 		writeError(w, http.StatusBadRequest, "XREQ_ARCHIVED", "已归档的跨项目需求不能拆分")
+		return
+	}
+	split, err := h.svc.AlreadySplit(xreqID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	if split {
+		writeError(w, http.StatusConflict, "XREQ_ALREADY_SPLIT", "该跨项目需求已经拆分过了，不能重复拆分")
 		return
 	}
 	design := service.DesignDocsToMarkdown(xreq.DesignDocs)

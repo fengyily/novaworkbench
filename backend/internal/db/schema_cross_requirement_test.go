@@ -63,6 +63,23 @@ func TestCrossRequirementSchema(t *testing.T) {
 	if !found {
 		t.Error("alterColumns does not add requirements.cross_requirement_id")
 	}
+
+	// split_batch_id carries the 「一个跨项目需求只能拆一次」不变量: it is
+	// claimed atomically by the split confirm path. It must exist in the
+	// canonical DDL and be added to older databases through alterColumns.
+	if !strings.Contains(canonicalSchema, "split_batch_id      TEXT NOT NULL DEFAULT ''") {
+		t.Error("canonical schema missing cross_requirements.split_batch_id")
+	}
+	found = false
+	for _, stmt := range alterColumns {
+		if strings.Contains(stmt, "ALTER TABLE cross_requirements ADD COLUMN split_batch_id") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("alterColumns does not add cross_requirements.split_batch_id")
+	}
 }
 
 // TestCrossRequirementMigrateOrder pins the copy order: the cross-requirement

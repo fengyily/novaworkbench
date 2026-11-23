@@ -74,10 +74,16 @@ type CrossRequirement struct {
 	// 重连 SSE）。
 	DesignSessionID string `json:"design_session_id"`
 	DesignJobID     string `json:"design_job_id"`
-	CreatedBy       string `json:"created_by"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
-	CompletedAt     string `json:"completed_at"`
+	// SplitBatchID — 拆分批次 id（spb_xxx）。空 = 从未拆分。
+	//
+	// 一个跨项目需求**只能拆一次**：确认拆分时用这一列做原子抢占（带条件的
+	// UPDATE），并发重复确认只有一方能成功，另一方拿到 409。前端据此禁用
+	// 「按项目拆分」按钮，不再让用户走到一个必然被拒的请求。
+	SplitBatchID string `json:"split_batch_id"`
+	CreatedBy    string `json:"created_by"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	CompletedAt  string `json:"completed_at"`
 }
 
 // CrossRequirementProject — 参与项目映射（一个跨项目需求 ↔ N 个项目）。

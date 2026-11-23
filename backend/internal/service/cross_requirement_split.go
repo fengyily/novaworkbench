@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,9 +30,18 @@ import (
 // 三条不变量：
 //
 //   - **原子**：子需求行 + 依赖边在同一个事务里落库；任一步失败整体回滚。
+//   - **只拆一次**：一个跨项目需求只能有一批子需求。重复确认（前端双击、
+//     两个标签页同时点）必须被拒绝，否则会攒出两批重复的子需求。
 //   - **项目归属受控**：每个候选的 project_id 必须 ∈ 参与项目集合，否则整批
 //     拒绝（AI 幻觉出的项目名不能落到错误的仓库里）。
 //   - **成环即回滚**：复用 checkDependencyAcyclic（与同项目拆分同一份实现）。
+
+// ErrCrossAlreadySplit — 这个跨项目需求已经拆分过了，不能再拆一次。
+//
+// 与同项目拆分的 SPLIT_ALREADY_SPLIT 同构：开发一旦下放给子需求，就不能
+// 再产出第二批 —— 否则两批子需求会各自独立地演进，用户看到的是两份互相
+// 矛盾的「拆解结果」。
+var ErrCrossAlreadySplit = errors.New("cross requirement has already been split")
 
 // crossSplitMaxTasks — 单次拆分的子需求数量上限（与 prompt 契约一致）。
 const crossSplitMaxTasks = 12
@@ -44,6 +54,12 @@ const crossSplitMaxTasks = 12
 // BEFORE the transaction opens — an unknown project aborts the WHOLE batch
 // (nothing is written), because a partially written batch would leave some
 // sub-requirements in the wrong repository.
+//
+// 幂等性：拆分**只能做一次**。事务里第一条语句就是一次带条件的 UPDATE
+// （抢占 cross_requirements.split_batch_id，条件里还带
+// NOT EXISTS(子需求)）—— 并发的两次确认只有一方能抢到，另一方拿到 0 行
+// 受影响，整批回滚并返回 ErrCrossAlreadySplit。所以「双击确认」不会产生
+// 两批子需求。
 func (s *CrossRequirementService) ConfirmSplit(
 	xreqID string,
 	candidates []model.CrossRequirementSplitCandidate,
@@ -132,6 +148,44 @@ func (s *CrossRequirementService) ConfirmSplit(
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// 抢占「只拆一次」的名额 —— 这是整个确认路径里**唯一的**并发仲裁点。
+	//
+	// 条件有两个：
+	//   - split_batch_id = '' → 从未拆分过；
+	//   - NOT EXISTS(子需求) → 兜住「子需求存在但父行没有批次 id」的旧数据
+	//     （早期构建写出的行）。
+	//
+	// 原子性：并发两次确认时，两条 UPDATE 争同一行锁 —— 在 PostgreSQL /
+	// MySQL 上后到的那条会在前一条提交后**重新求值** WHERE，看到
+	// split_batch_id 已经非空，于是 0 行受影响并整批回滚。SQLite 的写锁
+	// 本来就把两个事务串行化，结论相同。
+	//
+	// 所以「双击确认」最多产生一批子需求，另一方拿到 ErrCrossAlreadySplit。
+	claim, err := tx.Exec(
+		`UPDATE cross_requirements SET split_batch_id = ?, updated_at = ?
+		 WHERE id = ? AND split_batch_id = ''
+		   AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.cross_requirement_id = cross_requirements.id)`,
+		batchID, now, xreqID)
+	if err != nil {
+		return nil, fmt.Errorf("cross split: claim split batch: %w", err)
+	}
+	claimed, cErr := claim.RowsAffected()
+	if cErr != nil {
+		return nil, fmt.Errorf("cross split: claim split batch: %w", cErr)
+	}
+	if claimed == 0 {
+		// 分不到名额：要么已经拆过（并发重复确认 / 之前的确认已经落库），
+		// 要么这一行已经不存在了（并发删除）。
+		var exists int
+		if eErr := tx.QueryRow(`SELECT COUNT(1) FROM cross_requirements WHERE id = ?`, xreqID).Scan(&exists); eErr != nil {
+			return nil, fmt.Errorf("cross split: check cross requirement: %w", eErr)
+		}
+		if exists == 0 {
+			return nil, ErrCrossRequirementNotFound
+		}
+		return nil, ErrCrossAlreadySplit
+	}
 
 	for i, cand := range ordered {
 		criteria := "[]"

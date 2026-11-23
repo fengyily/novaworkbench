@@ -120,12 +120,12 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 // Get reads one cross requirement by id.
 func (s *CrossRequirementService) Get(id string) (*model.CrossRequirement, error) {
 	row := s.db.QueryRow(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,created_by,created_at,updated_at,completed_at
+		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,created_by,created_at,updated_at,completed_at
 		 FROM cross_requirements WHERE id = ?`, id)
 	var x model.CrossRequirement
 	var createdAt, updatedAt, completedAt sql.NullString
 	if err := row.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
-		&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.CreatedBy,
+		&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.CreatedBy,
 		&createdAt, &updatedAt, &completedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrCrossRequirementNotFound
@@ -162,7 +162,7 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,created_by,created_at,updated_at,completed_at
+		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,created_by,created_at,updated_at,completed_at
 		 FROM cross_requirements `+where+` ORDER BY updated_at DESC, id DESC`, args...)
 	if err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 		var x model.CrossRequirement
 		var createdAt, updatedAt, completedAt sql.NullString
 		if err := rows.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
-			&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.CreatedBy,
+			&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.CreatedBy,
 			&createdAt, &updatedAt, &completedAt); err != nil {
 			return nil, err
 		}
@@ -393,6 +393,36 @@ func (s *CrossRequirementService) ProjectIDs(id string) ([]string, error) {
 		out = append(out, p.ProjectID)
 	}
 	return out, nil
+}
+
+// AlreadySplit reports whether this cross requirement has already been split
+// into sub-requirements.
+//
+// 两个来源：
+//   - 父行上的 split_batch_id —— 正常路径（确认拆分时原子写入）；
+//   - 子需求的数量 —— 兜住「子需求存在但父行没有批次 id」的行（早期构建
+//     写出的数据）。
+//
+// 调用方用它来**提前**拒绝第二次拆分（让用户不必等到确认那一步才被拒）。
+// 注意它只是给 UI / 作业入口用的预检：真正的仲裁在 ConfirmSplit 的原子
+// 抢占上（那里才防得住并发）。
+func (s *CrossRequirementService) AlreadySplit(id string) (bool, error) {
+	var batchID string
+	err := s.db.QueryRow(`SELECT split_batch_id FROM cross_requirements WHERE id = ?`, id).Scan(&batchID)
+	if err == sql.ErrNoRows {
+		return false, ErrCrossRequirementNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(batchID) != "" {
+		return true, nil
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM requirements WHERE cross_requirement_id = ?`, id).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // ── 子需求 ─────────────────────────────────────────────────────────────────

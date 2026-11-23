@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -253,5 +254,160 @@ func TestCrossSplit_ChildDescriptionCarriesContract(t *testing.T) {
 	}
 	if !strings.Contains(row.Description, "跨项目上下文") {
 		t.Fatalf("description does not carry the cross-project block: %q", row.Description)
+	}
+}
+
+// 拆分确认的幂等性：第二次确认必须被拒绝，且不产生第二批子需求。
+//
+// 这是 P1-5 的回归测试：前端双击「确认创建」会发出两个请求，两个标签页
+// 同时确认也会 —— 服务端必须只让一批子需求落库。
+func TestCrossSplit_ConfirmIsIdempotent(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+	p2 := seedCrossProject(t, projSvc, "api-svc")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "重复确认校验",
+		ProjectIDs: []string{p1.ID, p2.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	candidates := []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+		{Title: "订单服务", ProjectID: p2.ID, Order: 2},
+	}
+	children, err := svc.ConfirmSplit(x.ID, candidates)
+	if err != nil {
+		t.Fatalf("first confirm: %v", err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("children = %d, want 2", len(children))
+	}
+
+	// The parent row remembers the batch id.
+	row, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if strings.TrimSpace(row.SplitBatchID) == "" {
+		t.Fatal("split_batch_id was not stamped on the cross requirement")
+	}
+
+	// The second confirm is refused.
+	_, err = svc.ConfirmSplit(x.ID, candidates)
+	if err == nil {
+		t.Fatal("second confirm accepted, want an error")
+	}
+	if !errors.Is(err, ErrCrossAlreadySplit) {
+		t.Fatalf("error = %v, want ErrCrossAlreadySplit", err)
+	}
+
+	// And it did not produce a second batch.
+	after, err := svc.ListChildren(x.ID)
+	if err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("children = %d, want 2 (the second confirm must not write anything)", len(after))
+	}
+}
+
+// 并发的两次确认：只有一方能落库（原子抢占）。
+func TestCrossSplit_ConcurrentConfirmOnlyOneWins(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "并发确认",
+		ProjectIDs: []string{p1.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	candidates := []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+	}
+
+	type result struct {
+		children int
+		err      error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			children, cErr := svc.ConfirmSplit(x.ID, candidates)
+			n := 0
+			if children != nil {
+				n = len(children)
+			}
+			results <- result{children: n, err: cErr}
+		}()
+	}
+	close(start)
+
+	ok, refused := 0, 0
+	for i := 0; i < 2; i++ {
+		res := <-results
+		switch {
+		case res.err == nil:
+			ok++
+			if res.children != 1 {
+				t.Fatalf("winner wrote %d children, want 1", res.children)
+			}
+		case errors.Is(res.err, ErrCrossAlreadySplit):
+			refused++
+		default:
+			t.Fatalf("unexpected error: %v", res.err)
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("ok = %d, refused = %d, want 1 and 1", ok, refused)
+	}
+
+	after, err := svc.ListChildren(x.ID)
+	if err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("children = %d, want 1", len(after))
+	}
+}
+
+// AlreadySplit 预检：拆过之后必须报告「已拆分」。
+func TestCrossSplit_AlreadySplitFlag(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:      "预检",
+		ProjectIDs: []string{p1.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	split, err := svc.AlreadySplit(x.ID)
+	if err != nil {
+		t.Fatalf("already split: %v", err)
+	}
+	if split {
+		t.Fatal("a fresh cross requirement reports as already split")
+	}
+
+	if _, err := svc.ConfirmSplit(x.ID, []model.CrossRequirementSplitCandidate{
+		{Title: "接口定义", ProjectID: p1.ID, Order: 1},
+	}); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	split, err = svc.AlreadySplit(x.ID)
+	if err != nil {
+		t.Fatalf("already split: %v", err)
+	}
+	if !split {
+		t.Fatal("a split cross requirement does not report as already split")
 	}
 }

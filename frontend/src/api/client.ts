@@ -4020,6 +4020,11 @@ export interface CrossRequirement {
   design_docs: string;
   design_session_id: string;
   design_job_id: string;
+  // split_batch_id — the id of the split batch that produced this
+  // requirement's children. Empty = never split. A cross-project
+  // requirement is split at most once, so a non-empty value means the
+  // split button must stay disabled.
+  split_batch_id: string;
   created_by: string;
   created_at: string;
   updated_at: string;

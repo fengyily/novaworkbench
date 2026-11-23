@@ -65,6 +65,11 @@ export default function CrossRequirementDetailPage() {
   // split confirmation
   const [candidates, setCandidates] = useState<CrossSplitCandidate[]>([]);
   const [confirming, setConfirming] = useState(false);
+  // confirmingSplit — the confirm request is in flight. The button is
+  // disabled while it is: a double click would otherwise fire two confirms.
+  // The server refuses the second one (409 XREQ_ALREADY_SPLIT), but the
+  // user should not have to see that error.
+  const [confirmingSplit, setConfirmingSplit] = useState(false);
 
   // phase creation
   const [addingPhase, setAddingPhase] = useState(false);
@@ -207,6 +212,12 @@ export default function CrossRequirementDetailPage() {
   };
 
   const confirmSplit = async () => {
+    // Guard against a double click: the second call would be refused by the
+    // server anyway (409 XREQ_ALREADY_SPLIT), but sending it at all would
+    // show the user an error for a request they never intended.
+    if (confirmingSplit) return;
+    setConfirmingSplit(true);
+    setError(null);
     try {
       await crossRequirementsApi.confirmSplit(xreqId, candidates);
       setConfirming(false);
@@ -215,6 +226,15 @@ export default function CrossRequirementDetailPage() {
       load();
     } catch (err) {
       setError(errorMessage(err));
+      // The cross requirement was already split elsewhere (another tab, or a
+      // previous confirm that went through) — the candidates are stale.
+      if ((err as { code?: string })?.code === 'XREQ_ALREADY_SPLIT') {
+        setConfirming(false);
+        setCandidates([]);
+        load();
+      }
+    } finally {
+      setConfirmingSplit(false);
     }
   };
 
@@ -273,6 +293,10 @@ export default function CrossRequirementDetailPage() {
   const design = designMarkdown(detail.design_docs);
   const progress = detail.progress;
   const projectRows = detail.projects || [];
+  // Already split? Two sources: the batch id on the parent row (the normal
+  // path) and the children themselves (rows written by an earlier build
+  // carry no batch id). Either way the server refuses a second split.
+  const alreadySplit = !!detail.split_batch_id || children.length > 0;
 
   return (
     <div className="xreq-page">
@@ -301,7 +325,11 @@ export default function CrossRequirementDetailPage() {
             type="button"
             className="btn btn-primary"
             onClick={startSplit}
-            disabled={jobRunning || !design}
+            // A cross requirement is split at most once — the server refuses
+            // a second split (409 XREQ_ALREADY_SPLIT), so the button is
+            // disabled instead of leading the user into a dead end.
+            disabled={jobRunning || !design || alreadySplit}
+            title={alreadySplit ? t('crossRequirements.detail.alreadySplit') : undefined}
           >
             {t('crossRequirements.detail.split')}
           </button>
@@ -647,9 +675,11 @@ export default function CrossRequirementDetailPage() {
                 type="button"
                 className="btn btn-primary"
                 onClick={confirmSplit}
-                disabled={candidates.length === 0}
+                disabled={candidates.length === 0 || confirmingSplit}
               >
-                {t('crossRequirements.split.confirm')}
+                {confirmingSplit
+                  ? t('crossRequirements.split.confirming')
+                  : t('crossRequirements.split.confirm')}
               </button>
             </div>
           </div>

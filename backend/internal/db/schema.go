@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS cross_requirements (
     design_docs         TEXT NOT NULL DEFAULT '[]',
     design_session_id   TEXT NOT NULL DEFAULT '',
     design_job_id       TEXT NOT NULL DEFAULT '',
+    -- 拆分批次 id（spb_xxx）：标记这个跨项目需求已经被拆分过。'' = 从未拆分。
+    --
+    -- 它是「一个跨项目需求只能拆一次」这条不变量的**原子**载体：确认拆分时
+    -- 用一条带条件的 UPDATE 抢占它（条件里还带 NOT EXISTS(子需求)），并发
+    -- 重复确认只有一方能抢到 —— 另一方拿到 0 行受影响，整批回滚。
+    split_batch_id      TEXT NOT NULL DEFAULT '',
     created_by          TEXT NOT NULL DEFAULT 'user',
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1929,6 +1935,16 @@ var alterColumns = []string{
 	// `WHERE cross_requirement_id = ?` 全表扫描即可（requirements 行数量级
 	// 为百~千，详情页每次 1 次）。
 	`ALTER TABLE requirements ADD COLUMN cross_requirement_id TEXT NOT NULL DEFAULT ''`,
+	// split_batch_id: 跨项目需求的拆分批次 id（spb_xxx）。'' = 从未拆分。
+	//
+	// 它承载「一个跨项目需求只能拆一次」这条不变量 —— 确认拆分时用一条带
+	// 条件的 UPDATE 抢占它，并发重复确认只有一方能抢到（见
+	// service.CrossRequirementService.ConfirmSplit）。
+	//
+	// 跨_requirements 表是本特性新建的，正常不会缺这一列；这条 ALTER 只是
+	// 为了让已经跑过早期构建的开发库补齐（alterColumns 会吞掉「duplicate
+	// column」错误，所以重复执行是安全的）。
+	`ALTER TABLE cross_requirements ADD COLUMN split_batch_id TEXT NOT NULL DEFAULT ''`,
 	// error_kind: 答疑轮的失败分类（empty-result /
 	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
 	// timeout）。空串 = 成功。有了它，下一次同类故障从一行日志就能判断是

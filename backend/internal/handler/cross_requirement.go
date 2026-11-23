@@ -507,6 +507,11 @@ func (h *CrossRequirementHandler) SaveDesign(w http.ResponseWriter, r *http.Requ
 //
 // 项目归属由服务端校验（候选的 project_id 必须 ∈ 参与集合）—— AI 的建议值
 // 不能直接落库。非法时整批拒绝（事务回滚），不产生任何残留行。
+//
+// 拆分**只能做一次**：已经拆过的跨项目需求再确认一次 → 409
+// XREQ_ALREADY_SPLIT（服务端原子抢占，见 service.ConfirmSplit）。这条闸门
+// 是「双击确认按钮」的最后一道防线 —— 前端的 submitting 态只是让用户不必
+// 看见这个错误。
 func (h *CrossRequirementHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	if h.svc == nil {
 		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
@@ -529,6 +534,8 @@ func (h *CrossRequirementHandler) ConfirmSplit(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadRequest, "SPLIT_PROJECT_OUT_OF_SCOPE", err.Error())
 		case errors.Is(err, service.ErrDependencyCycle):
 			writeError(w, http.StatusBadRequest, "SPLIT_DEPENDENCY_CYCLE", "前置依赖成环，无法创建子需求")
+		case errors.Is(err, service.ErrCrossAlreadySplit):
+			writeError(w, http.StatusConflict, "XREQ_ALREADY_SPLIT", "该跨项目需求已经拆分过了，不能重复拆分")
 		case errors.Is(err, service.ErrCrossRequirementNotFound):
 			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
 		default:

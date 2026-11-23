@@ -379,3 +379,87 @@ func TestCrossRequirementHandler_ListArchivedFilter(t *testing.T) {
 		t.Fatalf("archived item status = %v, want %q", itemMap["status"], model.XReqStatusArchived)
 	}
 }
+
+// 重复确认拆分 → 409（不产生第二批子需求）。
+//
+// 这是 P1-5 的接口层回归测试：前端双击「确认创建」会发出两个请求，服务端
+// 必须只让一批子需求落库，第二个请求拿到明确的 409。
+func TestCrossRequirementHandler_ConfirmSplitTwice(t *testing.T) {
+	h, d, _ := newCrossHandlerTest(t)
+	p1 := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title: "重复确认", ProjectIDs: []string{p1},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	body := model.ConfirmCrossRequirementSplitReq{
+		Candidates: []model.CrossRequirementSplitCandidate{
+			{Title: "接口定义", ProjectID: p1, Order: 1},
+		},
+	}
+	code, env = callCross(t, h.ConfirmSplit, http.MethodPost, "/api/cross-requirements/"+id+"/split/confirm", body)
+	if code != http.StatusOK {
+		t.Fatalf("first confirm status = %d, body = %v", code, env)
+	}
+
+	code, env = callCross(t, h.ConfirmSplit, http.MethodPost, "/api/cross-requirements/"+id+"/split/confirm", body)
+	if code != http.StatusConflict {
+		t.Fatalf("second confirm status = %d, want 409 (body = %v)", code, env)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj["code"] != "XREQ_ALREADY_SPLIT" {
+		t.Fatalf("error code = %v, want XREQ_ALREADY_SPLIT", errObj["code"])
+	}
+
+	// Only one batch of children exists.
+	var count int
+	if err := d.QueryRow(`SELECT COUNT(1) FROM requirements WHERE cross_requirement_id = ?`, id).Scan(&count); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("children = %d, want 1", count)
+	}
+}
+
+// 已经拆分过的跨项目需求不能再启动拆分作业 → 409。
+func TestCrossRequirementHandler_StartSplitAfterSplit(t *testing.T) {
+	h, d, _ := newCrossHandlerTest(t)
+	p1 := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title: "重复拆分", ProjectIDs: []string{p1},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d", code)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	// A design must exist before a split may start.
+	if err := h.svc.SaveDesign(id, "## 需求目标\n\n目标\n\n## 跨项目接口契约\n\nGET /api/x\n", "", ""); err != nil {
+		t.Fatalf("save design: %v", err)
+	}
+	code, env = callCross(t, h.ConfirmSplit, http.MethodPost, "/api/cross-requirements/"+id+"/split/confirm",
+		model.ConfirmCrossRequirementSplitReq{
+			Candidates: []model.CrossRequirementSplitCandidate{
+				{Title: "接口定义", ProjectID: p1, Order: 1},
+			},
+		})
+	if code != http.StatusOK {
+		t.Fatalf("confirm status = %d, body = %v", code, env)
+	}
+
+	code, env = callCross(t, h.StartSplit, http.MethodPost, "/api/cross-requirements/"+id+"/split", nil)
+	if code != http.StatusConflict {
+		t.Fatalf("start split status = %d, want 409 (body = %v)", code, env)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj["code"] != "XREQ_ALREADY_SPLIT" {
+		t.Fatalf("error code = %v, want XREQ_ALREADY_SPLIT", errObj["code"])
+	}
+}
