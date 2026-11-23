@@ -189,11 +189,20 @@ CREATE TABLE IF NOT EXISTS cross_requirements (
 CREATE INDEX IF NOT EXISTS idx_xreq_status ON cross_requirements(status);
 
 -- 参与项目映射。role 是自由文本（前端 / 后端 / 移动端 …），用于 UI 展示。
+--
+-- base_branch: 该参与项目的**基础分支** —— 这个仓库里的子需求从哪条分支
+-- 开发。跨项目需求里每个仓库可能处在不同的发布线上（A 走 develop、B 走
+-- release/2026q1），所以基础分支必须**逐项目**指定，不能全局一个值。
+--
+-- 空串 = 不指定：子需求沿用该项目的默认分支（projects.default_branch）。
+-- 拆分时这个值会被盖到子需求的 requirements.base_branch 上（来源标记
+-- 'cross_project'），子需求自己显式选过的基础分支不受影响。
 CREATE TABLE IF NOT EXISTS cross_requirement_projects (
     id                   TEXT PRIMARY KEY,
     cross_requirement_id TEXT NOT NULL,
     project_id           TEXT NOT NULL,
     role                 TEXT NOT NULL DEFAULT '',
+    base_branch          TEXT NOT NULL DEFAULT '',
     sort_order           INTEGER NOT NULL DEFAULT 0,
     created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(cross_requirement_id, project_id)
@@ -1959,6 +1968,13 @@ var alterColumns = []string{
 	// 重算掉 —— 人工的判断被读路径悄悄推翻。同 alterColumns 的其它条目：
 	// 「duplicate column」错误会被吞掉，重复执行安全。
 	`ALTER TABLE cross_requirements ADD COLUMN status_locked INTEGER NOT NULL DEFAULT 0`,
+	// base_branch: 参与项目的基础分支（逐项目指定）。空串 = 该子需求沿用项目
+	// 默认分支。
+	//
+	// 它是**每个仓库各写各的**的那条线：A 仓库在 develop 上开发、B 仓库在
+	// release/2026q1 上开发 —— 一个全局值表达不了。拆分时它被盖到子需求的
+	// requirements.base_branch 上（来源 'cross_project'）。
+	`ALTER TABLE cross_requirement_projects ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`,
 	// error_kind: 答疑轮的失败分类（empty-result /
 	// empty-result-after-fallback / stale-session / fork-guard / cli-crash /
 	// timeout）。空串 = 成功。有了它，下一次同类故障从一行日志就能判断是

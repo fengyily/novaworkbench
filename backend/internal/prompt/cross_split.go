@@ -114,6 +114,9 @@ func BuildCrossSplitPrompt(title string, designDocs string, projects []CrossProj
 		if role := strings.TrimSpace(p.Role); role != "" {
 			b.WriteString("（角色：" + role + "）")
 		}
+		if base := strings.TrimSpace(p.BaseBranch); base != "" {
+			b.WriteString("（基础分支：" + base + "）")
+		}
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

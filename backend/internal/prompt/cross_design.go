@@ -78,6 +78,11 @@ type CrossProjectInput struct {
 	Path string
 	// Summary — 项目的简要说明（来自项目描述）。
 	Summary string
+	// BaseBranch — 该参与项目的基础分支（子需求从这条分支开发）。
+	//
+	// 空 = 该项目沿用自己的默认分支。写进提示词是为了让模型知道各仓库
+	// 处在不同的发布线上 —— 方案里的版本 / 兼容性结论必须按各自的线来写。
+	BaseBranch string
 }
 
 // BuildCrossDesignPrompt renders the overall-design prompt.
@@ -125,6 +130,9 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 		b.WriteString("- " + name)
 		if role := strings.TrimSpace(p.Role); role != "" {
 			b.WriteString("（角色：" + role + "）")
+		}
+		if base := strings.TrimSpace(p.BaseBranch); base != "" {
+			b.WriteString("（基础分支：" + base + "）")
 		}
 		if path := strings.TrimSpace(p.Path); path != "" {
 			b.WriteString("（路径：" + path + "）")

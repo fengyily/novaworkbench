@@ -667,7 +667,12 @@ func (h *CrossRequirementHandler) crossProjectInputs(xreqID string) ([]prompt.Cr
 	}
 	out := make([]prompt.CrossProjectInput, 0, len(projects))
 	for _, p := range projects {
-		item := prompt.CrossProjectInput{ID: p.ProjectID, Name: p.ProjectName, Role: p.Role}
+		item := prompt.CrossProjectInput{
+			ID:         p.ProjectID,
+			Name:       p.ProjectName,
+			Role:       p.Role,
+			BaseBranch: strings.TrimSpace(p.BaseBranch),
+		}
 		if h.projectSvc != nil {
 			if proj, pErr := h.projectSvc.Get(p.ProjectID); pErr == nil && proj != nil {
 				item.Path = strings.TrimSpace(proj.LocalPath)

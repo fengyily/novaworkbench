@@ -17,6 +17,13 @@ import (
 const (
 	// BaseSourceExplicit — the user picked this base branch themselves.
 	BaseSourceExplicit = "explicit"
+	// BaseSourceCrossProject — inherited from the participating project's
+	// base branch of the cross-project requirement this row belongs to.
+	//
+	// 跨项目需求里每个仓库可以指定各自的基础分支（A 在 develop、B 在
+	// release/2026q1），拆分时该值被盖到子需求行上。它排在 explicit 之后 ——
+	// 用户在子需求上自己选过的话，以用户的为准。
+	BaseSourceCrossProject = "cross_project"
 	// BaseSourceParent — inherited from the parent requirement's branch.
 	BaseSourceParent = "parent"
 	// BaseSourceRequirement — reused this requirement's own previous value.

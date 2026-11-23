@@ -20,9 +20,11 @@ import (
 //
 //  1. **没有 master 行**。跨项目需求的子需求是**平级**的：parent_id 恒为空，
 //     归属靠 requirements.cross_requirement_id 表达。
-//  2. **base_branch 留空**。同项目拆分的所有子需求堆叠在主需求的开发分支上；
+//  2. **base_branch 逐项目**。同项目拆分的所有子需求堆叠在主需求的开发分支上；
 //     跨项目的子需求分属不同仓库，堆叠没有意义 —— 每个子需求在**自己**的项目
-//     默认分支上开发（空 base → 解析链落到项目默认）。
+//     上开发。基础分支来自「参与项目 → 基础分支」映射：该项目没指定基础分支
+//     时留空（解析链落到项目默认分支），指定了就盖到子需求上（来源标记
+//     'cross_project'）。
 //  3. **依赖边可以跨项目**。requirement_dependencies 本来就没有项目约束，
 //     于是「B 项目的对接依赖 A 项目的接口定义」天然成立 —— 而且既有的编码闸门
 //     （UnmetDependencies → GATE_DEPENDENCY_NOT_MET）零改动即生效。
@@ -115,8 +117,20 @@ func (s *CrossRequirementService) ConfirmSplit(
 		return nil, err
 	}
 	refs := make([]prompt.CrossProjectRef, 0, len(projects))
+	// baseByProject — 每个参与项目各自的基础分支。跨项目需求里各仓库常常
+	// 处在不同的发布线上（A 在 develop、B 在 release/2026q1），所以基础分支
+	// 必须逐项目带 —— 拆分时盖到该项目的子需求上。
+	baseByProject := map[string]string{}
 	for _, p := range projects {
-		refs = append(refs, prompt.CrossProjectRef{ID: p.ProjectID, Name: p.ProjectName, Role: p.Role})
+		refs = append(refs, prompt.CrossProjectRef{
+			ID:         p.ProjectID,
+			Name:       p.ProjectName,
+			Role:       p.Role,
+			BaseBranch: strings.TrimSpace(p.BaseBranch),
+		})
+		if b := strings.TrimSpace(p.BaseBranch); b != "" {
+			baseByProject[p.ProjectID] = b
+		}
 	}
 
 	ids := make([]string, len(ordered))
@@ -195,11 +209,22 @@ func (s *CrossRequirementService) ConfirmSplit(
 			}
 		}
 		description := buildCrossDescription(cand, design, refs)
+		// 基础分支：该参与项目指定的基础分支（逐项目）。没指定就留空 ——
+		// 空 base 的解析链落到该项目的默认分支（projects.default_branch）。
+		//
+		// 来源标记写成 'cross_project'：解析链里它排在 'explicit' 之后 ——
+		// 用户在子需求上自己选过基础分支时以用户的为准，但它仍然压过项目
+		// 默认分支（否则跨仓库的发布线差异就丢了）。
+		base := baseByProject[strings.TrimSpace(cand.ProjectID)]
+		baseSource := ""
+		if base != "" {
+			baseSource = model.BaseSourceCrossProject
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at,parent_id,base_branch,base_branch_source,split_batch_id,dev_delegated,split_order,cross_requirement_id)
-			 VALUES (?,?,?,?,'draft','medium','requirement',?,'[]','[]','user','',1,0,?,?,'','','',?,0,?,?)`,
+			 VALUES (?,?,?,?,'draft','medium','requirement',?,'[]','[]','user','',1,0,?,?,'',?,?,?,0,?,?)`,
 			ids[i], strings.TrimSpace(cand.ProjectID), strings.TrimSpace(cand.Title), description,
-			criteria, now, now, batchID, i+1, xreqID); err != nil {
+			criteria, now, now, base, baseSource, batchID, i+1, xreqID); err != nil {
 			return nil, fmt.Errorf("cross split: insert sub-requirement %d: %w", i, err)
 		}
 	}

@@ -4035,9 +4035,21 @@ export interface CrossRequirementProjectProgress {
   project_id: string;
   project_name: string;
   role: string;
+  // base_branch — the base branch of this participating project (its
+  // sub-requirements are developed from this branch). Empty = the project's
+  // own default branch.
+  base_branch: string;
   total: number;
   done: number;
   blocked: number;
+}
+
+// CrossRequirementProjectInput — one participating project (id + role + base
+// branch).
+export interface CrossRequirementProjectInput {
+  project_id: string;
+  role?: string;
+  base_branch?: string;
 }
 
 export interface CrossRequirementProgress {
@@ -4057,6 +4069,9 @@ export interface CrossRequirementChild {
   status: string;
   priority: string;
   split_order: number;
+  // base_branch — the base branch this sub-requirement actually uses
+  // (inherited from its participating project's base branch).
+  base_branch: string;
   depends_on: string[];
   blocked_by: string[];
 }
@@ -4146,6 +4161,9 @@ export const crossRequirementsApi = {
     kind?: string;
     acceptance_criteria?: string[];
     project_ids?: string[];
+    // projects — the participating projects in full (each may carry its own
+    // base branch). Takes precedence over project_ids when present.
+    projects?: CrossRequirementProjectInput[];
   }) => api.post<CrossRequirement>('/api/cross-requirements', data),
   get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
   // Partial update: an omitted (or empty) field keeps the stored value, so a
@@ -4159,7 +4177,7 @@ export const crossRequirementsApi = {
     status?: string;
   }) => api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}`, data),
   remove: (id: string) => api.delete<void>(`/api/cross-requirements/${id}`),
-  setProjects: (id: string, projects: { project_id: string; role?: string }[]) =>
+  setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
     api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
   // ── overall design ──────────────────────────────────────────────────────
   startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>

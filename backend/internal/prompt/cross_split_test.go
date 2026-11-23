@@ -211,3 +211,20 @@ func TestBuildCrossDesignPrompt_CarriesConventions(t *testing.T) {
 		t.Fatalf("the convention section must come before the output contract: %q", p)
 	}
 }
+
+// 上下文块带上每个参与项目的基础分支 —— 执行 Agent 必须知道自己那条线的
+// 基线，否则会按错误的版本假设写代码。
+func TestBuildCrossContextBlock_CarriesBaseBranch(t *testing.T) {
+	block := BuildCrossContextBlock("", []CrossProjectRef{
+		{ID: "proj_web", Name: "web-app", Role: "前端", BaseBranch: "develop"},
+		{ID: "proj_api", Name: "api-svc", Role: "后端", BaseBranch: "release/2026q1"},
+		{ID: "proj_mob", Name: "mobile", Role: "移动端"},
+	}, "订单服务")
+	if !strings.Contains(block, "develop") || !strings.Contains(block, "release/2026q1") {
+		t.Fatalf("block lost the base branches: %q", block)
+	}
+	// 没指定基础分支的项目不写空标签。
+	if strings.Count(block, "基础分支") != 2 {
+		t.Fatalf("block mentions the base branch %d times, want 2: %q", strings.Count(block, "基础分支"), block)
+	}
+}

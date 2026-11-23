@@ -45,6 +45,9 @@ export default function CrossRequirementsList() {
   const [draftDescription, setDraftDescription] = useState('');
   const [draftPriority, setDraftPriority] = useState<string>('medium');
   const [draftProjectIds, setDraftProjectIds] = useState<string[]>([]);
+  // draftBases — the base branch of each participating project (empty = that
+  // project keeps using its own default branch).
+  const [draftBases, setDraftBases] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -73,6 +76,7 @@ export default function CrossRequirementsList() {
     setDraftDescription('');
     setDraftPriority('medium');
     setDraftProjectIds([]);
+    setDraftBases({});
     setFormError(null);
     setCreating(true);
   };
@@ -98,7 +102,12 @@ export default function CrossRequirementsList() {
         title: draftTitle.trim(),
         description: draftDescription,
         priority: draftPriority,
-        project_ids: draftProjectIds,
+        // Carry the base branch per project (the ones left empty fall back
+        // to their project's default branch).
+        projects: draftProjectIds.map(id => ({
+          project_id: id,
+          base_branch: (draftBases[id] || '').trim(),
+        })),
       });
       setCreating(false);
       navigate(`/cross-requirements/${created.id}`);
@@ -252,16 +261,25 @@ export default function CrossRequirementsList() {
             <div className="xreq-field">
               <span className="xreq-field-label">{t('crossRequirements.create.projects')}</span>
               <p className="xreq-field-hint">{t('crossRequirements.create.projectsHint')}</p>
+              <p className="xreq-field-hint">{t('crossRequirements.detail.baseBranchHint')}</p>
               <div className="xreq-picker">
                 {projects.map(p => (
-                  <label key={p.id} className="xreq-option">
+                  <div key={p.id} className="xreq-option">
                     <input
                       type="checkbox"
                       checked={draftProjectIds.includes(p.id)}
                       onChange={() => toggleProject(p.id)}
                     />
                     <span>{p.name}</span>
-                  </label>
+                    {draftProjectIds.includes(p.id) && (
+                      <input
+                        className="form-input xreq-project-base"
+                        placeholder={t('crossRequirements.detail.baseBranchPlaceholder')}
+                        value={draftBases[p.id] || ''}
+                        onChange={e => setDraftBases(prev => ({ ...prev, [p.id]: e.target.value }))}
+                      />
+                    )}
+                  </div>
                 ))}
               </div>
             </div>

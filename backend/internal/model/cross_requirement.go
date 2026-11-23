@@ -107,6 +107,13 @@ type CrossRequirementProject struct {
 	ProjectName string `json:"project_name"`
 	// Role — 自由文本（前端 / 后端 / 移动端 …），用于 UI 展示。
 	Role string `json:"role"`
+	// BaseBranch — 该参与项目的**基础分支**：这个仓库里的子需求从哪条分支
+	// 开发。
+	//
+	// 跨项目需求里每个仓库常常处在不同的发布线上（A 在 develop、B 在
+	// release/2026q1），所以基础分支必须逐项目指定。空串 = 不指定，子需求
+	// 沿用该项目的默认分支（projects.default_branch）。
+	BaseBranch string `json:"base_branch"`
 	// SortOrder — 展示顺序（1 起算）。
 	SortOrder int `json:"sort_order"`
 }
@@ -151,6 +158,11 @@ type CrossRequirementChild struct {
 	Status      string `json:"status"`
 	Priority    string `json:"priority"`
 	SplitOrder  int    `json:"split_order"`
+	// BaseBranch — 该子需求实际使用的基础分支（读路径 JOIN 出来）。
+	//
+	// 它来自「参与项目 → 基础分支」的映射，在拆分时盖到子需求行上；空 = 沿用
+	// 该项目的默认分支。
+	BaseBranch string `json:"base_branch"`
 	// DependsOn — 前置依赖的子需求 id（跨项目也可以）。
 	DependsOn []string `json:"depends_on"`
 	// BlockedBy — 尚未完成的前置依赖 id 列表（闸门实际拦住的那些）。
@@ -162,6 +174,8 @@ type CrossRequirementProjectProgress struct {
 	ProjectID   string `json:"project_id"`
 	ProjectName string `json:"project_name"`
 	Role        string `json:"role"`
+	// BaseBranch — 该参与项目的基础分支（空 = 沿用项目默认分支）。
+	BaseBranch string `json:"base_branch"`
 	// Total / Done / Blocked — 该项目下的子需求计数。
 	Total   int `json:"total"`
 	Done    int `json:"done"`
@@ -224,7 +238,14 @@ type CreateCrossRequirementReq struct {
 	// AcceptanceCriteria — 验收标准（字符串数组，落库为 JSON）。
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
 	// ProjectIDs — 参与项目 id 列表（创建时一并写入映射）。
+	//
+	// 与 Projects 二选一：只给 id 时用这个（基础分支留空 = 沿用项目默认分支）；
+	// 需要逐项目指定基础分支时给 Projects。
 	ProjectIDs []string `json:"project_ids"`
+	// Projects — 参与项目的完整描述（id + 角色 + 基础分支）。
+	//
+	// 非空时优先于 ProjectIDs。
+	Projects []CrossRequirementProjectInput `json:"projects"`
 }
 
 // UpdateCrossRequirementReq — PUT /api/cross-requirements/{id} 的请求体。
@@ -242,6 +263,10 @@ type UpdateCrossRequirementReq struct {
 type CrossRequirementProjectInput struct {
 	ProjectID string `json:"project_id"`
 	Role      string `json:"role"`
+	// BaseBranch — 该参与项目的基础分支（子需求从这条分支开发）。
+	//
+	// 空串 = 不指定 → 子需求沿用该项目的默认分支（projects.default_branch）。
+	BaseBranch string `json:"base_branch"`
 }
 
 // SetCrossRequirementProjectsReq — PUT /api/cross-requirements/{id}/projects。

@@ -338,6 +338,20 @@
   margin: 0;
 }
 
+/* 参与项目编辑行：项目名 + 基础分支输入 + 角色输入。 */
+.xreq-option .xreq-project-base {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.xreq-option .xreq-project-role {
+  width: 110px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
 /* ── 子需求矩阵 ───────────────────────────────────────────────────────── */
 
 .xreq-matrix {

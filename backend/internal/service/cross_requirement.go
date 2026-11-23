@@ -80,7 +80,7 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 		}
 	}
 
-	projects, err := s.normalizeProjectInputs(req.ProjectIDs)
+	projects, err := s.normalizeCreateProjects(req)
 	if err != nil {
 		return nil, err
 	}
@@ -105,9 +105,9 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 	}
 	for i, p := range projects {
 		if _, err := tx.Exec(
-			`INSERT INTO cross_requirement_projects (id,cross_requirement_id,project_id,role,sort_order,created_at)
-			 VALUES (?,?,?,?,?,?)`,
-			util.NewID("xrp"), id, p.ProjectID, p.Role, i+1, now); err != nil {
+			`INSERT INTO cross_requirement_projects (id,cross_requirement_id,project_id,role,base_branch,sort_order,created_at)
+			 VALUES (?,?,?,?,?,?,?)`,
+			util.NewID("xrp"), id, p.ProjectID, p.Role, p.BaseBranch, i+1, now); err != nil {
 			return nil, fmt.Errorf("attach project %s: %w", p.ProjectID, err)
 		}
 	}
@@ -402,17 +402,93 @@ func (s *CrossRequirementService) normalizeProjectInputs(ids []string) ([]model.
 	return out, nil
 }
 
+// normalizeCreateProjects resolves the participating projects of a NEW cross
+// requirement.
+//
+// 两个来源，只取其一：
+//
+//   - req.Projects —— 完整描述（id + 角色 + 基础分支）。优先。
+//   - req.ProjectIDs —— 只有 id（老客户端）。基础分支留空。
+//
+// 基础分支在这里被校验（合法分支名），非法值整批拒绝 —— 它会被塞进 git
+// 命令，脏值必须在这里挡住。
+func (s *CrossRequirementService) normalizeCreateProjects(req model.CreateCrossRequirementReq) ([]model.CrossRequirementProjectInput, error) {
+	if len(req.Projects) == 0 {
+		return s.normalizeProjectInputs(req.ProjectIDs)
+	}
+	out := []model.CrossRequirementProjectInput{}
+	seen := map[string]struct{}{}
+	for _, p := range req.Projects {
+		pid := strings.TrimSpace(p.ProjectID)
+		if pid == "" {
+			continue
+		}
+		if _, dup := seen[pid]; dup {
+			return nil, fmt.Errorf("%w: %s", ErrDuplicateProject, pid)
+		}
+		seen[pid] = struct{}{}
+		base, err := normalizeBaseBranch(p.BaseBranch)
+		if err != nil {
+			return nil, fmt.Errorf("project %s: %w", pid, err)
+		}
+		out = append(out, model.CrossRequirementProjectInput{
+			ProjectID:  pid,
+			Role:       strings.TrimSpace(p.Role),
+			BaseBranch: base,
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("cross requirement needs at least one project")
+	}
+	return out, nil
+}
+
+// normalizeBaseBranch cleans a user-supplied base branch name.
+//
+// 空 = 不指定（子需求沿用项目默认分支）。非空时必须是一个**合法**的分支名 ——
+// 它会直接进 git 命令（`git checkout <base>`），所以空格 / 控制字符 / 路径
+// 分隔符一律拒绝，而不是让 git 在运行时炸出一条看不懂的错。
+func normalizeBaseBranch(raw string) (string, error) {
+	b := strings.TrimSpace(raw)
+	if b == "" {
+		return "", nil
+	}
+	if len(b) > 255 {
+		return "", fmt.Errorf("base branch name is too long")
+	}
+	if strings.ContainsAny(b, " \t\r\n") {
+		return "", fmt.Errorf("base branch name must not contain whitespace")
+	}
+	if strings.ContainsAny(b, "~^:?*[\\") {
+		return "", fmt.Errorf("base branch name contains an invalid character")
+	}
+	if strings.HasPrefix(b, "-") || strings.HasPrefix(b, "/") || strings.HasSuffix(b, "/") {
+		return "", fmt.Errorf("base branch name must not start with '-' or '/' and must not end with '/'")
+	}
+	if strings.Contains(b, "..") || strings.Contains(b, "//") {
+		return "", fmt.Errorf("base branch name must not contain '..'")
+	}
+	if strings.HasSuffix(b, ".lock") {
+		return "", fmt.Errorf("base branch name must not end with '.lock'")
+	}
+	return b, nil
+}
+
 // SetProjects replaces the participating project set.
 //
 // REPLACE (not append) semantics: the user edits a full list in the UI, so a
 // merge would leave removed projects behind. Project ids that do not exist
 // are rejected — a mapping to a non-existent project would produce a detail
 // page that can never resolve its project name.
+//
+// 每个参与项目可以带一个**基础分支**：这个仓库里的子需求从哪条分支开发。
+// 非法分支名整批拒绝（它会进 git 命令，脏值必须在这里挡住）。
 func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossRequirementProjectInput) error {
 	if len(projects) == 0 {
 		return fmt.Errorf("cross requirement needs at least one project")
 	}
 	seen := map[string]struct{}{}
+	normalized := make([]model.CrossRequirementProjectInput, 0, len(projects))
 	for _, p := range projects {
 		pid := strings.TrimSpace(p.ProjectID)
 		if pid == "" {
@@ -429,6 +505,15 @@ func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossR
 		if exists == 0 {
 			return fmt.Errorf("project %s not found", pid)
 		}
+		base, err := normalizeBaseBranch(p.BaseBranch)
+		if err != nil {
+			return fmt.Errorf("project %s: %w", pid, err)
+		}
+		normalized = append(normalized, model.CrossRequirementProjectInput{
+			ProjectID:  pid,
+			Role:       strings.TrimSpace(p.Role),
+			BaseBranch: base,
+		})
 	}
 
 	tx, err := s.db.Begin()
@@ -440,11 +525,29 @@ func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossR
 		return err
 	}
 	now := time.Now()
-	for i, p := range projects {
+	for i, p := range normalized {
 		if _, err := tx.Exec(
-			`INSERT INTO cross_requirement_projects (id,cross_requirement_id,project_id,role,sort_order,created_at)
-			 VALUES (?,?,?,?,?,?)`,
-			util.NewID("xrp"), id, strings.TrimSpace(p.ProjectID), strings.TrimSpace(p.Role), i+1, now); err != nil {
+			`INSERT INTO cross_requirement_projects (id,cross_requirement_id,project_id,role,base_branch,sort_order,created_at)
+			 VALUES (?,?,?,?,?,?,?)`,
+			util.NewID("xrp"), id, p.ProjectID, p.Role, p.BaseBranch, i+1, now); err != nil {
+			return err
+		}
+		// 已经拆出来的子需求跟着改基础分支。
+		//
+		// 只改「继承来的」那些（base_branch_source == 'cross_project'）——
+		// 用户在子需求上自己选过基础分支的（'explicit'）不动，那是用户的
+		// 判断。同样只改**还没开始开发**的（没有分支 / 没有工作区）：代码已经
+		// 落在某条线上时再换基础分支会让 PR 的目标漂移。
+		baseSource := ""
+		if p.BaseBranch != "" {
+			baseSource = model.BaseSourceCrossProject
+		}
+		if _, err := tx.Exec(
+			`UPDATE requirements SET base_branch=?,base_branch_source=?,updated_at=?
+			 WHERE cross_requirement_id=? AND project_id=?
+			   AND base_branch_source='cross_project'
+			   AND COALESCE(branch_name,'')='' AND COALESCE(worktree_path,'')=''`,
+			p.BaseBranch, baseSource, now, id, p.ProjectID); err != nil {
 			return err
 		}
 	}
@@ -457,7 +560,7 @@ func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossR
 // ListProjects returns the participating projects (with their display names).
 func (s *CrossRequirementService) ListProjects(id string) ([]model.CrossRequirementProject, error) {
 	rows, err := s.db.Query(
-		`SELECT m.id,m.cross_requirement_id,m.project_id,COALESCE(p.name,''),m.role,m.sort_order
+		`SELECT m.id,m.cross_requirement_id,m.project_id,COALESCE(p.name,''),m.role,m.base_branch,m.sort_order
 		 FROM cross_requirement_projects m
 		 LEFT JOIN projects p ON p.id = m.project_id
 		 WHERE m.cross_requirement_id = ? ORDER BY m.sort_order ASC, m.id ASC`, id)
@@ -468,7 +571,7 @@ func (s *CrossRequirementService) ListProjects(id string) ([]model.CrossRequirem
 	out := []model.CrossRequirementProject{}
 	for rows.Next() {
 		var p model.CrossRequirementProject
-		if err := rows.Scan(&p.ID, &p.CrossRequirementID, &p.ProjectID, &p.ProjectName, &p.Role, &p.SortOrder); err != nil {
+		if err := rows.Scan(&p.ID, &p.CrossRequirementID, &p.ProjectID, &p.ProjectName, &p.Role, &p.BaseBranch, &p.SortOrder); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

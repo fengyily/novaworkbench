@@ -5,10 +5,13 @@ import MarkdownRender from '../components/MarkdownRender';
 import { createEventStream, type EventStream } from '../api/stream';
 import {
   crossRequirementsApi,
+  fsApi,
+  projectsApi,
   type CrossRequirementChild,
   type CrossRequirementDetail as Detail,
   type CrossRequirementPhase,
   type CrossSplitCandidate,
+  type Project,
 } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import { crossPhaseBadgeClass, crossPhaseCanVerify, crossStatusBadgeClass } from '../utils/crossStatus';
@@ -76,10 +79,37 @@ export default function CrossRequirementDetailPage() {
   const [phaseName, setPhaseName] = useState('');
   const [phaseMembers, setPhaseMembers] = useState<string[]>([]);
 
+  // ── participating projects (role + base branch) ──────────────────────────
+  //
+  // The base branch is PER PROJECT: the repositories of a cross-project
+  // requirement often sit on different release lines (A on develop, B on
+  // release/2026q1), so one global value cannot express it. Empty = that
+  // repository keeps using its own default branch.
+  const [editingProjects, setEditingProjects] = useState(false);
+  const [projectDrafts, setProjectDrafts] = useState<
+    { project_id: string; role: string; base_branch: string }[]
+  >([]);
+  const [savingProjects, setSavingProjects] = useState(false);
+  // draftCache — the last role / base branch of every project that was
+  // checked at least once, so un-checking and re-checking a project restores
+  // its values instead of resetting them.
+  const [draftCache, setDraftCache] = useState<
+    Record<string, { role: string; base_branch: string }>
+  >({});
+  // branchOptions — the branch candidates of each project (from
+  // git-branches), used as datalist suggestions for the base-branch input.
+  // A failed fetch only means "no suggestions" — the user can still type a
+  // branch name by hand.
+  const [branchOptions, setBranchOptions] = useState<Record<string, string[]>>({});
+
   // job panel
   const [jobLines, setJobLines] = useState<JobLine[]>([]);
   const [jobRunning, setJobRunning] = useState(false);
   const esRef = useRef<EventStream | null>(null);
+
+  // allProjects — every project (used for its local_path when fetching the
+  // branch candidates, and to render the project picker).
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
 
   const xreqId = id || '';
 
@@ -94,6 +124,58 @@ export default function CrossRequirementDetailPage() {
   }, [xreqId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    projectsApi.list()
+      .then(list => setAllProjects(Array.isArray(list) ? list : []))
+      .catch(() => setAllProjects([]));
+  }, []);
+
+  // Seed the drafts from the current participating project set (with their
+  // role and base branch) when the editor opens.
+  useEffect(() => {
+    if (!editingProjects) return;
+    const rows = (detail?.projects || []).map(p => ({
+      project_id: p.project_id,
+      role: p.role || '',
+      base_branch: p.base_branch || '',
+    }));
+    setProjectDrafts(rows);
+  }, [editingProjects, detail]);
+
+  // Fetch the branch candidates of every participating project, used as the
+  // datalist suggestions for the base-branch inputs. A failed fetch only
+  // means "no suggestions" — the user can still type a branch name.
+  //
+  // The dependency is the SET of project ids, not the draft itself: the
+  // draft changes on every keystroke, and depending on it would turn
+  // "open the editor" into "fetch the branch list per character typed".
+  const draftProjectKey = useMemo(
+    () => projectDrafts.map(d => d.project_id).sort().join(','),
+    [projectDrafts],
+  );
+  useEffect(() => {
+    if (!editingProjects || draftProjectKey === '') return;
+    let cancelled = false;
+    (async () => {
+      const ids = draftProjectKey.split(',');
+      const entries = await Promise.all(ids.map(async pid => {
+        const proj = allProjects.find(p => p.id === pid);
+        if (!proj || !proj.local_path) return null;
+        try {
+          const resp = await fsApi.gitBranches({ path: proj.local_path });
+          return [pid, resp?.branches || []] as const;
+        } catch {
+          return null;
+        }
+      }));
+      if (cancelled) return;
+      const next: Record<string, string[]> = {};
+      entries.forEach(e => { if (e) next[e[0]] = e[1]; });
+      setBranchOptions(next);
+    })();
+    return () => { cancelled = true; };
+  }, [editingProjects, draftProjectKey, allProjects]);
 
   useEffect(() => () => { esRef.current?.close(); esRef.current = null; }, []);
 
@@ -242,6 +324,50 @@ export default function CrossRequirementDetailPage() {
     setCandidates(prev => prev.map((c, i) => (i === index ? { ...c, project_id: projectId } : c)));
   };
 
+  // ── participating projects ───────────────────────────────────────────────
+
+  const updateProjectDraft = (projectId: string, patch: { role?: string; base_branch?: string }) => {
+    setProjectDrafts(prev => prev.map(d => (d.project_id === projectId ? { ...d, ...patch } : d)));
+  };
+
+  const toggleProjectDraft = (projectId: string) => {
+    setProjectDrafts(prev => {
+      const current = prev.find(d => d.project_id === projectId);
+      if (current) {
+        // Remember the values so re-checking the project restores them
+        // instead of resetting the role / base branch to empty.
+        setDraftCache(cache => ({ ...cache, [projectId]: { role: current.role, base_branch: current.base_branch } }));
+        return prev.filter(d => d.project_id !== projectId);
+      }
+      const cached = draftCache[projectId];
+      return [...prev, {
+        project_id: projectId,
+        role: cached?.role || '',
+        base_branch: cached?.base_branch || '',
+      }];
+    });
+  };
+
+  const saveProjects = async () => {
+    if (savingProjects) return;
+    setSavingProjects(true);
+    setError(null);
+    try {
+      await crossRequirementsApi.setProjects(xreqId, projectDrafts.map(d => ({
+        project_id: d.project_id,
+        role: d.role,
+        base_branch: d.base_branch.trim(),
+      })));
+      setEditingProjects(false);
+      setToast(t('crossRequirements.detail.projectsSaved'));
+      load();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingProjects(false);
+    }
+  };
+
   const createPhase = async () => {
     if (!phaseName.trim()) return;
     try {
@@ -362,8 +488,75 @@ export default function CrossRequirementDetailPage() {
 
       {/* ── participating projects ───────────────────────────────────── */}
       <section className="xreq-section">
-        <h2 className="xreq-section-title">{t('crossRequirements.detail.projects')}</h2>
-        {projectRows.length === 0 ? (
+        <div className="xreq-section-head">
+          <h2 className="xreq-section-title">{t('crossRequirements.detail.projects')}</h2>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setEditingProjects(v => !v)}
+          >
+            {editingProjects
+              ? t('crossRequirements.common.cancel')
+              : t('crossRequirements.detail.editProjects')}
+          </button>
+        </div>
+
+        {editingProjects ? (
+          <div className="xreq-editor">
+            <p className="xreq-field-hint">{t('crossRequirements.detail.baseBranchHint')}</p>
+            <div className="xreq-picker">
+              {allProjects.map(p => {
+                const draft = projectDrafts.find(d => d.project_id === p.id);
+                const checked = !!draft;
+                return (
+                  <div key={p.id} className="xreq-option">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleProjectDraft(p.id)}
+                    />
+                    <span>{p.name}</span>
+                    {checked && (
+                      <>
+                        <input
+                          className="form-input xreq-project-base"
+                          list={`xreq-branches-${p.id}`}
+                          placeholder={t('crossRequirements.detail.baseBranchPlaceholder')}
+                          value={draft.base_branch}
+                          onChange={e => updateProjectDraft(p.id, { base_branch: e.target.value })}
+                        />
+                        <input
+                          className="form-input xreq-project-role"
+                          placeholder={t('crossRequirements.roleLabel')}
+                          value={draft.role}
+                          onChange={e => updateProjectDraft(p.id, { role: e.target.value })}
+                        />
+                        <datalist id={`xreq-branches-${p.id}`}>
+                          {(branchOptions[p.id] || []).map(b => (
+                            <option key={b} value={b} />
+                          ))}
+                        </datalist>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="xreq-modal-actions">
+              <button type="button" className="btn" onClick={() => setEditingProjects(false)}>
+                {t('crossRequirements.common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={saveProjects}
+                disabled={savingProjects || projectDrafts.length === 0}
+              >
+                {t('crossRequirements.detail.saveProjects')}
+              </button>
+            </div>
+          </div>
+        ) : projectRows.length === 0 ? (
           <div className="xreq-hint">{t('crossRequirements.detail.projectsEmpty')}</div>
         ) : (
           <table className="xreq-table">
@@ -371,6 +564,7 @@ export default function CrossRequirementDetailPage() {
               <tr>
                 <th>{t('crossRequirements.projectLabel')}</th>
                 <th>{t('crossRequirements.roleLabel')}</th>
+                <th>{t('crossRequirements.detail.baseBranch')}</th>
                 <th>{t('crossRequirements.detail.matrix')}</th>
                 <th>{t('crossRequirements.detail.progress')}</th>
               </tr>
@@ -380,6 +574,7 @@ export default function CrossRequirementDetailPage() {
                 <tr key={p.project_id}>
                   <td>{p.project_name || p.project_id}</td>
                   <td>{p.role || '-'}</td>
+                  <td>{p.base_branch || t('crossRequirements.detail.baseBranchDefault')}</td>
                   <td>{p.total}</td>
                   <td>{p.done}/{p.total}</td>
                 </tr>

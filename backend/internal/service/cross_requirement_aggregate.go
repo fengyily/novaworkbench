@@ -84,7 +84,7 @@ func (s *CrossRequirementService) loadChildAggregate(ids []string) (*CrossRequir
 	// ── 1. 参与项目 ───────────────────────────────────────────────────────
 	placeholders, args := inClause(ids)
 	rows, err := s.db.Query(
-		`SELECT m.cross_requirement_id,m.id,m.project_id,COALESCE(p.name,''),m.role,m.sort_order
+		`SELECT m.cross_requirement_id,m.id,m.project_id,COALESCE(p.name,''),m.role,m.base_branch,m.sort_order
 		 FROM cross_requirement_projects m
 		 LEFT JOIN projects p ON p.id = m.project_id
 		 WHERE m.cross_requirement_id IN (`+placeholders+`)
@@ -95,7 +95,7 @@ func (s *CrossRequirementService) loadChildAggregate(ids []string) (*CrossRequir
 	for rows.Next() {
 		var owner string
 		var p model.CrossRequirementProject
-		if err := rows.Scan(&owner, &p.ID, &p.ProjectID, &p.ProjectName, &p.Role, &p.SortOrder); err != nil {
+		if err := rows.Scan(&owner, &p.ID, &p.ProjectID, &p.ProjectName, &p.Role, &p.BaseBranch, &p.SortOrder); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -109,7 +109,7 @@ func (s *CrossRequirementService) loadChildAggregate(ids []string) (*CrossRequir
 	// ── 2. 子需求 ─────────────────────────────────────────────────────────
 	placeholders, args = inClause(ids)
 	rows, err = s.db.Query(
-		`SELECT r.cross_requirement_id,r.id,r.project_id,COALESCE(p.name,''),r.title,r.status,r.priority,r.split_order
+		`SELECT r.cross_requirement_id,r.id,r.project_id,COALESCE(p.name,''),r.title,r.status,r.priority,r.split_order,r.base_branch
 		 FROM requirements r
 		 LEFT JOIN projects p ON p.id = r.project_id
 		 WHERE r.cross_requirement_id IN (`+placeholders+`)
@@ -120,7 +120,7 @@ func (s *CrossRequirementService) loadChildAggregate(ids []string) (*CrossRequir
 	for rows.Next() {
 		var owner string
 		var c model.CrossRequirementChild
-		if err := rows.Scan(&owner, &c.ID, &c.ProjectID, &c.ProjectName, &c.Title, &c.Status, &c.Priority, &c.SplitOrder); err != nil {
+		if err := rows.Scan(&owner, &c.ID, &c.ProjectID, &c.ProjectName, &c.Title, &c.Status, &c.Priority, &c.SplitOrder, &c.BaseBranch); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -191,6 +191,7 @@ func (s *CrossRequirementService) loadChildAggregate(ids []string) (*CrossRequir
 				ProjectID:   mp.ProjectID,
 				ProjectName: mp.ProjectName,
 				Role:        mp.Role,
+				BaseBranch:  mp.BaseBranch,
 			})
 		}
 		byProject := map[string]*model.CrossRequirementProjectProgress{}

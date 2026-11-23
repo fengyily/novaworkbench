@@ -73,6 +73,15 @@ export const crossRequirements = {
     designMissingContract: 'The overall design is missing the 「Cross-project interface contract」 section',
     projects: 'Participating projects',
     projectsEmpty: 'No participating project selected',
+    editProjects: 'Edit participating projects',
+    saveProjects: 'Save participating projects',
+    projectsSaved: 'Participating projects saved',
+    // Base branch — specified per project: each repository often sits on its
+    // own release line.
+    baseBranch: 'Base branch',
+    baseBranchHint: 'The base branch is set per project: when the requirement is split, that project\'s sub-requirements are developed from this branch. Leave it empty to use the repository\'s own default branch.',
+    baseBranchPlaceholder: 'Empty = project default branch',
+    baseBranchDefault: '(project default branch)',
     matrix: 'Sub-requirement matrix',
     matrixEmpty: 'Not split yet',
     matrixEmptyHint: 'Split the overall design per project to get each repository its own sub-requirements.',

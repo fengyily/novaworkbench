@@ -22,6 +22,12 @@ type CrossProjectRef struct {
 	Name string
 	// Role — 角色（前端 / 后端 / 移动端 …）。
 	Role string
+	// BaseBranch — 该项目的基础分支（空 = 沿用项目默认分支）。
+	//
+	// 写进上下文块是为了让执行 Agent 知道自己那条开发线的基线 —— 跨仓库
+	// 协作里「A 在 develop、B 在 release/2026q1」是常见情形，Agent 不知道
+	// 就可能按错误的版本假设写代码。
+	BaseBranch string
 }
 
 // crossContractHeading — 整体方案里「跨项目接口契约」章节的标题。
@@ -136,10 +142,14 @@ func BuildCrossContextBlock(designMarkdown string, projects []CrossProjectRef, c
 			}
 			role := strings.TrimSpace(p.Role)
 			if role != "" {
-				b.WriteString("- " + name + "（" + role + "）\n")
+				b.WriteString("- " + name + "（" + role + "）")
 			} else {
-				b.WriteString("- " + name + "\n")
+				b.WriteString("- " + name)
 			}
+			if base := strings.TrimSpace(p.BaseBranch); base != "" {
+				b.WriteString("（基础分支：" + base + "）")
+			}
+			b.WriteString("\n")
 		}
 	}
 	contract := ExtractCrossContractSection(design)
