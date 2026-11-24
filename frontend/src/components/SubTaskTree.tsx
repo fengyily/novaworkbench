@@ -106,10 +106,16 @@ export function SubTaskTree({
 
   // Roving tabindex: exactly one row is reachable with Tab. The row the
   // user last operated on wins, then the selected row, then the first.
-  const rovingId = useMemo(
-    () => focusedId || selectedId || nodes[0]?.id || '',
-    [focusedId, selectedId, nodes],
-  );
+  //
+  // A focused row can disappear — its subtree was folded, or the panel
+  // moved to another requirement. The fallback checks that the row is
+  // actually on screen, so the tree never becomes keyboard-unreachable
+  // (every row would otherwise carry tabIndex=-1).
+  const rovingId = useMemo(() => {
+    if (focusedId && nodes.some((n) => n.id === focusedId)) return focusedId;
+    if (selectedId && nodes.some((n) => n.id === selectedId)) return selectedId;
+    return nodes[0]?.id || '';
+  }, [focusedId, selectedId, nodes]);
 
   // Move the focus one visible row up or down. `nodes` is already the
   // filtered, visible order, so the array order is the visual order.

@@ -372,13 +372,155 @@
   color: var(--color-error);
 }
 
-/* ─── Sub-task list ─── */
-.sub-list {
+/* ─── Split panel ───────────────────────────────────────────
+   Two columns: a fixed-width tree of the sub-tasks on the left, the
+   selected one in full on the right.
+
+   Each column clamps its OWN height and scrolls by itself. A grid +
+   max-height would NOT do the job: a grid row's height comes from the
+   row's intrinsic sizing algorithm, so the container's max-height only
+   clips the container — it never constrains the row, the items get no
+   height to be constrained against, and the two columns do not scroll
+   independently. In a flex row with align-items:flex-start the
+   cross-axis size is the content's, so max-height does apply and
+   overflow-y:auto becomes meaningful.
+
+   The left column is NOT sticky: the ancestor .sub-panel sets
+   overflow:hidden, which turns the sticky containing block into a
+   non-scrolling box and silently kills the effect. Removing that
+   overflow would let the header background spill past the panel's
+   rounded corners. The column therefore positions itself by its own
+   height clamp, and the tree scrolls inside it. */
+.sub-split {
+  /* The tree column's width, and the height both columns are clamped to.
+     Both are variables so a sibling feature can resize the split without
+     touching the layout rules. */
+  --sub-aside-w: 300px;
+  --sub-split-max-h: min(72vh, 860px);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
   padding: 16px 20px 20px;
+}
+
+/* The tree column. It is the height-clamped box; the inner box below is
+   the scroller. */
+.sub-split-aside {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  flex: 0 0 var(--sub-aside-w);
+  min-width: 0;
+  min-height: 0;
+  max-height: var(--sub-split-max-h);
 }
+
+/* The tree's scrolling box. It is a separate element from the column so
+   the header (and with it the follow switch) stays put: the switch is
+   the only way back into follow mode, and it must not scroll out of
+   reach. min-height:0 is required — a flex item's automatic minimum
+   size would otherwise refuse to shrink below its content. */
+.sub-split-aside-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* The column header: title on the left, follow switch on the right. */
+.sub-split-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 4px;
+}
+.sub-split-head-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+/* The follow switch. On = the right column tracks the running sub-task. */
+.sub-split-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sub-split-follow:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.sub-split-follow.is-on {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-active);
+}
+
+/* The detail column: one card at a time, scrolling on its own. */
+.sub-split-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: var(--sub-split-max-h);
+  overflow-y: auto;
+}
+
+/* One slot per card. Every card stays mounted — the unselected ones are
+   merely hidden, so their SSE connections and log buffers survive. The
+   `hidden` attribute would NOT do: the card's own display rules would
+   override it and every card would show at once. */
+.sub-split-card-slot {
+  display: none;
+}
+.sub-split-card-slot.is-active {
+  display: block;
+}
+
+/* Shown in the detail column while nothing is selected. */
+.sub-split-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+/* Narrow viewports: the split degrades to a single column — the tree on
+   top, the detail below. The project's primary breakpoint stays 768px;
+   1024px is the point where a 300px tree plus a readable detail column
+   stop fitting side by side. */
+@media (max-width: 1024px) {
+  .sub-split {
+    flex-direction: column;
+    /* stretch, not flex-start: in a column flex container flex-start
+       would collapse both items to their content width. */
+    align-items: stretch;
+  }
+  .sub-split-aside {
+    /* NOT var(--sub-aside-w) — in a column flex container the basis is
+       the HEIGHT, so the tree's width would become a 300px tall box. */
+    flex: 0 0 auto;
+    width: 100%;
+    /* A shorter tree box: the detail below it is what the user came for. */
+    max-height: 220px;
+  }
+  .sub-split-detail {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: var(--sub-split-max-h);
+  }
+}
+
+/* ─── Sub-task list ─── */
 .sub-list-loading,
 .sub-list-empty {
   padding: 32px 16px;
@@ -770,6 +912,17 @@
   overflow-y: auto;
   color: #E2E8F0;
   position: relative;
+}
+/* In the split panel the log owns the whole detail column, so it gets a
+   taller box. It MUST stay a scroll container of its own — the auto-scroll
+   to the bottom compares scrollHeight with clientHeight and only moves when
+   the content overflows, so dropping the max-height would silently break
+   the scroll-anchoring. overscroll-behavior stops the scroll chain: once
+   the log hits its end it does not drag the detail column (or the page)
+   along with it. */
+.sub-split-detail .sub-log {
+  max-height: min(46vh, 560px);
+  overscroll-behavior: contain;
 }
 .sub-log-empty {
   background: #0F172A;
@@ -1184,7 +1337,7 @@
 @media (max-width: 640px) {
   .sub-panel-header { padding: 12px 16px; flex-wrap: wrap; }
   .sub-composer { padding: 12px 16px; }
-  .sub-list { padding: 12px 16px 16px; }
+  .sub-split { padding: 12px 16px 16px; }
   .sub-composer-toolbar { flex-wrap: wrap; }
   .sub-composer-hint { flex-basis: 100%; }
   .sub-summary { margin: 12px; padding: 12px 14px; }
