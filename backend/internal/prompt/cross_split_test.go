@@ -184,7 +184,7 @@ func TestBuildCrossContextBlock_Empty(t *testing.T) {
 // 整体方案的 prompt 必须带上参与项目与契约要求。
 func TestBuildCrossDesignPrompt(t *testing.T) {
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
-		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "")
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "", nil)
 	if !strings.Contains(p, "跨仓库订单重构") {
 		t.Fatalf("prompt lost the title: %q", p)
 	}
@@ -202,7 +202,7 @@ func TestBuildCrossDesignPrompt_CarriesConventions(t *testing.T) {
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
 		[]string{"接口契约可核对"}, crossTestProjects(), "", []CrossProjectDoc{
 			{ProjectName: "web-app", Content: "前端约定：组件必须写单测。"},
-		}, "")
+		}, "", nil)
 	if !strings.Contains(p, "前端约定：组件必须写单测。") {
 		t.Fatalf("prompt lost the project convention: %q", p)
 	}
@@ -217,7 +217,7 @@ func TestBuildCrossDesignPrompt_CarriesConventions(t *testing.T) {
 func TestBuildCrossDesignPrompt_CarriesAttachments(t *testing.T) {
 	manifest := "## 📎 已附加文件\n\n### 1. err.log  (1.0 KB)\n**位置**：`/root/.novaworkbench/attachments/xreq_1/att_a__ab12__err.log`\n"
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
-		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, manifest)
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, manifest, nil)
 	if !strings.Contains(p, "已附加文件") || !strings.Contains(p, "err.log") {
 		t.Fatalf("prompt lost the attachment manifest: %q", p)
 	}
@@ -233,7 +233,7 @@ func TestBuildCrossDesignPrompt_CarriesAttachments(t *testing.T) {
 // 期望值不需要为「附件这个特性存在」而改。
 func TestBuildCrossDesignPrompt_NoAttachments(t *testing.T) {
 	withEmpty := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
-		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "")
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "", nil)
 	if strings.Contains(withEmpty, "已附加文件") {
 		t.Fatalf("an empty manifest must not produce an attachment section: %q", withEmpty)
 	}

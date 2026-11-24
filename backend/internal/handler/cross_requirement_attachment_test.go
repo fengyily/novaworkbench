@@ -235,7 +235,7 @@ func TestCrossRequirementPromptCarriesAttachments(t *testing.T) {
 	// 描述里带一个插图标记（前端粘贴截图后写进去的形态）。
 	x.Description = "这是报错截图：\n\n![image](nova://attachment/" + attID + ")\n"
 
-	prompt := h.crossDesignPrompt(x, nil, "", nil)
+	prompt := h.crossDesignPrompt(x, nil, "", nil, nil)
 
 	if !strings.Contains(prompt, "已附加文件") || !strings.Contains(prompt, "err.log") {
 		t.Fatalf("prompt lost the attachment manifest: %q", prompt)

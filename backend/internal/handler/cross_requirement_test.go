@@ -37,6 +37,8 @@ func newCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB, *servi
 	crossSvc := service.NewCrossRequirementService(d)
 	h := NewCrossRequirementHandler(crossSvc, reqSvc, projSvc, nil, store.NewJobStore(16),
 		nil, nil, nil, nil, nil, nil)
+	// 方案调整对话的线程存储（可选能力，所以走 setter）。
+	h.SetCrossRequirementQASvc(service.NewCrossRequirementQAService(d))
 	return h, d, projSvc
 }
 
@@ -75,6 +77,16 @@ func callCross(t *testing.T, fn func(w http.ResponseWriter, r *http.Request), me
 	}
 	if len(segments) >= 5 {
 		req.SetPathValue("pid", segments[4])
+	}
+	// The adjustment routes carry two more path values. Which one is at
+	// index 5 depends on the shape of the path: ".../adjust/turns/{tid}"
+	// vs ".../adjust/{job_id}/stream".
+	if len(segments) >= 6 {
+		if segments[5] == "turns" {
+			req.SetPathValue("tid", segments[6])
+		} else {
+			req.SetPathValue("job_id", segments[5])
+		}
 	}
 	rec := httptest.NewRecorder()
 	fn(rec, req)

@@ -37,6 +37,9 @@ var copyOrder = []string{
 	"cross_requirement_bases",
 	// 跨项目需求的附件 — owner 是 cross_requirements 行，随它一起搬。
 	"cross_requirement_attachments",
+	// 跨项目需求的「方案调整对话」轮次 — 同样是 cross_requirements 的子表，
+	// 随它一起搬（讨论记录丢了，「按结论重新补全方案」就没东西可依据）。
+	"cross_requirement_qa_turns",
 	// Dependency edges between sibling sub-requirements — both endpoints are
 	// requirements, and "requirements" has already been copied above.
 	"requirement_dependencies",

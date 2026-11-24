@@ -26,6 +26,7 @@ func TestCrossRequirementSchema(t *testing.T) {
 		"cross_requirement_phases",
 		"cross_requirement_phase_items",
 		"cross_requirement_bases",
+		"cross_requirement_qa_turns",
 	} {
 		if !strings.Contains(canonicalSchema, "CREATE TABLE IF NOT EXISTS "+table) {
 			t.Errorf("canonical schema missing the %s table", table)
@@ -133,6 +134,7 @@ func TestCrossRequirementMigrateOrder(t *testing.T) {
 		"cross_requirement_phase_items",
 		"cross_requirement_bases",
 		"cross_requirement_attachments",
+		"cross_requirement_qa_turns",
 	} {
 		if _, ok := pos[table]; !ok {
 			t.Errorf("copyOrder is missing %s", table)
@@ -149,6 +151,9 @@ func TestCrossRequirementMigrateOrder(t *testing.T) {
 	}
 	if pos["cross_requirements"] > pos["cross_requirement_attachments"] {
 		t.Error("cross_requirement_attachments must be copied after cross_requirements")
+	}
+	if pos["cross_requirements"] > pos["cross_requirement_qa_turns"] {
+		t.Error("cross_requirement_qa_turns must be copied after cross_requirements")
 	}
 }
 

@@ -50,6 +50,15 @@ const CrossDesignContract = `你正在为一个**横跨多个仓库**的需求�
 写清楚联调 / 集成测试的**阶段**划分：每个阶段包含哪些交付物、怎么验证
 （可核对的步骤）、验证失败时回退到哪个项目。
 
+## 待决策事项
+**本节是软性要求：确实没有需要人来拍板的事时写「（无）」即可；但只要方案里有
+需要人决定的取舍，就必须逐条列在这里 —— 这几项会由用户逐条拍板，拍板结果会
+回灌进下一版方案。**
+- 决策点：一句话说清要定什么（如「跨仓库接口的默认超时时间」）。
+- 可选项：每个选项一句话说明它的代价 / 影响，不要只写选项名。
+- 建议：你的推荐 + 一句理由。
+- 不决策的后果：这条不定会卡住谁、会导致什么。
+
 ## 硬性要求
 
 1. **契约必须是字段级**。写「订单服务提供查询接口」没有约束力；写
@@ -61,10 +70,13 @@ const CrossDesignContract = `你正在为一个**横跨多个仓库**的需求�
 4. **验收标准必须可核对**：能对着代码或接口验证的句子，不要「功能正常」。
 5. **不要写实现细节**（函数怎么写、类怎么设计）——那是各项目自己的方案阶段
    的事。这里只定边界与契约。
-6. 正文用中文。`
+6. 正文用中文。
+7. **需要人拍板的取舍写进「## 待决策事项」**，不要在正文里替用户做决定；该节
+   没有内容时写「（无）」，不要省略这一节。`
 
 // crossDesignTail — 收尾指令，重复「章节齐全」的要求（模型更看重最后一句）。
-const crossDesignTail = "\n\n现在请输出整体方案，务必包含「## 跨项目接口契约」章节。"
+const crossDesignTail = "\n\n现在请输出整体方案，务必包含「## 跨项目接口契约」章节；" +
+	"若有需要人来拍板的事项，写进「## 待决策事项」章节（没有就写「（无）」）。"
 
 // CrossProjectInput — 参与项目在提示词里的最小描述。
 type CrossProjectInput struct {
@@ -99,12 +111,20 @@ type CrossProjectInput struct {
 // previous run (empty on the first run — the "regenerate" path feeds it back
 // so the model can refine instead of starting from scratch), the
 // participating projects' CLAUDE.md conventions and the attachment manifest
-// (empty when the cross requirement has no attachments).
+// (empty when the cross requirement has no attachments), and the adjustment
+// discussion (empty when the user never talked the design through).
 //
 // The conventions go BEFORE the output contract: the model reads the
 // contract last, and it must read the conventions before it starts
 // designing.
-func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string, conventions []CrossProjectDoc, attachManifest string) string {
+//
+// discussion is the 「方案调整对话」 thread: the questions the user asked
+// about the pending decisions and the answers that settled them. It rides
+// along with previousDesign — the previous design says "what it said last
+// time", the discussion says "what we agreed since". An empty discussion
+// leaves the prompt byte-identical to the one from before the feature
+// existed.
+func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string, conventions []CrossProjectDoc, attachManifest string, discussion []CrossAdjustTurn) string {
 	var b strings.Builder
 
 	b.WriteString("请为下面这个**横跨多个仓库**的需求编写一份整体技术方案。\n\n")
@@ -162,6 +182,12 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 		b.WriteString("## 上一版整体方案\n\n")
 		b.WriteString(truncateRunes(prev, 16*1024))
 		b.WriteString("\n\n")
+	}
+
+	// 调整讨论记录 —— 用户与 AI 谈拢的结论。空线程不写一个字节。
+	if block := BuildCrossDiscussionBlock(discussion); block != "" {
+		b.WriteString(block)
+		b.WriteString("\n")
 	}
 
 	// 各参与仓库的项目级 CLAUDE.md —— 整体方案必须逐仓库对齐各自的约定。

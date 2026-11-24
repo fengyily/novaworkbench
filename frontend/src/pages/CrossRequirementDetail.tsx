@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import MarkdownRender from '../components/MarkdownRender';
 import CrossJobPanel, { type CrossJobLine } from '../components/CrossJobPanel';
+import CrossDesignAdjustPanel from '../components/CrossDesignAdjustPanel';
 import CrossRequirementEditForm from '../components/CrossRequirementForm/CrossRequirementEditForm';
 import CrossRequirementPurgeDialog from '../components/CrossRequirementPurgeDialog';
 import { rewriteNovaLinks } from '../components/RichDescriptionEditor/rewriteNovaLinks';
@@ -598,7 +599,13 @@ export default function CrossRequirementDetailPage() {
       });
   }, [appendLine]);
 
-  const startDesign = () => {
+  // apply_discussion — 把「方案调整对话」的讨论记录整段喂进提示词，让这一版
+  // 方案按讨论结论修订。
+  //
+  // 它是显式的：页头的「重新生成整体方案」是「从头再来」，调整面板里的
+  // 「按讨论结论重新补全方案」是「按我们谈拢的改」。两个意图必须由用户自己
+  // 区分 —— 讨论记录里混着用户还没拍板的问答，自动注入等于 AI 替用户拍板。
+  const startDesign = (opts?: { apply_discussion?: boolean }) => {
     startJob(
       {
         kind: 'design',
@@ -607,7 +614,7 @@ export default function CrossRequirementDetailPage() {
         resultFromState: st => ({ design: st.design || '' }),
         onDone: () => setToast(t('crossRequirements.detail.designSaved')),
       },
-      () => crossRequirementsApi.startDesign(xreqId),
+      () => crossRequirementsApi.startDesign(xreqId, opts ?? {}),
     );
   };
 
@@ -817,7 +824,7 @@ export default function CrossRequirementDetailPage() {
           <button
             type="button"
             className="btn"
-            onClick={startDesign}
+            onClick={() => { startDesign(); }}
             disabled={jobRunning || inTrash || projectRows.length === 0}
             title={inTrash ? t('crossRequirements.detail.inTrash') : undefined}
           >
@@ -1164,9 +1171,19 @@ export default function CrossRequirementDetailPage() {
             </div>
           </div>
         ) : design ? (
-          <div className="md-prose xreq-design">
-            <MarkdownRender content={design} />
-          </div>
+          <>
+            <div className="md-prose xreq-design">
+              <MarkdownRender content={design} />
+            </div>
+            {/* 方案出来之后往往留着「待决策事项」——追加调整面板就是用来跟 AI
+                把这些点谈拢的，谈完再重跑一次方案作业把结论吃进去。 */}
+            <CrossDesignAdjustPanel
+              xreqId={xreqId}
+              pendingDecisions={detail.pending_decisions || []}
+              disabled={inTrash || detail.status === 'archived'}
+              onApplyDiscussion={() => startDesign({ apply_discussion: true })}
+            />
+          </>
         ) : (
           <div className="xreq-empty">
             <p className="xreq-empty-title">{t('crossRequirements.detail.designEmpty')}</p>

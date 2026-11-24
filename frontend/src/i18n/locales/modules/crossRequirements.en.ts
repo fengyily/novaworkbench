@@ -225,6 +225,28 @@ export const crossRequirements = {
     yes: 'Yes',
     no: 'No',
   },
+  // Design-adjustment chat: settle the plan's open questions with the AI,
+  // then re-complete the plan with the conclusions folded in.
+  adjustChat: {
+    title: 'Refine the plan',
+    hint: 'Settle the plan\'s open questions with the AI here: it lays out the options and their costs, and lists the decisions you have already made. When you are done, press 「Re-complete the plan with these conclusions」 — the new plan is revised accordingly.',
+    pending: 'Open:',
+    chipTemplate: 'About 「{{title}}」: please lay out the options and their costs, and give me your recommendation.',
+    loading: 'Loading the discussion…',
+    empty: 'No discussion yet.',
+    questionTag: 'Q',
+    running: 'Thinking…',
+    failed: 'This turn did not go through',
+    send: 'Send',
+    asking: 'Thinking…',
+    placeholder: 'Ask about the plan, or just make a call (e.g. 「Use 3s for the interface timeout」). Enter sends, Shift+Enter adds a line.',
+    retry: 'Retry this turn',
+    deleteTurn: 'Delete this turn',
+    reset: 'Clear',
+    resetHint: 'After clearing, regenerating the plan will no longer carry these conclusions',
+    apply: 'Re-complete the plan with these conclusions',
+    applyHint: 'Re-runs the overall-design job with this discussion folded into the prompt',
+  },
 } as const;
 
 export default crossRequirements;

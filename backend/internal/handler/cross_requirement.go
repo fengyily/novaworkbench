@@ -59,6 +59,18 @@ type CrossRequirementHandler struct {
 	// 可能为 nil（未接线）：两个辅助函数都对 nil 做了处理，届时附件只是
 	// 不会出现在提示词里，不影响作业本身。
 	attachSvc *service.AttachmentService
+	// qaSvc — 方案调整对话的线程存储（跨项目需求下的一条「问 / 答」序列）。
+	//
+	// 用 **setter** 接线而不是构造参数：它是**可选**的（未接线时调整面板返回
+	// 503），而构造参数会让每一个调用点（main.go + 若干测试）都改一遍。
+	qaSvc *service.CrossRequirementQAService
+}
+
+// SetCrossRequirementQASvc wires the design-adjustment thread service.
+//
+// Setter 而不是构造参数，与 wizard 的 SetRequirementQASvc 同款。
+func (h *CrossRequirementHandler) SetCrossRequirementQASvc(svc *service.CrossRequirementQAService) {
+	h.qaSvc = svc
 }
 
 // NewCrossRequirementHandler builds the handler.
@@ -668,7 +680,20 @@ func (h *CrossRequirementHandler) SaveDesign(w http.ResponseWriter, r *http.Requ
 			"补上该章节后再保存，或重新生成整体方案")
 		return
 	}
-	if err := h.svc.SaveDesign(id, markdown, "", ""); err != nil {
+	// 手工编辑**保留** design_session_id：手工改的是文字，不是「这份方案是
+	// 哪个会话写的」这个事实。方案调整对话要 fork 的正是这个会话 ——
+	// 清掉它，调整线程就会静默降级成「按方案原文作答」（浅一层，不报错，
+	// 最难查的那种退化）。
+	//
+	// 所以这里必须把当前值原样写回，而不是传空串。方案作业那条路径相反：
+	// CLI 没报出会话 id 时**必须**清空（旧会话对应旧方案，留着会让下一次
+	// fork 指向一份过期的方案）。
+	current, err := h.svc.Get(id)
+	if err != nil {
+		writeCrossErr(w, err, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+		return
+	}
+	if err := h.svc.SaveDesign(id, markdown, current.DesignSessionID, ""); err != nil {
 		writeCrossErr(w, err, http.StatusInternalServerError, "SAVE_FAILED", "保存失败：")
 		return
 	}

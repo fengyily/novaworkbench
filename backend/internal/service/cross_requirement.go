@@ -11,6 +11,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/util"
 )
 
@@ -555,6 +556,11 @@ func (s *CrossRequirementService) Purge(id string) error {
 	// 磁盘上的文件不删（需求删除也是同一口径：泄漏的是磁盘空间，没有功能
 	// 后果）。
 	if _, err := tx.Exec(`DELETE FROM cross_requirement_attachments WHERE cross_requirement_id=?`, id); err != nil {
+		return err
+	}
+	// 方案调整对话的轮次同理：schema 声明了 ON DELETE CASCADE，但 SQLite 从不
+	// 开 PRAGMA foreign_keys，级联是装饰 —— 留着就是孤儿行。
+	if _, err := tx.Exec(`DELETE FROM cross_requirement_qa_turns WHERE cross_requirement_id=?`, id); err != nil {
 		return err
 	}
 	res, err := tx.Exec(`DELETE FROM cross_requirements WHERE id=?`, id)
@@ -1360,6 +1366,7 @@ func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDeta
 		Phases:           agg.Phases[id],
 		Progress:         agg.Progress[id],
 		Bases:            bases,
+		PendingDecisions: prompt.ExtractCrossPendingDecisions(DesignDocsToMarkdown(x.DesignDocs)),
 	}, nil
 }
 

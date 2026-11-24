@@ -4123,6 +4123,62 @@ export interface CrossRequirementDetail extends CrossRequirement {
   progress: CrossRequirementProgress;
   // bases — 各参与仓库的基线台账：整体方案是对着哪个提交写的。
   bases: CrossRequirementBase[];
+  // pending_decisions — 整体方案里还没定、需要人拍板的点。
+  //
+  // 服务端每次从 design_docs 现算（方案改了它就跟着变），不落库。
+  pending_decisions: CrossPendingDecision[];
+}
+
+/**
+ * CrossPendingDecision — one open question the overall design leaves for the
+ * human to settle.
+ *
+ * title is the short label ("接口超时时间"); detail is the full line the model
+ * wrote (why it needs a human, what the options are).
+ */
+export interface CrossPendingDecision {
+  title: string;
+  detail: string;
+}
+
+/**
+ * CrossRequirementQATurn — one question-and-answer turn of the design
+ * adjustment thread.
+ *
+ * The thread hangs off a cross requirement's overall design: the user settles
+ * the pending decisions with the AI, then re-completes the plan with the
+ * conclusions folded in.
+ */
+export interface CrossRequirementQATurn {
+  id: string;
+  cross_requirement_id: string;
+  question: string;
+  answer: string;
+  status: 'running' | 'done' | 'error';
+  job_id: string;
+  model: string;
+  session_id: string;
+  source_session_id: string;
+  resumed: boolean;
+  error_kind: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+/**
+ * CrossAdjustState — the adjustment thread plus whatever is running.
+ *
+ * One call carries everything the panel needs to re-attach after a refresh:
+ * the turns themselves plus the job id of the one still in flight.
+ */
+export interface CrossAdjustState {
+  status: 'none' | 'running' | 'done' | 'error';
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  turns: CrossRequirementQATurn[];
 }
 
 /**
@@ -4241,7 +4297,13 @@ export const crossRequirementsApi = {
   setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
     api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
   // ── overall design ──────────────────────────────────────────────────────
-  startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+  // apply_discussion — 把「方案调整对话」的讨论记录整段喂进提示词，让这一版
+  // 方案按讨论结论修订。
+  //
+  // 它是**显式开关**而不是「有讨论就自动注入」：讨论记录里混着用户还没拍板的
+  // 问答，自动注入等于 AI 把用户没同意的回答当成结论写进方案，而用户点的其实
+  // 是「重新生成」。两个意图必须由用户自己区分。
+  startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string; apply_discussion?: boolean }) =>
     api.post<{ job_id: string }>(`/api/cross-requirements/${id}/design`, body ?? {}),
   // designState — the most recent overall-design run. The job survives the
   // page being closed (it lives in the server's JobStore), but its id only
@@ -4252,6 +4314,30 @@ export const crossRequirementsApi = {
     `/api/cross-requirements/${id}/design/${jobId}/stream`,
   saveDesign: (id: string, designDocs: string) =>
     api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}/design`, { design_docs: designDocs }),
+  // ── design adjustment (方案调整对话) ───────────────────────────────────
+  // 整体方案跑完之后，方案里常留着「待决策事项」。用户在这里跟 AI 谈拢这些点，
+  // 谈完再点「按讨论结论重新补全方案」——方案作业会带上这段讨论重跑一次。
+  //
+  // adjustState — 整条线程 + 正在跑的那一轮（一次拿全，刷新后据此接回）。
+  adjustState: (id: string) =>
+    api.get<CrossAdjustState>(`/api/cross-requirements/${id}/design/adjust`),
+  // askAdjust — 提一个问题（或者拍一条板）。返回 job_id（订阅流用）与 turn_id。
+  askAdjust: (id: string, question: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string; turn_id: string }>(`/api/cross-requirements/${id}/design/adjust`, {
+      question,
+      ...(body?.model ? { model: body.model } : {}),
+      ...(body?.claude_config_id ? { claude_config_id: body.claude_config_id } : {}),
+      ...(body?.effort ? { effort: body.effort } : {}),
+    }),
+  // resetAdjust — 清空整条线程。清空之后，方案作业不再带这些结论。
+  resetAdjust: (id: string) => api.delete<void>(`/api/cross-requirements/${id}/design/adjust`),
+  // removeAdjustTurn — 删掉一轮。
+  removeAdjustTurn: (id: string, turnId: string) =>
+    api.delete<void>(`/api/cross-requirements/${id}/design/adjust/turns/${turnId}`),
+  // streamAdjustUrl — 一轮调整的 SSE 通道（与设计 / 拆分 / 验证各自的专属通道
+  // 同款，不共用全局作业流）。
+  streamAdjustUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/design/adjust/${jobId}/stream`,
   // ── split ───────────────────────────────────────────────────────────────
   startSplit: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
     api.post<{ job_id: string }>(`/api/cross-requirements/${id}/split`, body ?? {}),

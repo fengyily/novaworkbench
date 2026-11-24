@@ -301,6 +301,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_attach_xreq_sha
 	ON cross_requirement_attachments(cross_requirement_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_crxreq_cross ON cross_requirement_attachments(cross_requirement_id);
 
+-- 跨项目需求的「方案调整对话」轮次（一行一问一答）。
+--
+-- 与 requirement_qa_turns 同型，owner 列换成 cross_requirement_id，**没有
+-- stage 列** —— 一个跨项目需求只有一条调整线程（调整的是整体方案，不存在
+-- 「设计阶段 / 开发阶段」之分）。
+--
+-- 为什么要有这张表：整体方案是跨仓库的一次性产物，落地后常常留着「待决策
+-- 事项」（接口超时取多少、幂等键用哪种策略）。用户需要跟 AI 就这些点谈拢，
+-- 谈完再重跑一次方案作业把结论吃进去。这段对话必须持久化：
+--   - 作业是后台跑的，答案由后端产出，用户关掉浏览器答案不能丢；
+--   - 「按讨论结论重新补全方案」时，方案作业要读这段记录当输入；
+--   - 几天后再回来看「这个结论当时是怎么定的」也要读得到。
+--
+-- session_id / source_session_id 记的是会话账：source 是首轮 fork 的那个
+-- 「整体方案会话」，session 是本线程自己的会话。两者分开是为了判断
+-- 「方案是不是被重跑过」——方案重跑后 source 变了，线程就重新 fork 一份，
+-- 而不是继续用一份已经对不上方案的旧上下文。
+CREATE TABLE IF NOT EXISTS cross_requirement_qa_turns (
+    id                  TEXT PRIMARY KEY,
+    cross_requirement_id TEXT NOT NULL,
+    question            TEXT NOT NULL DEFAULT '',
+    answer              TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'running',
+    job_id              TEXT NOT NULL DEFAULT '',
+    model               TEXT NOT NULL DEFAULT '',
+    session_id          TEXT NOT NULL DEFAULT '',
+    source_session_id   TEXT NOT NULL DEFAULT '',
+    resumed             INTEGER NOT NULL DEFAULT 0,
+    -- error_kind classifies a failed turn (empty-result / stale-session /
+    -- cli-crash / timeout …). Empty on success.
+    error_kind          TEXT NOT NULL DEFAULT '',
+    created_by          TEXT NOT NULL DEFAULT '',
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at         DATETIME,
+    FOREIGN KEY (cross_requirement_id) REFERENCES cross_requirements(id) ON DELETE CASCADE
+);
+-- 线程视图恒为「某个跨项目需求的全部轮次，按时间正序」。
+CREATE INDEX IF NOT EXISTS idx_xqa_cross ON cross_requirement_qa_turns(cross_requirement_id, created_at);
+
 -- Per-requirement file attachments. Each row is one file uploaded against a
 -- requirement — the wizard's three role-gated stages (analyst / architect /
 -- developer) all share this single set, and Claude ingests each via Read

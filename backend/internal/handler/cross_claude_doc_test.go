@@ -86,7 +86,7 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get cross requirement: %v", err)
 	}
-	designPrompt := h.crossDesignPrompt(xrow, projects, "", nil)
+	designPrompt := h.crossDesignPrompt(xrow, projects, "", nil, nil)
 	if !strings.Contains(designPrompt, "所有组件必须写单测") {
 		t.Fatalf("design prompt lost the convention:\n%s", designPrompt)
 	}

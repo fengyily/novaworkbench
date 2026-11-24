@@ -221,6 +221,28 @@ export const crossRequirements = {
     yes: '是',
     no: '否',
   },
+  // 方案调整对话：整体方案出来之后，就着「待决策事项」跟 AI 谈拢，再重跑
+  // 一次方案作业把结论吃进去。
+  adjustChat: {
+    title: '追加调整',
+    hint: '方案里的待决策点可以在这里跟 AI 谈拢：它会给出可选做法与代价，并把已拍板的结论列成清单。谈完点「按讨论结论重新补全方案」，新方案会按这些结论修订。',
+    pending: '待决策：',
+    chipTemplate: '关于「{{title}}」：请给出可选方案及各自代价，并给出你的建议。',
+    loading: '正在读取讨论记录…',
+    empty: '还没有讨论记录。',
+    questionTag: '问',
+    running: '正在思考…',
+    failed: '这一轮没跑通',
+    send: '发送',
+    asking: '思考中…',
+    placeholder: '就着方案提问，或直接拍板（例如「接口超时统一取 3s」）。Enter 发送，Shift+Enter 换行。',
+    retry: '重试这一轮',
+    deleteTurn: '删除这一轮',
+    reset: '清空记录',
+    resetHint: '清空之后，重新生成方案将不再带上这些结论',
+    apply: '按讨论结论重新补全方案',
+    applyHint: '重跑一次整体方案作业，提示词里会带上这段讨论记录',
+  },
 } as const;
 
 export default crossRequirements;

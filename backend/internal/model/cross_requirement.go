@@ -224,6 +224,14 @@ type CrossRequirementDetail struct {
 	//
 	// 空数组 = 还没跑过整体方案（或跑的时候没能锁定任何基线）。
 	Bases []CrossRequirementBase `json:"bases"`
+	// PendingDecisions — 整体方案里**还没定、需要人拍板**的点。
+	//
+	// 现算而不是存字段：它就是方案正文的一部分（见
+	// prompt.ExtractCrossPendingDecisions），方案一改这份列表就跟着变，
+	// 存一份副本只会带来「方案改了但列表没变」的陈旧状态。
+	//
+	// 空数组 = 方案没有待决策章节（存量方案多半如此），或者方案里没留这种点。
+	PendingDecisions []CrossPendingDecision `json:"pending_decisions"`
 }
 
 // CrossRequirementBase — 某个参与仓库的基线台账行。

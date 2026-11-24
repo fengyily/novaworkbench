@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,15 @@ type crossJobSpec struct {
 	// ExtraDirs — 额外授权给 CLI 的目录（阶段验证用它挂上子需求的实现
 	// worktree）。与 Workspace 的目录合并后去重。
 	ExtraDirs []string
+	// SessionID / Resume / Fork / ForkSessionID — 会话账。
+	//
+	// 方案调整对话用它 fork 方案会话（--resume <design_sid> --fork-session
+	// --session-id <new>），后续轮用它续接线程自己的会话。空 SessionID =
+	// 全新会话（--session-id <id>，不带 --resume）。
+	SessionID     string
+	Resume        bool
+	Fork          bool
+	ForkSessionID string
 }
 
 // crossStreamOpts 组装一个跨项目作业的 claude 调用参数。
@@ -90,6 +100,10 @@ func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamO
 		Model:          cliModelArg(spec.Model),
 		Effort:         spec.Effort,
 		ClaudeConfigID: spec.ClaudeConfigID,
+		SessionID:      spec.SessionID,
+		Resume:         spec.Resume,
+		Fork:           spec.Fork,
+		ForkSessionID:  spec.ForkSessionID,
 		// The participating repositories must be readable, otherwise the
 		// model cannot ground the contract in real file paths. The paths are
 		// the **workspace read paths** — detached worktrees pinned to the
@@ -200,10 +214,13 @@ func (h *CrossRequirementHandler) crossDescriptionForPrompt(xreq *model.CrossReq
 //
 // ws 是本次作业读代码的工作目录集合 —— 约定也从**同一棵树**里取，这样提示词里
 // 的规矩与模型实际读到的代码出自同一处基线。
-func (h *CrossRequirementHandler) crossDesignPrompt(xreq *model.CrossRequirement, projects []prompt.CrossProjectInput, previousDesign string, ws *crossWorkspace) string {
+//
+// discussion 是「方案调整对话」的记录（空 = 用户没有讨论过）。它带着用户与
+// AI 谈拢的结论，让这一版方案按结论修订而不是从头再来。
+func (h *CrossRequirementHandler) crossDesignPrompt(xreq *model.CrossRequirement, projects []prompt.CrossProjectInput, previousDesign string, discussion []prompt.CrossAdjustTurn, ws *crossWorkspace) string {
 	return prompt.BuildCrossDesignPrompt(xreq.Title, h.crossDescriptionForPrompt(xreq),
 		crossAcceptance(xreq.AcceptanceCriteria), projects, previousDesign,
-		h.crossConventions(xreq.ID, ws), h.crossAttachManifest(xreq.ID))
+		h.crossConventions(xreq.ID, ws), h.crossAttachManifest(xreq.ID), discussion)
 }
 
 // crossSplitPrompt 组装按项目拆分的提示词。
@@ -224,6 +241,20 @@ func (h *CrossRequirementHandler) crossPhasePrompt(xreq *model.CrossRequirement,
 
 // ── 整体方案 ───────────────────────────────────────────────────────────────
 
+// crossDesignReq — 整体方案作业的请求体。
+type crossDesignReq struct {
+	crossJobReq
+	// ApplyDiscussion — 把「方案调整对话」的讨论记录整段喂进提示词，让这一版
+	// 方案按讨论结论修订。
+	//
+	// 为什么是**显式开关**而不是「有讨论就自动注入」：讨论记录里混着**用户
+	// 还没拍板**的问答。自动注入 = AI 把用户没同意的回答当成结论写进方案，而
+	// 用户点的其实是「重新生成」（从头再来）。两个意图必须由用户自己区分。
+	//
+	// 不勾时，提示词与「这个特性存在之前」逐字相同。
+	ApplyDiscussion bool `json:"apply_discussion"`
+}
+
 // StartDesign launches the overall-design job.
 //
 // Preconditions (rejected BEFORE a job is created — the user must be told
@@ -231,6 +262,7 @@ func (h *CrossRequirementHandler) crossPhasePrompt(xreq *model.CrossRequirement,
 //
 //	no participating project → XREQ_NO_PROJECTS
 //	a design job is running   → XREQ_IN_PROGRESS (409)
+//	an adjustment turn runs    → XREQ_ADJUST_RUNNING (409)
 //	archived                  → XREQ_ARCHIVED
 //
 // Returns {"job_id": ...}; the design document arrives on the job's SSE stream.
@@ -240,7 +272,7 @@ func (h *CrossRequirementHandler) StartDesign(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
 		return
 	}
-	var body crossJobReq
+	var body crossDesignReq
 	if err := decodeJSON(r, &body); err != nil && !errors.Is(err, io.EOF) {
 		_ = err // a malformed body is not fatal — the persona defaults apply
 	}
@@ -271,6 +303,13 @@ func (h *CrossRequirementHandler) StartDesign(w http.ResponseWriter, r *http.Req
 			fmt.Sprintf("已有整体方案任务在运行（job %s），请等待结束", existing))
 		return
 	}
+	// 方案作业要把讨论记录整段喂进提示词 —— 一轮调整还在跑 = 记录不完整 =
+	// 结论被漏掉。所以两者互斥。
+	if h.adjustTurnRunning(xreqID) {
+		writeError(w, http.StatusConflict, "XREQ_ADJUST_RUNNING",
+			"还有一轮方案调整在进行中，请等它结束再生成方案")
+		return
+	}
 
 	job := h.jobs.Create(xreqID)
 	job.SetType("cross_design")
@@ -297,7 +336,7 @@ func (h *CrossRequirementHandler) StartDesign(w http.ResponseWriter, r *http.Req
 }
 
 // runDesign is the goroutine body of the overall-design job.
-func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossRequirement, body crossJobReq,
+func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossRequirement, body crossDesignReq,
 	systemPrompt, modelName, configID string) {
 	defer h.runs.release(crossRunDesign, xreq.ID, "")
 	defer func() {
@@ -324,7 +363,17 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 		return
 	}
 	previous := service.DesignDocsToMarkdown(xreq.DesignDocs)
-	promptText := h.crossDesignPrompt(xreq, projects, previous, ws)
+
+	// 讨论记录：只有「按讨论结论重新补全方案」这一路才读。读的是**已答完**
+	// 的轮次 —— 正在跑的那一轮还没落答案，半截的答案不是结论。
+	var discussion []prompt.CrossAdjustTurn
+	if body.ApplyDiscussion {
+		discussion = h.crossDesignDiscussion(xreq.ID)
+		if len(discussion) > 0 {
+			job.Append(store.LogLine{Type: "message", Content: "📝 已带上 " + strconv.Itoa(len(discussion)) + " 条调整讨论记录"})
+		}
+	}
+	promptText := h.crossDesignPrompt(xreq, projects, previous, discussion, ws)
 
 	workDir, err := crossWorkspaceDir(xreq.ID, crossRunDesign)
 	if err != nil {
@@ -368,7 +417,14 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 		return
 	}
 
-	if err := h.svc.SaveDesign(xreq.ID, markdown, "", job.ID); err != nil {
+	// out.sessionID 来自 CLI 的 system/init 事件（wizard_stream.go 的 init 分
+	// 支），对普通运行同样有值 —— 它就是这次方案作业的会话 id。
+	//
+	// 存它是为了让「方案调整对话」能 fork 这个会话：模型写方案时读了 N 个
+	// 仓库，fork 出来的调整线程继承的就是那份探索历史。CLI 没报出会话 id 时
+	// 必须清空（旧会话对应旧方案，留着会让下一次 fork 指向一份过期的方案）。
+	sessionID := strings.TrimSpace(out.sessionID)
+	if err := h.svc.SaveDesign(xreq.ID, markdown, sessionID, job.ID); err != nil {
 		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "保存整体方案失败: "+err.Error())
 		return
 	}

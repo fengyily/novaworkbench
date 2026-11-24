@@ -418,6 +418,9 @@ func main() {
 	wizardH.SetCrossRequirementSvc(crossReqSvc)
 	crossReqH := handler.NewCrossRequirementHandler(crossReqSvc, reqSvc, projectSvc, llmGateway,
 		sharedJobs, roleSvc, claudeCfgSvc, usageSvc, worktreeH, settingSvc, crossAttachmentSvc)
+	// 方案调整对话的线程存储 —— 可选（未接线时调整面板返回 503），所以走
+	// setter 而不是构造参数。
+	crossReqH.SetCrossRequirementQASvc(service.NewCrossRequirementQAService(database))
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
 	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
@@ -962,6 +965,11 @@ func main() {
 	//   GET    /api/cross-requirements/{id}/design/state     → the most recent design run
 	//   GET    /api/cross-requirements/{id}/design/{job}/stream → SSE (result.design)
 	//   PUT    /api/cross-requirements/{id}/design           → save a hand-edited design
+	//   POST   /api/cross-requirements/{id}/design/adjust    → ask about the design (one turn)
+	//   GET    /api/cross-requirements/{id}/design/adjust    → the whole adjustment thread
+	//   DELETE /api/cross-requirements/{id}/design/adjust    → clear the thread
+	//   DELETE /api/cross-requirements/{id}/design/adjust/turns/{tid} → drop one turn
+	//   GET    /api/cross-requirements/{id}/design/adjust/{job}/stream → SSE
 	//   POST   /api/cross-requirements/{id}/split            → start the split job
 	//   GET    /api/cross-requirements/{id}/split/state      → the most recent split run
 	//   GET    /api/cross-requirements/{id}/split/{job}/stream → SSE (result.candidates)
@@ -990,6 +998,11 @@ func main() {
 	mux.HandleFunc("GET /api/cross-requirements/{id}/design/state", crossReadPerm(http.HandlerFunc(crossReqH.DesignState)).ServeHTTP)
 	mux.HandleFunc("GET /api/cross-requirements/{id}/design/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamDesignJob)).ServeHTTP)
 	mux.HandleFunc("PUT /api/cross-requirements/{id}/design", crossWritePerm(http.HandlerFunc(crossReqH.SaveDesign)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/design/adjust", crossWritePerm(http.HandlerFunc(crossReqH.AskAdjust)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/adjust", crossReadPerm(http.HandlerFunc(crossReqH.AdjustState)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}/design/adjust", crossWritePerm(http.HandlerFunc(crossReqH.ResetAdjust)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}/design/adjust/turns/{tid}", crossWritePerm(http.HandlerFunc(crossReqH.DeleteAdjustTurn)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/adjust/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamAdjustJob)).ServeHTTP)
 	mux.HandleFunc("POST /api/cross-requirements/{id}/split", crossWritePerm(http.HandlerFunc(crossReqH.StartSplit)).ServeHTTP)
 	mux.HandleFunc("GET /api/cross-requirements/{id}/split/state", crossReadPerm(http.HandlerFunc(crossReqH.SplitState)).ServeHTTP)
 	mux.HandleFunc("GET /api/cross-requirements/{id}/split/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamSplitJob)).ServeHTTP)
