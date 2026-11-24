@@ -151,10 +151,53 @@ func (s *ProjectService) ReadDiskClaudeDoc(projectPath string) (string, bool, er
 // already contains a CLAUDE.md. It is used to disambiguate a project that
 // ships its own document: the CLI auto-loads that file, so the injected
 // block has to say which of the two wins.
+//
+// It only looks at <dir>/CLAUDE.md. Use ClaudeMdLoadSet when the full set
+// of files the CLI loads is needed (see the comment there).
 func DiskClaudeDocExists(dir string) bool {
 	if strings.TrimSpace(dir) == "" {
 		return false
 	}
 	st, err := os.Stat(filepath.Join(dir, "CLAUDE.md"))
 	return err == nil && !st.IsDir()
+}
+
+// ClaudeMdLoadSet returns the instruction files the Claude CLI loads from a
+// working directory.
+//
+// This is the full set, not just <dir>/CLAUDE.md. The CLI reads (measured
+// against claude 2.1.328 — see internal/llm/claude_md_settings.go):
+//
+//   - <dir>/CLAUDE.md            — the project document
+//   - <dir>/.claude/CLAUDE.md    — the project document, .claude/ variant
+//   - <dir>/CLAUDE.local.md      — the uncommitted local variant
+//   - <dir>/AGENTS.md            — the alternative convention file
+//
+// AGENTS.md deserves a note: the CLI treats CLAUDE.md and AGENTS.md as
+// alternatives. While CLAUDE.md is present AGENTS.md is NOT loaded, but
+// excluding CLAUDE.md makes the CLI fall back to AGENTS.md (measured). A
+// "keep only the managed copy" setup therefore has to exclude BOTH, or the
+// exclusion would silently swap one project document for another.
+//
+// Only existing files are returned — the result is the set the CLI will
+// actually pick up, and it is what the exclusion list must cover.
+func ClaudeMdLoadSet(dir string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	candidates := []string{
+		filepath.Join(dir, "CLAUDE.md"),
+		filepath.Join(dir, "CLAUDE.local.md"),
+		filepath.Join(dir, ".claude", "CLAUDE.md"),
+		filepath.Join(dir, "AGENTS.md"),
+	}
+	out := make([]string, 0, len(candidates))
+	for _, p := range candidates {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

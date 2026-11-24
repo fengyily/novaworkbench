@@ -30,6 +30,7 @@ import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { createReplaySkipper } from '../utils/jobStream';
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
@@ -1093,6 +1094,33 @@ function SubTaskCard({
   // Whether the log area renders: the live path always renders it; the
   // replay path renders it as soon as it has content.
   const showLog = streaming || lines.length > 0;
+  // Raw SSE frames bookkeeping for the CURRENT job.
+  //
+  // The backend's job stream REPLAYS the whole history on every
+  // subscription (store.Job.Subscribe pre-seeds the channel with all existing
+  // LogLines). This card re-subscribes whenever `streaming` / `job_id`
+  // changes — and on a re-subscribe the replayed prefix is the SAME lines
+  // the card already rendered, so appending it again duplicated the entire
+  // log. The user saw the same conclusion twice (sometimes three times) and
+  // read it as the agent repeating itself.
+  //
+  // Two counters, both RAW (every backend LogLine, including the ones this
+  // card filters out before rendering — the replay carries all of them):
+  //
+  //   - `skip`: the number of frames the PREVIOUS subscription received,
+  //     i.e. the backend log's length back then. It is the skip length for
+  //     the NEXT subscription: the replayed prefix that must be dropped.
+  //   - `count`: the frames THIS subscription has received so far. It
+  //     becomes the next subscription's `skip`.
+  //
+  // This is orthogonal to the snapshot-replay refs above: `gotFrameRef` /
+  // `liveRef` / `hydratedJobRef` decide whether the DURABLE snapshot may
+  // write into lines[] at all, while `rawFramesRef` decides how many of the
+  // frames a (re-)subscription must drop. A redo / continue mints a NEW
+  // job_id, so the per-job reset below keeps the two from interfering.
+  const rawFramesRef = useRef<{ jobId: string; skip: number; count: number }>(
+    { jobId: '', skip: 0, count: 0 },
+  );
   // 'pending' covers THREE distinct states, and conflating them is what made
   // an orphaned row invisible for so long:
   //
@@ -1136,12 +1164,35 @@ function SubTaskCard({
   // and on premature drop.
   useEffect(() => {
     if (!streaming || !st.job_id) return;
+    // The replayed prefix is dropped: the backend replays the whole job
+    // history on every subscription, and this card re-subscribes whenever
+    // `streaming` / `job_id` changes. Without the skip, the already-rendered
+    // lines were appended a second time — the log looked like the agent was
+    // repeating itself.
+    //
+    // The counter is per job: a NEW job (a restart mints a new job_id) starts
+    // from zero, because its history is genuinely new.
+    if (rawFramesRef.current.jobId !== st.job_id) {
+      rawFramesRef.current = { jobId: st.job_id, skip: 0, count: 0 };
+    }
+    const skipFirst = rawFramesRef.current.skip;
+    rawFramesRef.current.count = 0;
+    const isReplay = createReplaySkipper(skipFirst);
     esRef.current = createEventStream(
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
         gotFrameRef.current = true;              // any frame counts (incl. job_done)
         if (!evt || typeof evt !== 'object') return;
         const evtType = evt.type as string;
+        // job_done is the SSE writer's terminal frame, NOT one of the
+        // backend's LogLines, so it never counts toward the replay length.
+        if (evtType !== 'job_done') {
+          // Count EVERY frame this subscription receives — including the
+          // replayed prefix, which is part of the backend's log and must be
+          // counted for the NEXT subscription's skip length.
+          rawFramesRef.current.count += 1;
+          if (isReplay(evtType)) return;
+        }
         if (evtType === 'usage') {
           try {
             const raw = typeof evt.content === 'string' ? JSON.parse(evt.content) : null;
@@ -1235,7 +1286,13 @@ function SubTaskCard({
       },
     );
     liveRef.current = true;                    // the live path has taken over
-    return () => { esRef.current?.close(); esRef.current = null; };
+    return () => {
+      // The frames this subscription received become the next subscription's
+      // skip length: the backend log grew by exactly that much.
+      rawFramesRef.current.skip = rawFramesRef.current.count;
+      esRef.current?.close();
+      esRef.current = null;
+    };
   // We deliberately use the minimal dep set — parent re-renders shouldn't
   // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1905,6 +1962,26 @@ function SubTaskCard({
         {/* Title line: the user-supplied sub-task title in display weight.
             Wraps freely so long titles stay fully visible. */}
         <h4 className="sub-card-title">{st.title || t('components.subTaskCard.noTitle')}</h4>
+        {/* Where this agent actually writes, and which claude session it
+            owns. Both answer the question the repeated-answering report
+            raised: "is there really a second agent running, and are two of
+            them editing the same files?". The working directory is the
+            decisive one — two cards showing the SAME directory are two
+            agents in one tree. */}
+        {(st.work_dir || st.session_id) && (
+          <div className="sub-card-runtime">
+            {st.work_dir && (
+              <span className="sub-card-runtime-item" title={st.work_dir}>
+                📁 {st.work_dir}
+              </span>
+            )}
+            {st.session_id && (
+              <span className="sub-card-runtime-item" title={st.session_id}>
+                🔖 {st.session_id}
+              </span>
+            )}
+          </div>
+        )}
       </header>
 
       {/* Per-card ContextUsageBar — mirrors the bar shown on the parent

@@ -7,6 +7,7 @@ import {
   IconDashboard,
   IconFolder,
   IconRequirements,
+  IconCrossProjects,
   IconReport,
   IconSparkles,
   IconSettings,
@@ -24,6 +25,7 @@ interface NavIconProps {
 const DashboardIcon = (p: NavIconProps) => <IconDashboard size={18} {...p} />;
 const FolderIcon = (p: NavIconProps) => <IconFolder size={18} {...p} />;
 const RequirementsIcon = (p: NavIconProps) => <IconRequirements size={18} {...p} />;
+const CrossProjectsIcon = (p: NavIconProps) => <IconCrossProjects size={18} {...p} />;
 const ReportIcon = (p: NavIconProps) => <IconReport size={18} {...p} />;
 const ScheduleIcon = (p: NavIconProps) => <IconClock size={18} {...p} />;
 
@@ -35,6 +37,7 @@ const navItems = [
   { to: '/', labelKey: 'nav.dashboard', end: true, permission: 'menu.dashboard', shortLabelKey: 'nav.dashboard', Icon: DashboardIcon },
   { to: '/projects', labelKey: 'nav.projects', end: false, permission: 'menu.projects', shortLabelKey: 'nav.projects', Icon: FolderIcon },
   { to: '/requirements', labelKey: 'nav.requirements', end: false, permission: 'menu.projects', shortLabelKey: 'nav.requirements', Icon: RequirementsIcon },
+  { to: '/cross-requirements', labelKey: 'nav.crossRequirements', end: false, permission: 'menu.cross_requirements', shortLabelKey: 'nav.crossRequirements', Icon: CrossProjectsIcon },
   { to: '/schedules', labelKey: 'nav.schedules', end: false, permission: 'menu.projects', shortLabelKey: 'nav.schedulesShort', Icon: ScheduleIcon },
   { to: '/reports', labelKey: 'nav.reports', end: false, permission: 'menu.reports', shortLabelKey: 'nav.reports', Icon: ReportIcon },
 ] as const;
@@ -189,6 +192,7 @@ export default function Layout() {
     const path = location.pathname;
     // `as const` keeps each key a literal so `t()` stays compile-checked.
     // Detail pages carry their own breadcrumb, so no header title / back here.
+    if (path.startsWith('/cross-requirements')) return { key: 'nav.section.crossRequirements' as const, back: null };
     if (path.startsWith('/requirements/')) return { key: '' as const, back: null };
     if (path.startsWith('/requirements')) return { key: 'nav.section.requirements' as const, back: null };
     if (path.startsWith('/projects/add')) return { key: 'nav.section.addProject' as const, back: '/projects' };

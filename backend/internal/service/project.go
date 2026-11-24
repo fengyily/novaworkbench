@@ -61,6 +61,44 @@ func (s *ProjectService) List() ([]model.Project, error) {
 	return s.ListForUser("", true)
 }
 
+// requirementCountsExpr returns the SQL expression list that yields the
+// 需求数 / 问题数 / 想法数 columns for the project row identified by
+// projectsRef (the qualified name of the `projects` table in the enclosing
+// query: "p" when it is aliased, "projects" otherwise).
+//
+// Why this exists: the three numbers used to be denormalized columns on the
+// `projects` row (requirement_count / issue_count / idea_count). NOTHING ever
+// wrote them — ProjectService.Add's INSERT does not list them and no UPDATE
+// anywhere in the tree touches them — so they kept the schema default of 0
+// forever and every project rendered 0 / 0 / 0 on /projects. (The alterColumns
+// comment in db/schema.go said so too: "the count is a creation-time snapshot
+// only ... no historical backfill" — the snapshot writer was never written.)
+// Deriving the counts from `requirements` makes `requirements` the single
+// source of truth, so the numbers can no longer drift.
+//
+// Semantics (do not change without updating the front-end contract note in
+// frontend/src/api/client.ts):
+//   - one bucket per kind — 'requirement' → 需求数, 'issue' → 问题数,
+//     'idea' → 想法数. The 'wiki' kind is a knowledge-base entry that never
+//     enters the development pipeline and has no column on the list page, so
+//     it is counted in none of the three.
+//   - an empty kind is a legacy row written before the kind column existed;
+//     it means "requirement" (mirrors RequirementService.normalizeKind).
+//   - status is NOT filtered: every requirement counts, including
+//     'archived'. Archiving a requirement into the knowledge base does not
+//     un-create it, and the column is a project-level inventory. Excluding
+//     archived would drop a fully-archived project back to 0 / 0 / 0 —
+//     exactly the symptom this fix removes.
+//
+// projectsRef is a code constant ("p" / "projects"), never user input.
+// The correlated subqueries hit idx_req_project (requirements(project_id)),
+// so the list endpoint still issues exactly ONE statement.
+func requirementCountsExpr(projectsRef string) string {
+	return `(SELECT COUNT(*) FROM requirements r WHERE r.project_id = ` + projectsRef + `.id AND (r.kind = 'requirement' OR r.kind = '')) AS requirement_count` +
+		`, (SELECT COUNT(*) FROM requirements r WHERE r.project_id = ` + projectsRef + `.id AND r.kind = 'issue') AS issue_count` +
+		`, (SELECT COUNT(*) FROM requirements r WHERE r.project_id = ` + projectsRef + `.id AND r.kind = 'idea') AS idea_count`
+}
+
 // ListForUser returns the projects visible to userID. Admins (isAdmin=true)
 // see every non-deleted project; non-admins see only projects assigned via the
 // user_projects table. An empty userID with isAdmin=true (the historical
@@ -85,7 +123,7 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 		p.commit_lang, p.commit_lang_override, p.commit_lang_source, p.commit_lang_updated_at,
 		p.commit_mode, p.commit_script, p.commit_style_preset, p.commit_style_custom,
 		p.last_synced_at, p.last_synced_commit, p.sync_status,
-		p.requirement_count, p.issue_count, p.idea_count,
+		` + requirementCountsExpr("p") + `,
 		CASE WHEN ps.user_id IS NULL THEN 0 ELSE 1 END AS starred
 		FROM projects p
 		LEFT JOIN project_stars ps ON ps.project_id = p.id AND ps.user_id = ?`
@@ -210,7 +248,7 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
 		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
-		requirement_count, issue_count, idea_count
+		`+requirementCountsExpr("projects")+`
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
@@ -238,7 +276,7 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
 		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
-		requirement_count, issue_count, idea_count
+		`+requirementCountsExpr("projects")+`
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
@@ -265,7 +303,7 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
 		commit_mode, commit_script, commit_style_preset, commit_style_custom,
 		last_synced_at, last_synced_commit, sync_status,
-		requirement_count, issue_count, idea_count
+		` + requirementCountsExpr("projects") + `
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1841,7 +1879,10 @@ func (s *ProjectService) Purge(id string) error {
 
 	// Grandchildren keyed off the project's requirements — delete before the
 	// requirements rows they reference.
-	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns", "requirement_dirs"}
+	// cross_requirement_phase_items references the project's requirements
+	// through requirement_id — a purged project must not leave dangling
+	// phase members behind.
+	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats", "requirement_qa_turns", "requirement_dirs", "cross_requirement_phase_items"}
 	for _, tbl := range reqScoped {
 		q := `DELETE FROM ` + tbl + ` WHERE requirement_id IN (SELECT id FROM requirements WHERE project_id = ?)`
 		if _, err := tx.Exec(q, id); err != nil {
@@ -1850,7 +1891,11 @@ func (s *ProjectService) Purge(id string) error {
 	}
 
 	// Direct children keyed off project_id.
-	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements"}
+	// cross_requirement_projects maps a cross-project requirement to its
+	// participating projects — a purged project must leave that mapping
+	// behind, otherwise the cross requirement keeps a participant that no
+	// longer exists.
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "project_claude_docs", "project_claude_doc_revisions", "requirements", "cross_requirement_projects"}
 	for _, tbl := range projScoped {
 		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
 			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)

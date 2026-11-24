@@ -151,6 +151,83 @@ func (h *SettingHandler) UpdateSubTaskConfig(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, SubTaskConfigResponse{Concurrency: concurrency, AutoRetry: autoRetry, RetryMax: retryMax})
 }
 
+// ClaudeDocInjectionResponse is the API shape for the project-level
+// CLAUDE.md injection policy.
+//
+// It is the rollback surface for the native channel: an operator whose runs
+// misbehave flips inject_mode to "prompt" and the previous behaviour comes
+// back without a redeploy.
+type ClaudeDocInjectionResponse struct {
+	// InjectMode is "native" (the Claude CLI's own project-memory channel) or
+	// "prompt" (the document is spliced into the user prompt).
+	InjectMode string `json:"inject_mode"`
+	// ExcludeRepoDoc keeps the repository's own CLAUDE.md / AGENTS.md out of
+	// the CLI's load set, so the managed copy is the only project document.
+	ExcludeRepoDoc bool `json:"exclude_repo_doc"`
+	// SystemPromptMode is "replace" (persona replaces the CLI's default
+	// system prompt) or "append" (persona is added to it).
+	SystemPromptMode string `json:"system_prompt_mode"`
+}
+
+// GetClaudeDocInjection returns the project-level CLAUDE.md injection policy.
+func (h *SettingHandler) GetClaudeDocInjection(w http.ResponseWriter, r *http.Request) {
+	cfg, err := h.svc.ClaudeDocInjectionConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, ClaudeDocInjectionResponse{
+		InjectMode:       cfg.InjectMode,
+		ExcludeRepoDoc:   cfg.ExcludeRepoDoc,
+		SystemPromptMode: cfg.SystemPromptMode,
+	})
+}
+
+// UpdateClaudeDocInjection persists the project-level CLAUDE.md injection
+// policy.
+//
+// The write only touches the settings table — every stage re-reads the
+// policy when it resolves the injection, so the new values take effect on
+// the next run without a restart.
+func (h *SettingHandler) UpdateClaudeDocInjection(w http.ResponseWriter, r *http.Request) {
+	var req ClaudeDocInjectionResponse
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	switch req.InjectMode {
+	case service.ClaudeDocInjectModeNative, service.ClaudeDocInjectModePrompt:
+	default:
+		writeError(w, 400, "INVALID", "inject_mode 必须是 native 或 prompt")
+		return
+	}
+	switch req.SystemPromptMode {
+	case service.ClaudeDocSystemPromptAppend, service.ClaudeDocSystemPromptReplace:
+	default:
+		writeError(w, 400, "INVALID", "system_prompt_mode 必须是 append 或 replace")
+		return
+	}
+	if err := h.svc.SetClaudeDocInjectionConfig(service.ClaudeDocInjectionConfig{
+		InjectMode:       req.InjectMode,
+		ExcludeRepoDoc:   req.ExcludeRepoDoc,
+		SystemPromptMode: req.SystemPromptMode,
+	}); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted state.
+	cfg, err := h.svc.ClaudeDocInjectionConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, ClaudeDocInjectionResponse{
+		InjectMode:       cfg.InjectMode,
+		ExcludeRepoDoc:   cfg.ExcludeRepoDoc,
+		SystemPromptMode: cfg.SystemPromptMode,
+	})
+}
+
 // OrchestrationConfigResponse is the API shape for the orchestration
 // behaviour settings — currently only the auto-summary toggle. Mirrors
 // service.SettingService.AutoSummaryEnabled. The handler re-reads after

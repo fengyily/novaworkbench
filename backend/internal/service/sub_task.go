@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
@@ -374,7 +375,8 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks
 		WHERE requirement_id = ?
 		  AND source = ?
@@ -459,7 +461,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -500,7 +503,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -560,7 +564,8 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			session_mode, retry_count,
 			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round, effort
+			task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -612,7 +617,8 @@ func (s *SubTaskService) ListChildren(parentID string) ([]model.SubTask, error) 
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks WHERE parent_subtask_id = ? ORDER BY created_at ASC, id ASC`, parentID)
 	if err != nil {
 		return nil, err
@@ -700,7 +706,8 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -1006,7 +1013,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			session_mode, retry_count,
 			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round, effort
+			task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
 			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
@@ -1117,7 +1125,8 @@ func (s *SubTaskService) ListOrphanPending(olderThan time.Time) ([]model.SubTask
 		session_mode, retry_count,
 		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort
+		task_kind, review_id, review_round, effort,
+			child_pid, child_pgid, work_dir
 		FROM sub_tasks
 		WHERE status = ?
 		  AND (job_id = '' OR job_id IS NULL)
@@ -1198,6 +1207,73 @@ func (s *SubTaskService) UpdateSession(id, sessionID, sourceSessionID string) er
 func (s *SubTaskService) UpdateJobID(id, jobID string) error {
 	_, err := s.db.Exec(`UPDATE sub_tasks SET job_id=?, updated_at=? WHERE id=?`,
 		jobID, time.Now(), id)
+	return err
+}
+
+// SetChildPID records the OS identity of the claude CLI process this row
+// currently owns, so the process can be found (and killed) even after the
+// backend restarted.
+//
+// Why this exists: the backend was killed with SIGKILL while a claude child
+// was running. The child survived (it was re-parented to launchd) and kept
+// editing the requirement's worktree for another 20 minutes — while the UI
+// already showed the sub-task as "error". The user then saw an agent
+// "repeatedly answering" because two processes were writing to the same tree.
+//
+// With the pid persisted, the NEXT backend instance finds the leftover
+// process at boot (see RecoverInterrupted) and kills its process group.
+//
+// pgid is the process-group id; it equals the pid because the child is
+// spawned with Setpgid (own process group), which is what lets the whole
+// tree — claude plus its tool subprocesses — be signalled at once.
+//
+// Passing pid=0 clears the record: the child is gone (or was never started).
+func (s *SubTaskService) SetChildPID(id string, pid, pgid int) error {
+	if id == "" {
+		return errors.New("sub_task_id is required")
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET child_pid=?, child_pgid=?, updated_at=? WHERE id=?`,
+		pid, pgid, time.Now(), id)
+	return err
+}
+
+// GetChildPID returns the recorded child pid / process-group id of a row.
+// Both are 0 when no child was started (or it already exited).
+func (s *SubTaskService) GetChildPID(id string) (pid, pgid int, err error) {
+	err = s.db.QueryRow(`SELECT child_pid, child_pgid FROM sub_tasks WHERE id=?`, id).Scan(&pid, &pgid)
+	return pid, pgid, err
+}
+
+// SetWorkDir records the directory the row's claude child writes into.
+//
+// It is a read-only observability field: the SubTaskPanel shows it on the
+// card so the user can see at a glance whether two sub-tasks are editing the
+// same files (the "is there really a second agent?" question). Empty clears it.
+func (s *SubTaskService) SetWorkDir(id, workDir string) error {
+	if id == "" {
+		return errors.New("sub_task_id is required")
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET work_dir=?, updated_at=? WHERE id=?`,
+		workDir, time.Now(), id)
+	return err
+}
+
+// UpdateSessionID updates ONLY the row's session id, leaving
+// source_session_id untouched.
+//
+// It exists for the 「继续执行」 path: a continue forks the previous
+// attempt's session into a NEW id, and the row's source_session_id must keep
+// pointing at the row's real origin (the requirement's coding session, or the
+// parent sub-task's session for an adjustment child). Overwriting it with the
+// resumed session made the row claim to be its own parent — the audit chain
+// broke exactly where it matters (the "which session did this descend from"
+// question).
+func (s *SubTaskService) UpdateSessionID(id, sessionID string) error {
+	if id == "" {
+		return errors.New("sub_task_id is required")
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET session_id=?, updated_at=? WHERE id=?`,
+		sessionID, time.Now(), id)
 	return err
 }
 
@@ -1369,6 +1445,66 @@ func (s *SubTaskService) MarkRunning(id string) (time.Time, bool, error) {
 		// re-fetches and shows the row as "running" the moment it transitions,
 		// instead of waiting for the 5s poll. Lookup is best-effort — a read
 		// failure means we just skip the broadcast, the poll catches up.
+		if st, gerr := s.Get(id); gerr == nil && st != nil {
+			s.notifyChanged(st.RequirementID)
+			log.Printf("[sub-task-event] %s: sub_task=%s status=running notify", st.RequirementID, id)
+		}
+	}
+	return now, won, err
+}
+
+// MarkRunningForSession is MarkRunning with an additional SINGLE-OWNER
+// guard: the row must still carry the session id the dispatcher pre-minted.
+//
+// Why the extra condition: MarkRunning's own predicate is deliberately loose
+// ("!= stopped", see its docstring) so a late Finish from the previous
+// attempt — which can land between the reset and this call — does not abort
+// the user's 「继续」. That looseness means two dispatchers that both target
+// the same row would BOTH win the CAS and both spawn a claude process for
+// one row: two agents writing the same files, which is exactly the symptom
+// this whole change is about.
+//
+// The session id closes that hole without reintroducing the tight-predicate
+// problem. Every dispatcher pre-mints its OWN session id and writes it onto
+// the row (UpdateSession) before dispatching, so:
+//
+//   - the LAST dispatcher to pre-mint owns the row (its UpdateSession
+//     overwrote the others), and
+//   - every earlier dispatcher's MarkRunningForSession finds a DIFFERENT
+//     session_id and therefore loses the CAS → it aborts instead of
+//     spawning a second process.
+//
+// The status predicate stays "!= stopped" so the late-Finish takeover
+// semantics MarkRunning documents are preserved.
+//
+// An empty expectedSessionID degrades to plain MarkRunning (no session
+// guard) — the push/PR paths that never pre-mint a session rely on that.
+func (s *SubTaskService) MarkRunningForSession(id, expectedSessionID string) (time.Time, bool, error) {
+	if expectedSessionID == "" {
+		return s.MarkRunning(id)
+	}
+	now := time.Now()
+	res, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, started_at=COALESCE(started_at, ?), updated_at=?
+		WHERE id=? AND status != ? AND session_id=?`,
+		model.SubTaskStatusRunning, now, now, id, model.SubTaskStatusStopped, expectedSessionID)
+	if err != nil {
+		return now, false, err
+	}
+	won := true
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either the user stopped the row, or another dispatcher owns it
+		// (its session id replaced ours), or MySQL reported 0 changed rows
+		// because the row was already 'running' — in which case the
+		// session guard still tells us who owns it: re-read and only win
+		// when the row is NOT stopped AND still carries OUR session id.
+		won = false
+		if cur, gerr := s.Get(id); gerr == nil && cur != nil &&
+			cur.Status != model.SubTaskStatusStopped && cur.SessionID == expectedSessionID {
+			won = true
+		}
+	}
+	if err == nil && won {
 		if st, gerr := s.Get(id); gerr == nil && st != nil {
 			s.notifyChanged(st.RequirementID)
 			log.Printf("[sub-task-event] %s: sub_task=%s status=running notify", st.RequirementID, id)
@@ -2007,6 +2143,100 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	return manualAffected + childAffected + orchestratedAffected, nil
 }
 
+// ReapOrphanChildren kills the claude processes that outlived the backend
+// that spawned them.
+//
+// The scenario this exists for: the backend was killed with SIGKILL (or the
+// machine rebooted) while a claude child was running. The child was in its
+// OWN process group (Setpgid), so it did NOT die with its parent — it got
+// re-parented to launchd (PPID=1) and kept running, editing the requirement's
+// worktree for another 20 minutes. Meanwhile the UI already showed the
+// sub-task as "error" and the user re-dispatched it, so TWO agents were
+// writing the same files — which is exactly the "it keeps answering the same
+// thing" symptom that was reported.
+//
+// The boot path (main.go) calls this right after RecoverInterrupted, so the
+// leftover process is gone before the first new dispatch can happen.
+//
+// Safety rules (a wrong kill is far worse than a surviving orphan):
+//
+//  1. Only rows that carry a non-zero child_pid are considered — a row
+//     without one never had a child we could have leaked.
+//  2. The process must still be ALIVE (signal 0 probe).
+//  3. Its command line must still look like OUR claude CLI. Pids are
+//     recycled by the OS, so the pid we persisted may by now belong to an
+//     unrelated process; without this check we would kill a stranger.
+//  4. Only the PROCESS GROUP is signalled (SIGTERM), so the claude child
+//     and every tool subprocess it spawned die together.
+//
+// Rows whose process can no longer be positively identified are left alone —
+// the pid is simply cleared, and the log records why.
+func (s *SubTaskService) ReapOrphanChildren() (int, error) {
+	rows, err := s.db.Query(`SELECT id, child_pid, child_pgid, work_dir FROM sub_tasks
+		WHERE child_pid > 0`)
+	if err != nil {
+		return 0, fmt.Errorf("select orphan children: %w", err)
+	}
+	type orphan struct {
+		id    string
+		pid   int
+		pgid  int
+		workD string
+	}
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if serr := rows.Scan(&o.id, &o.pid, &o.pgid, &o.workD); serr != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan orphan children: %w", serr)
+		}
+		orphans = append(orphans, o)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		rows.Close()
+		return 0, fmt.Errorf("orphan children rows: %w", rerr)
+	}
+	rows.Close()
+
+	reaped := 0
+	for _, o := range orphans {
+		if !llm.ProcessAlive(o.pid) {
+			// Already gone (the common case: the child died with the
+			// backend). Just forget the pid.
+			s.clearChildPID(o.id)
+			continue
+		}
+		cmdline := llm.ProcessCommand(o.pid)
+		if !llm.ProcessLooksLikeClaude(cmdline) {
+			// The pid was recycled by the OS. Do NOT touch the process —
+			// it is not ours. Log loudly so the operator can see why the
+			// column was not cleared by a kill.
+			log.Printf("[sub-task] orphan pid %d (row %s) no longer looks like our claude process (%q) — not killing it", o.pid, o.id, cmdline)
+			s.clearChildPID(o.id)
+			continue
+		}
+		// SIGTERM the whole group first: claude exits on SIGTERM and its
+		// tool subprocesses (bash / git / node) go with it.
+		if kerr := llm.KillProcGroup(o.pgid, syscall.SIGTERM); kerr != nil {
+			log.Printf("[sub-task] orphan reap: kill group %d (row %s, cmd=%q) failed: %v", o.pgid, o.id, cmdline, kerr)
+		} else {
+			log.Printf("[sub-task] 🧹 回收上次遗留的 Agent 进程（pid=%d, sub_task=%s, dir=%s）", o.pid, o.id, o.workD)
+		}
+		s.clearChildPID(o.id)
+		reaped++
+	}
+	return reaped, nil
+}
+
+// clearChildPID forgets a row's recorded child pid (the process is gone, was
+// never ours, or was just killed). Best-effort: a write failure only leaves a
+// stale pid in the column, which the next boot's identity check will skip.
+func (s *SubTaskService) clearChildPID(id string) {
+	if err := s.SetChildPID(id, 0, 0); err != nil {
+		log.Printf("[sub-task] failed to clear child_pid for %s: %v", id, err)
+	}
+}
+
 // RecoverStaleRunningInBatch flips 'running' rows of a single batch whose
 // heartbeat (batch_id_seq_run) is older than staleAfter back to 'pending'
 // so the live OrchestrationQueue tick can re-claim them. It is the per-tick
@@ -2066,7 +2296,7 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 	// text comparison, so the zone rendering has to agree or the predicate
 	// stops ordering by instant (see ClaimNextPending's docstring).
 	cutoff := now.Add(-staleAfter).UTC()
-	rows, err := s.db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(job_id,''), batch_id_seq_run
+	rows, err := s.db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(job_id,''), batch_id_seq_run, child_pid
 		FROM sub_tasks
 		WHERE batch_id=? AND status=?
 		  AND batch_id_seq_run IS NOT NULL
@@ -2080,8 +2310,9 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 		var (
 			id, sid, jid string
 			heartbeat    sql.NullTime
+			childPID     int
 		)
-		if scanErr := rows.Scan(&id, &sid, &jid, &heartbeat); scanErr != nil {
+		if scanErr := rows.Scan(&id, &sid, &jid, &heartbeat, &childPID); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("recover stale running in batch %s: scan: %w", batchID, scanErr)
 		}
@@ -2091,6 +2322,24 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 			if age < 0 {
 				age = 0
 			}
+		}
+		// A stale HEARTBEAT is not proof that the run is dead: the heartbeat
+		// goroutine can die (panic, DB lock) while the claude child keeps
+		// running and writing into the worktree. Flipping such a row back to
+		// 'pending' would dispatch a SECOND claude process for the same row
+		// — two agents, one directory — which is exactly the reported
+		// symptom.
+		//
+		// The persisted child pid settles it: if the process is still alive,
+		// the row is NOT stale and must not be re-dispatched. The pid is
+		// only trusted when the process still looks like our claude CLI
+		// (see ReapOrphanChildren) — a recycled pid must not freeze the row
+		// forever.
+		if childPID > 0 && llm.ProcessAlive(childPID) &&
+			llm.ProcessLooksLikeClaude(llm.ProcessCommand(childPID)) {
+			log.Printf("[orch] self-heal %s: child %s still running (pid=%d) — not re-dispatching",
+				batchID, id, childPID)
+			continue
 		}
 		affected = append(affected, RecoveredStaleRow{
 			ID:           id,
@@ -2185,6 +2434,13 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		// read as the tier, or vice versa) — a bug that compiles, passes
 		// a smoke test and is nearly impossible to spot by eye.
 		&st.Effort,
+		// child_pid / child_pgid / work_dir follow the same append-only
+		// rule (see the effort note above): the OS identity of the claude
+		// child this row owns, and the directory it writes into. Both are
+		// read-only observability fields.
+		&st.ChildPID,
+		&st.ChildPGID,
+		&st.WorkDir,
 	); err != nil {
 		return nil, err
 	}

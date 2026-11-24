@@ -475,6 +475,7 @@ export const requirements = {
     headerBadgeIdea: 'Idea — discussion only, no development',
     headerBadgeIssue: 'Issue — find the root cause and fix it',
     headerBadgeRequirement: 'Requirement — standard 3-stage implementation',
+    crossRequirementBadge: 'Cross-project requirement',
     headerBadgeWiki: 'Knowledge — read-only Markdown document',
     // Wiki kind detail-page actions + hints.
     tabWikiDoc: 'Knowledge base doc',

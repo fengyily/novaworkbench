@@ -230,9 +230,14 @@ func (h *ReviewHandler) runRegenerate(job *store.Job, rv *model.CodeReview, proj
 	// No --add-dir grant here — review runs with --dangerously-skip-permissions
 	// (see handler/attachment_grant.go for the requirement-side grant).
 	hasAttachments := attachManifestFor(h.attachSvc, rv.ID, "") != ""
+	// The regeneration re-grades the same diff, so it needs the same project
+	// conventions the first review had.
+	regenerateClaudeDoc := h.projectClaudeDoc(rv.ProjectID, project.LocalPath)
 	spec := reviewTurnSpec{
-		scope:             "review-regenerate",
-		prompt:            func(resumed bool) string { return h.regeneratePrompt(rv, project, history, resumed, hasAttachments) },
+		scope: "review-regenerate",
+		prompt: func(resumed bool) string {
+			return h.regeneratePrompt(rv, project, history, resumed, hasAttachments, regenerateClaudeDoc)
+		},
 		usage:             func() *usageCtx { return h.newRegenerateUsage(job.ID, rv, modelName) },
 		resumePhase:       "🔗 续接本次 Review 的会话上下文...",
 		staleNotice:       "⚠️ 原 Review 会话已失效，改用「上一版报告 + 追问对话 + 仓库代码」重新生成",
@@ -367,17 +372,13 @@ func (h *ReviewHandler) followupHistoryCapped(reviewID string) []prompt.Followup
 // conventions as the first report. The self-contained form in particular
 // rebuilds the whole context from scratch — without the conventions it would
 // quietly re-grade the change against rules the first review never used.
-func (h *ReviewHandler) regeneratePrompt(rv *model.CodeReview, project *model.Project, history []prompt.FollowupTurn, resumed, hasAttachments bool) string {
-	diskPath := ""
-	if project != nil {
-		diskPath = project.LocalPath
-	}
+func (h *ReviewHandler) regeneratePrompt(rv *model.CodeReview, project *model.Project, history []prompt.FollowupTurn, resumed, hasAttachments bool, claudeDoc claudeDocInjection) string {
 	in := prompt.RegeneratePromptInput{
 		Resumed:        resumed,
 		ReviewType:     rv.ReviewType,
 		History:        history,
 		HasAttachments: hasAttachments,
-		ProjectContext: h.projectClaudeDocBlock(rv.ProjectID, diskPath),
+		ProjectContext: claudeDoc.Block(),
 	}
 	if !resumed {
 		in.Branch = rv.Branch

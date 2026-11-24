@@ -105,6 +105,11 @@ var wikiDisallowedTools = []string{"Write", "Edit", "NotebookEdit", "Task"}
 // designRunParams but skips the analyst → design session fork and the
 // analysis_started_at backfill — wiki does not have an analyst stage.
 type wikiRunParams struct {
+	// ClaudeDoc — the resolved project-level CLAUDE.md injection decision
+	// for this run (see handler/claude_doc_injection.go). Resolved once the
+	// working directory is known, so the prompt and the claude invocation
+	// apply the SAME decision.
+	ClaudeDoc claudeDocInjection
 	Req            *model.Requirement
 	ProjectPath    string
 	DefaultBranch  string
@@ -370,6 +375,9 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 		return false
 	}
 	p.WorkDir = workDir
+	// The project conventions reach the wiki generator through the CLI's own
+	// project-memory channel, like every other stage.
+	p.ClaudeDoc = resolveClaudeDocInjection(h.projectSvc, h.settingSvc, p.Req.ProjectID, workDir)
 
 	// Plan-mode task prompt. The wiki kind skips the analyst stage so we
 	// always seed a fresh-context conversation (or, on a re-run, the
@@ -393,7 +401,7 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 	if p.ResumeSID == "" && p.Req.AnalystContextSummary == "" {
 		// Fresh-session path: prepend project structure / docs pre-read so
 		// the model has the project shape without burning a turn on `ls`.
-		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
+		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title, p.ClaudeDoc.Native)
 		prompt = "现在切换到「知识库」角色。请直接用 Read / Glob / Grep 阅读相关源文件（不要启动子代理），一次性沉淀出一份完整的、可复用的知识库文档。\n\n" +
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
 			"## 需求描述\n" + p.Req.Description + "\n\n" +
@@ -450,7 +458,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 	// event. Default off (read_knowledge=false) keeps the legacy
 	// behavior untouched.
 	if p.ReadKnowledge {
-		if kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title); kbBlock != "" {
+		if kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title, false); kbBlock != "" {
 			prompt = kbBlock + "\n" + prompt
 			emitKnowledgeEvent(job, kbTitles)
 		}
@@ -512,7 +520,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 		// host. context.Background(): the HTTP request already returned, so
 		// the subprocess must not be tied to r.Context().
 		job.Append(store.LogLine{Type: "phase", Content: "📚 Claude 正在阅读代码并生成知识库文档..."})
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		wikiOpts := llm.StreamOpts{
 			Prompt:          prompt,
 			WorkDir:         workDir,
 			SystemPrompt:    p.SystemPrompt,
@@ -525,7 +533,9 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 			ForkSessionID:   forkSessionID,
 			PermissionMode:  wikiPermissionMode,
 			DisallowedTools: wikiDisallowedTools,
-		})
+		}
+		p.ClaudeDoc.ApplyTo(&wikiOpts)
+		cmd := h.llm.StreamCmd(context.Background(), wikiOpts)
 		out = runClaudeStream(jobSink{job}, cmd, "wiki-generate",
 			h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,

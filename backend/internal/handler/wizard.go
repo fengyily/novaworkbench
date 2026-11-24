@@ -56,6 +56,12 @@ type WizardHandler struct {
 	// fork, executor role persona, artifact + token persistence — stay in one
 	// place.
 	subTaskRunner *SubTaskRunner
+	// crossReqSvc exposes the cross-project requirement service so the
+	// architect stage can inject the overall (cross-repository) design into
+	// a requirement that belongs to one. Optional — nil means "this
+	// deployment has no cross-project requirement feature", and the design
+	// prompt is then byte-identical to the pre-feature behaviour.
+	crossReqSvc *service.CrossRequirementService
 	// split holds the mutable state of the 需求拆分 feature: the parsed
 	// candidate lists (in-memory, keyed by job id) and the per-requirement
 	// idempotency lock. Initialized by NewWizardHandler; lazily created by
@@ -163,6 +169,16 @@ func NewWizardHandler(database *db.DB, projectSvc projectService, reqSvc *servic
 // scheduler tick still picks the batch up on its next interval.
 func (h *WizardHandler) SetOrchQueue(q interface{ Kick() }) {
 	h.orchQueue = q
+}
+
+// SetCrossRequirementSvc wires the cross-project requirement service into the
+// wizard.
+//
+// It is OPTIONAL: when it is nil (deployments without the feature, unit
+// tests with a partial handler) the design stage behaves exactly as before —
+// no cross-project context block is rendered and the prompt is byte-identical.
+func (h *WizardHandler) SetCrossRequirementSvc(svc *service.CrossRequirementService) {
+	h.crossReqSvc = svc
 }
 
 // SetIssueMonSvc injects the issue_monitor service after construction.

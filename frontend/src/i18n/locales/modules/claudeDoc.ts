@@ -26,6 +26,15 @@ export const claudeDoc = {
   diskDiffers: '磁盘上的 CLAUDE.md 与托管副本不一致{{at}}；当前注入的仍是托管副本，可导入磁盘版本。',
   diskModifiedAt: '（磁盘版本：{{time}}）',
   diskMissing: '仓库目录中没有 CLAUDE.md；当前注入的是托管副本。',
+  // The injection channel — how the managed document reaches the model.
+  // "native" = the Claude CLI's own project-memory channel; "prompt" = the
+  // document is spliced into the user prompt.
+  injectionChannelNative: '原生记忆',
+  injectionChannelPrompt: '提示词兜底',
+  injectionChannelLabel: '注入通道',
+  // In native mode the repository's own CLAUDE.md is kept OUT of the
+  // context, so an edit there has no effect until it is imported.
+  singleSourceHint: '会话中只加载本面板这一份，仓库目录里的 CLAUDE.md 不参与；改动仓库里的文件需要先导入。',
   importFromDisk: '从磁盘导入',
 
   // Actions

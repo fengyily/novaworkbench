@@ -26,6 +26,8 @@ export const ROUTE_SNAPSHOT = [
   '/requirements',
   '/requirements/calendar',
   '/requirements/:id',
+  '/cross-requirements',
+  '/cross-requirements/:id',
   '/schedules',
   '/knowledge',
   '/chat',
@@ -57,6 +59,7 @@ export const STATIC_ROUTES = [
   { path: '/projects/add', name: 'project-add', group: 'core' },
   { path: '/requirements', name: 'requirements-list', group: 'core' },
   { path: '/requirements/calendar', name: 'requirements-calendar', group: 'core' },
+  { path: '/cross-requirements', name: 'cross-requirements-list', group: 'core' },
   { path: '/schedules', name: 'schedules', group: 'core' },
   { path: '/knowledge', name: 'knowledge', group: 'core' },
   { path: '/chat', name: 'chat', group: 'stub', placeholder: true },
@@ -82,6 +85,7 @@ export const DYNAMIC_ROUTES = [
   { path: '/projects/:id', name: 'project-detail', group: 'core', needs: 'project' },
   { path: '/projects/:id/issue-monitor', name: 'project-issue-monitor', group: 'core', needs: 'project' },
   { path: '/requirements/:id', name: 'requirement-detail', group: 'core', needs: 'requirement' },
+  { path: '/cross-requirements/:id', name: 'cross-requirement-detail', group: 'core', needs: 'cross_requirement' },
   { path: '/reviews/:id', name: 'code-review-detail', group: 'core', needs: 'review' },
   { path: '/knowledge/view/:id', name: 'knowledge-view', group: 'core', needs: 'knowledge' },
 ];
@@ -107,7 +111,7 @@ export function readAppRoutes() {
  * the route as skipped with a reason instead of screenshotting an empty page.
  */
 export async function discoverIds(baseUrl, token) {
-  const ids = { project: null, requirement: null, review: null, knowledge: null };
+  const ids = { project: null, requirement: null, review: null, knowledge: null, cross_requirement: null };
   const errors = [];
 
   const get = async (pathname) => {
@@ -137,6 +141,10 @@ export async function discoverIds(baseUrl, token) {
   });
   await tryGet('requirement', '/api/requirements', (d) => {
     const list = Array.isArray(d) ? d : d?.items || d?.requirements || [];
+    return list[0]?.id;
+  });
+  await tryGet('cross_requirement', '/api/cross-requirements', (d) => {
+    const list = Array.isArray(d) ? d : d?.items || [];
     return list[0]?.id;
   });
   await tryGet('knowledge', '/api/knowledge', (d) => {

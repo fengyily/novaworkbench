@@ -24,6 +24,13 @@ var copyOrder = []string{
 	"project_claude_doc_revisions",
 	"memories",
 	"requirements",
+	// 跨项目需求 (cross-project requirement) — the top-level entity that
+	// spans several projects. Parents before children: the entity itself,
+	// then its project mapping / phases / phase items.
+	"cross_requirements",
+	"cross_requirement_projects",
+	"cross_requirement_phases",
+	"cross_requirement_phase_items",
 	// Dependency edges between sibling sub-requirements — both endpoints are
 	// requirements, and "requirements" has already been copied above.
 	"requirement_dependencies",

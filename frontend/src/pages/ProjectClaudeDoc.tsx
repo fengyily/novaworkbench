@@ -233,6 +233,18 @@ export default function ProjectClaudeDoc({ projectId }: { projectId: string }) {
                 : t('claudeDoc.neverGenerated')}
             </span>
             <span className="status-badge">{t('claudeDoc.sizeLabel', { n: doc?.bytes ?? 0 })}</span>
+            {/* Which channel the document travels through. The user can act
+                on it: in native mode the repository's own CLAUDE.md is kept
+                out of the context, so an edit there has no effect until it
+                is imported — a fact the panel has to state. */}
+            <span
+              className="status-badge claude-doc-badge-channel"
+              title={t('claudeDoc.injectionChannelLabel')}
+            >
+              {doc?.injection_channel === 'prompt'
+                ? t('claudeDoc.injectionChannelPrompt')
+                : t('claudeDoc.injectionChannelNative')}
+            </span>
             {hasManualEdits && (
               <span className="status-badge claude-doc-badge-manual">
                 {t('claudeDoc.manualEdited')}
@@ -262,6 +274,14 @@ export default function ProjectClaudeDoc({ projectId }: { projectId: string }) {
               {t('claudeDoc.importFromDisk')}
             </button>
           )}
+        </div>
+      )}
+
+      {/* Single-source hint — only meaningful in native mode, where the
+          repository's own copy is excluded from the CLI's load set. */}
+      {exists && doc?.injection_channel !== 'prompt' && (
+        <div className="claude-doc-disk">
+          <span>{t('claudeDoc.singleSourceHint')}</span>
         </div>
       )}
 

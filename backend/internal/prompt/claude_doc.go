@@ -25,10 +25,16 @@ const projectClaudeDocTruncMarker = "\n\n…（内容过长已截断，完整内
 // BuildProjectClaudeDocBlock renders the project-level CLAUDE.md as a
 // self-contained prompt section.
 //
+// This is the PROMPT-MODE rendering: the document is spliced into the user
+// prompt. The default path does NOT use it — the managed copy travels
+// through the Claude CLI's own project-memory channel (see
+// handler/claude_doc_injection.go), which frames it as authoritative
+// project instructions.
+//
 // diskExists says whether the working directory the model will see already
-// contains a CLAUDE.md. When it does, the Claude CLI auto-loads that file,
-// so the model would otherwise see two documents and have to guess which one
-// wins — the block states explicitly that this one is authoritative.
+// contains a CLAUDE.md. It only matters in prompt mode, where the CLI may
+// still load the repository's own copy alongside this block — the block then
+// says which one wins.
 //
 // An empty content returns an empty string: the caller then appends
 // nothing and the prompt stays byte-for-byte identical to the pre-feature

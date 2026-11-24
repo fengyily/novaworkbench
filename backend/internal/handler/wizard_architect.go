@@ -160,6 +160,15 @@ type designRunParams struct {
 	// outside the session's working directory needs a permission decision,
 	// and a non-interactive run has nobody to make it.
 	AddDirs        []string
+	// ClaudeDoc — the resolved project-level CLAUDE.md injection decision
+	// for this run (see handler/claude_doc_injection.go).
+	//
+	// It is resolved once in prepareDesignWorkspace — where the working
+	// directory is known — and carried here so the local and remote
+	// branches apply the SAME decision: in native mode the document
+	// travels through the CLI's own project-memory channel, in prompt mode
+	// it is part of the task prompt.
+	ClaudeDoc      claudeDocInjection
 	Model          string // 已经应用请求体覆盖
 	// Effort — the reasoning-effort tier (claude CLI --effort) for this
 	// design run. Resolved once in prepareArchitectDesign and carried here
@@ -191,6 +200,14 @@ type designRunParams struct {
 	// this doubles as the "does this run need parent handling at all" flag
 	// for finalizeArchitectRun.
 	ParentBlock string
+	// CrossBlock is the pre-rendered 「跨项目上下文」 prompt block: the
+	// cross-project requirement's overall design (including the mandatory
+	// 「跨项目接口契约」 section) plus the participating project list.
+	//
+	// Empty = this requirement does not belong to a cross-project
+	// requirement (the common case) — the prompt is then byte-identical to
+	// what it was before the feature existed.
+	CrossBlock string
 	// ReferencedBlock is the pre-rendered 「关联需求上下文」 prompt block: the
 	// referenced requirements' descriptions + existing plans plus the output
 	// contract. Empty = this run has no usable references, and the prompt is
@@ -903,6 +920,13 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// inside prepareDesignWorkspace.
 	referencedBlock, referencedRefs := h.buildReferencedBlock(req)
 
+	// Cross-project context: a requirement that belongs to a cross-project
+	// requirement must see the overall (cross-repository) design — above all
+	// the interface contract — so it does not invent its own interface.
+	// Empty for every ordinary requirement, so the prompt of the existing
+	// flows stays byte-identical.
+	crossBlock := h.buildCrossBlock(req)
+
 	// --add-dir 授权 = 用户手工授权的目录 + 本需求的附件目录 + （子需求时）
 	// 父需求的附件目录。
 	//
@@ -930,6 +954,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		NewDesignSID:    newDesignSID,
 		Parent:          parent,
 		ParentBlock:     parentBlock,
+		CrossBlock:      crossBlock,
 		ReferencedBlock: referencedBlock,
 		ReferencedRefs:  referencedRefs,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
@@ -994,6 +1019,41 @@ func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Require
 	}
 	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
 	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir)), dir
+}
+
+// buildCrossBlock renders the cross-project context block for a requirement
+// that belongs to a cross-project requirement.
+//
+// Empty for every ordinary requirement — so the design prompt of the existing
+// flows stays byte-identical.
+//
+// The block carries the overall design (the 「跨项目接口契约」 section above
+// all) plus the participating project list. The child's own description
+// already embeds the contract (it was persisted at split time — see
+// service.buildCrossDescription); this block is the **refresh**: it carries
+// the CURRENT version of the overall design, so a re-designed contract
+// reaches the child without rewriting every child's description.
+func (h *WizardHandler) buildCrossBlock(req *model.Requirement) string {
+	if req == nil || h.crossReqSvc == nil {
+		return ""
+	}
+	xreqID := strings.TrimSpace(req.CrossRequirementID)
+	if xreqID == "" {
+		return ""
+	}
+	xreq, err := h.crossReqSvc.Get(xreqID)
+	if err != nil || xreq == nil {
+		return ""
+	}
+	projects, err := h.crossReqSvc.ListProjects(xreqID)
+	if err != nil {
+		projects = nil
+	}
+	refs := make([]promptpkg.CrossProjectRef, 0, len(projects))
+	for _, p := range projects {
+		refs = append(refs, promptpkg.CrossProjectRef{ID: p.ProjectID, Name: p.ProjectName, Role: p.Role})
+	}
+	return promptpkg.BuildCrossContextBlock(service.DesignDocsToMarkdown(xreq.DesignDocs), refs, req.Title)
 }
 
 // buildReferencedBlock renders the 「关联需求上下文」 prompt block for the
@@ -1125,6 +1185,11 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	}
 
 	p.WorkDir = workDir
+	// Resolve the project CLAUDE.md injection once, here, where the working
+	// directory is known. Both the prompt (below) and the claude invocation
+	// read the result, so the two can never disagree about whether the
+	// document travels in the prompt or through the CLI's native channel.
+	p.ClaudeDoc = resolveClaudeDocInjection(h.projectSvc, h.settingSvc, p.Req.ProjectID, workDir)
 
 	// Stamp the design baseline SHA before spawning claude, so the record
 	// survives a mid-run crash (the merge stage reads this column for the
@@ -1189,7 +1254,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 			prompt = descBlock + prompt
 		}
 	} else if p.SkipAnalysis && p.SourceSID == "" {
-		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
+		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title, p.ClaudeDoc.Native)
 		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
 			"制定具体可执行的技术实现方案（plan）。\n\n" +
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
@@ -1231,7 +1296,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// （续接分析会话 / 跳过分析全新会话 / 带压缩摘要）都会带上它，而且只改
 	// 这一处。本地与远端共用 p.Prompt，Agent Server 执行同样覆盖。
 	// 没有文档时 claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-	if block := claudeDocBlock(h.projectSvc, p.Req.ProjectID, workDir); block != "" {
+	if block := p.ClaudeDoc.Block(); block != "" {
 		prompt += "\n\n" + block
 	}
 	// Sub-requirement: append the master-requirement context (its settled
@@ -1244,6 +1309,13 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// execution without touching wizard_remote.go.
 	if p.ParentBlock != "" {
 		prompt += "\n\n" + p.ParentBlock
+	}
+	// Cross-project context: the overall design + interface contract of the
+	// cross-project requirement this row belongs to. Appended at the same
+	// point as the parent block, so all three design paths (analyst-resume /
+	// fresh / compressed-summary) carry it identically.
+	if p.CrossBlock != "" {
+		prompt += "\n\n" + p.CrossBlock
 	}
 	// Referenced requirements: append their description + existing plan plus
 	// the 「关联需求上下文」 output contract. Placed right after the parent
@@ -1308,7 +1380,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
 	var kbReadTitles []string
 	if p.ReadKnowledge {
-		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
+		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title, p.ClaudeDoc.Native)
 		if kbBlock != "" {
 			prompt = kbBlock + "\n" + prompt
 		}
@@ -1419,7 +1491,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// returns.
 		stage := newStageRun("architect-design")
 		defer stage.cancel()
-		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
+		designOpts := llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   p.SystemPrompt,
@@ -1432,7 +1504,9 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 			AddDirs:        p.AddDirs,
-		})
+		}
+		p.ClaudeDoc.ApplyTo(&designOpts)
+		cmd := h.llm.StreamCmd(stage.ctx, designOpts)
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,

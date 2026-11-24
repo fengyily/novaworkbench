@@ -85,9 +85,62 @@ type Job struct {
 	// JOB_GONE so the caller can fall back to Continue/Redo.
 	cmd    *exec.Cmd          `json:"-"`
 	cancel context.CancelFunc `json:"-"`
+	// pid / pgid identify the running claude CHILD process.
+	//
+	// pgid is the process-group id, which equals pid because the child is
+	// spawned with Setpgid (it becomes its own group leader). Signalling the
+	// group — not just the pid — is what reaps the tool subprocesses claude
+	// spawned (bash, git, node …): killing only the direct child leaves
+	// those grandchildren running, still writing into the worktree.
+	//
+	// They are recorded so a STOP can kill the whole tree even after the
+	// in-memory *exec.Cmd is gone, and so the backend can persist them and
+	// clean up orphans after a restart (see service.SubTaskService.
+	// ReapOrphanChildren).
+	pid  int `json:"-"`
+	pgid int `json:"-"`
+	// killGroup terminates a whole process group. It is installed by the
+	// handler (which owns the OS-specific primitives in internal/llm) so
+	// this package stays free of process-management details.
+	//
+	// nil = no group recorded / nothing to kill.
+	killGroup func(pgid int)
 	// lineCarry holds an unfinished line between successive Write calls so a
 	// streamed stdout doesn't get split mid-line. Access only via Write/finish.
 	lineCarry string
+}
+
+// SetPID records the OS identity of the running claude child.
+//
+// Call it right after cmd.Start() succeeds: before that, cmd.Process is nil
+// and there is no pid to record. Both values are 0 when the process has not
+// started (or has already exited), which every reader treats as "nothing to
+// signal".
+func (j *Job) SetPID(pid, pgid int) {
+	j.mu.Lock()
+	j.pid = pid
+	j.pgid = pgid
+	j.mu.Unlock()
+}
+
+// PID returns the recorded child pid / process-group id. Both are 0 when no
+// child was started (or it already exited).
+func (j *Job) PID() (int, int) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.pid, j.pgid
+}
+
+// SetGroupKiller installs the function that terminates a whole process group.
+//
+// The handler wires it once per run (see SubTaskRunner.runLocalSubTaskAttempt)
+// so a Stop request reaps the claude child AND the tool subprocesses it
+// spawned. Without it, stopping a sub-task used to leave `bash` / `git`
+// grandchildren running, still writing into the requirement's worktree.
+func (j *Job) SetGroupKiller(fn func(pgid int)) {
+	j.mu.Lock()
+	j.killGroup = fn
+	j.mu.Unlock()
 }
 
 // SetModel records the effective model on the job so subscribers + snapshots
@@ -133,10 +186,20 @@ func (j *Job) SetCmd(cmd *exec.Cmd, cancel context.CancelFunc) {
 	j.mu.Unlock()
 }
 
-// Cancel triggers the stored cancel func (typically backed by an
-// exec.CommandContext whose WaitDelay already chains SIGTERM → 5s → SIGKILL)
-// so the running subprocess gets interrupted. Idempotent: nil cancel is
-// silently skipped so callers don't have to nil-check before invoking.
+// Cancel stops the running claude child AND everything it spawned.
+//
+// Order matters: the process GROUP is signalled first, then the stored
+// cancel func runs.
+//
+// The group kill is what actually stops the work: claude's tool subprocesses
+// (bash / git / node) live in the same group, and killing only the direct
+// child used to leave them running — still writing into the requirement's
+// worktree minutes after the card said 已停止. The cancel func (backed by an
+// exec.CommandContext whose WaitDelay chains SIGTERM → 5s → SIGKILL) is the
+// backstop for the direct child.
+//
+// Idempotent: a nil cancel / no recorded group is silently skipped so callers
+// don't have to nil-check before invoking.
 //
 // Reads cancel under RLock and releases before invoking the func to avoid
 // re-entering the mutex — CancelFunc implementations themselves may end up
@@ -145,7 +208,12 @@ func (j *Job) SetCmd(cmd *exec.Cmd, cancel context.CancelFunc) {
 func (j *Job) Cancel() {
 	j.mu.RLock()
 	cancel := j.cancel
+	pgid := j.pgid
+	killGroup := j.killGroup
 	j.mu.RUnlock()
+	if killGroup != nil && pgid > 0 {
+		killGroup(pgid)
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -455,6 +523,36 @@ type ActiveJob struct {
 	Status        JobStatus `json:"status"`
 	Type          string    `json:"type"`
 	ErrorKind     string    `json:"error_kind,omitempty"`
+}
+
+// CancelAll stops every still-running job in the ring.
+//
+// It is the graceful-shutdown counterpart of the orphan reaper: on SIGTERM
+// the backend stops accepting work, and the claude children it spawned are
+// signalled so they exit with their session jsonl intact. Without it the
+// children would be re-parented to launchd and keep editing the requirement
+// worktree after the backend was gone — the "agent keeps answering after the
+// server stopped" symptom.
+//
+// Returns the number of jobs it signalled.
+func (s *JobStore) CancelAll() int {
+	s.mu.Lock()
+	jobs := make([]*Job, 0, len(s.ring))
+	for _, j := range s.ring {
+		if j != nil {
+			jobs = append(jobs, j)
+		}
+	}
+	s.mu.Unlock()
+	n := 0
+	for _, j := range jobs {
+		if !j.isRunning() {
+			continue
+		}
+		j.Cancel()
+		n++
+	}
+	return n
 }
 
 // ActiveJobs returns a snapshot of all currently-running jobs across all

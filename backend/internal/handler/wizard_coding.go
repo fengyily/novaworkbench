@@ -1489,6 +1489,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		}
 	}
 
+	// The project CLAUDE.md injection decision. Resolved here, where the
+	// working directory is final: the exclusion list has to cover the
+	// directory the CLI will actually run in.
+	claudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, reqRow.ProjectID, workDir)
+
 	// Optional knowledge pre-read: inject the project knowledge relevant to
 	// this requirement and surface what was read via a "knowledge" SSE event.
 	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
@@ -1498,7 +1503,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if reqRow != nil {
 			codingProjID = reqRow.ProjectID
 		}
-		kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, p.RequirementTitle)
+		kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, p.RequirementTitle, claudeDoc.Native)
 		if kbBlock != "" {
 			prompt = kbBlock + "\n" + prompt
 		}
@@ -1542,8 +1547,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// instead of two barely-overlapping rule blocks.
 	prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, reqRow, false) + "\n"
 	// 项目级 CLAUDE.md —— 项目的权威开发约定，与「本项目 Git 约定」同级注入。
-	// 没有文档时 claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-	if block := claudeDocBlock(h.projectSvc, reqRow.ProjectID, workDir); block != "" {
+	// 原生通道下文档由 Claude CLI 自己的项目记忆通道加载（不拼进提示词），
+	// 没有文档时同样是空串，prompt 与改动前逐字节一致。
+	if block := claudeDoc.Block(); block != "" {
 		prompt += "\n" + block + "\n"
 	}
 	// Local credential + GPG provisioning shared with the shell push/PR job
@@ -1574,7 +1580,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// from runClaudeStream's beat(), which is wired up below.
 	stage := newStageRun("start-coding")
 	defer stage.cancel()
-	cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
+	codingOpts := llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
@@ -1587,7 +1593,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		ForkSessionID:  forkSessionID,
 		ExtraEnv:       codingExtraEnv,
 		AddDirs:        addDirs,
-	})
+	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel (a materialized copy granted via --add-dir), not
+	// through the prompt text.
+	claudeDoc.ApplyTo(&codingOpts)
+	cmd := h.llm.StreamCmd(stage.ctx, codingOpts)
 	codingProjectID := ""
 	if reqRow != nil {
 		codingProjectID = reqRow.ProjectID
@@ -1644,7 +1655,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Finish(1, store.JobError)
 			return
 		}
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
 		if p.RequirementID != "" {
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
@@ -1718,7 +1734,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Finish(1, store.JobError)
 		return
 	}
-	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	if !out.resultRepeatsLastMessage {
+		// The CLI's "result" event repeats the assistant's final
+		// text, which was already streamed as "message" lines.
+		// Emitting it again showed the same conclusion twice.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	}
 	// Close the knowledge loop: mark which read entries the run actually used.
 	if len(kbReadTitles) > 0 {
 		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
@@ -2115,7 +2136,8 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// is exactly the regression this fix repairs.
 		adjustPrompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
 		// 项目级 CLAUDE.md —— 追加调整轮同样要带上项目约定。
-		if block := claudeDocBlock(h.projectSvc, req.ProjectID, workDir); block != "" {
+		adjustClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, req.ProjectID, workDir)
+		if block := adjustClaudeDoc.Block(); block != "" {
 			adjustPrompt += "\n" + block + "\n"
 		}
 		// Tail the kind-specific developer block so a resumed Issue session
@@ -2185,7 +2207,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// that killed an actively-streaming run at exactly 30 minutes.
 		stage := newStageRun("adjust-coding")
 		defer stage.cancel()
-		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
+		adjustOpts := llm.StreamOpts{
 			Prompt:         adjustPrompt,
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
@@ -2197,7 +2219,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Fork:           false,
 			ExtraEnv:       adjustCredEnv,
 			AddDirs:        h.grantDirsFor(body.RequirementID, ""),
-		})
+		}
+		adjustClaudeDoc.ApplyTo(&adjustOpts)
+		cmd := h.llm.StreamCmd(stage.ctx, adjustOpts)
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
@@ -2225,7 +2249,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// job_done: keep status="done" (no UpdateStatus call) and do NOT update
 		// coding_session_id (no UpdateCodingSession call) — every later adjust
 		// round resumes the SAME original coding session.
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 追加调整完成！"})
 		// Record the effective developer model for this adjust round (success
 		// path only — "most recent successful run" semantics).
@@ -2273,7 +2302,12 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 		job.Finish(1, store.JobError)
 		return
 	}
-	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	if !out.resultRepeatsLastMessage {
+		// The CLI's "result" event repeats the assistant's final
+		// text, which was already streamed as "message" lines.
+		// Emitting it again showed the same conclusion twice.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	}
 	job.Append(store.LogLine{Type: "done", Content: doneMsg})
 	if reqID != "" {
 		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
@@ -2482,7 +2516,8 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// the project's commit mode / token-injection env.
 		prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
 		// 项目级 CLAUDE.md —— 续接开发轮同样要带上项目约定。
-		if block := claudeDocBlock(h.projectSvc, req.ProjectID, workDir); block != "" {
+		continueClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, req.ProjectID, workDir)
+		if block := continueClaudeDoc.Block(); block != "" {
 			prompt += "\n" + block + "\n"
 		}
 		// Kind-specific developer tail — keeps an Issue session's framing
@@ -2527,7 +2562,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// Activity-based timeout (see wizard_stage_timeout.go).
 		stage := newStageRun("continue-coding")
 		defer stage.cancel()
-		cmd := h.llm.StreamCmd(stage.ctx, llm.StreamOpts{
+		continueOpts := llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
@@ -2539,7 +2574,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Fork:           false,
 			ExtraEnv:       continueCredEnv,
 			AddDirs:        h.grantDirsFor(req.ID, ""),
-		})
+		}
+		continueClaudeDoc.ApplyTo(&continueOpts)
+		cmd := h.llm.StreamCmd(stage.ctx, continueOpts)
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
 		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
 
@@ -2567,7 +2604,12 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// job_done: keep status="developing" (no UpdateStatus call) and do NOT
 		// update coding_session_id (no UpdateCodingSession call) — every continue
 		// round resumes the SAME original coding session.
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		if !out.resultRepeatsLastMessage {
+			// The CLI's "result" event repeats the assistant's final
+			// text, which was already streamed as "message" lines.
+			// Emitting it again showed the same conclusion twice.
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 继续开发完成！"})
 		// Record the effective developer model for this continue round (success
 		// path only — "most recent successful run" semantics).
