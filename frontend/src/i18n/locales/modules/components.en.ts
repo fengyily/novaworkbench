@@ -238,6 +238,9 @@ export const components = {
       emptyDetail: 'Pick a sub-task on the left to see its live output and result',
       logUnavailable: 'Output record unavailable for this sub-task',
       historyBadge: 'History',
+      detailTitle: 'Detail',
+      resizeHandle: 'Drag to resize the left column',
+      resizeHint: 'Drag to resize the left column (220–480px)',
     },
   },
   subTaskCard: {
