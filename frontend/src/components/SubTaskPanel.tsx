@@ -4343,7 +4343,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           selected one in full on the right. Each column clamps its OWN
           height and scrolls by itself, so a long log can no longer push
           the page apart and the tree stays in view. */}
-      <div className="sub-split">
+      <div
+        className={`sub-split${resizing ? ' is-resizing' : ''}`}
+        style={{ '--sub-aside-w': `${asideWidth}px` } as SplitStyle}
+      >
         <aside className="sub-split-aside" aria-label={t('components.subTaskPanel.split.asideTitle')}>
           <div className="sub-split-head">
             <span className="sub-split-head-title">{t('components.subTaskPanel.split.asideTitle')}</span>
@@ -4382,64 +4385,93 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
               />
             )}
           </div>
+          {/* The drag handle. It straddles the 12px gap that already
+              separates the two columns, so resizing costs zero layout
+              width — the tree column's width comes from --sub-aside-w and
+              the gap it rides on was there to begin with. */}
+          <div
+            className="sub-split-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('components.subTaskPanel.split.resizeHandle')}
+            aria-valuenow={asideWidth}
+            aria-valuemin={ASIDE_W_MIN}
+            aria-valuemax={ASIDE_W_MAX}
+            title={t('components.subTaskPanel.split.resizeHint')}
+            tabIndex={0}
+            onPointerDown={onResizeStart}
+            onPointerMove={onResizeMove}
+            onPointerUp={onResizeEnd}
+            onPointerCancel={onResizeEnd}
+            onLostPointerCapture={onResizeEnd}
+            onKeyDown={onResizeKeyDown}
+          />
         </aside>
-        <div className="sub-split-detail" ref={detailRef}>
-          {/* EVERY card stays mounted — the unselected ones are merely
-              hidden. Unmounting them would drop their SSE connections and
-              clear their log buffers, which is exactly the regression the
-              split panel must not introduce. `flatAll` is collapse-
-              independent for the same reason: folding a subtree must not
-              unload the cards below it. */}
-          {flatAll.map((tn, i) => {
-            const isSelected = tn.node.id === selectedId;
-            return (
-              <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
-                <SubTaskCard
-                  st={tn.node}
-                  index={i}
-                  total={flatAll.length}
-                  requirementId={requirementId}
-                  isLatestReviewRound={isLatestReviewRound(tn.node)}
-                  // The right column is flat: the hierarchy is the tree's
-                  // job now, so no card is indented and no card draws the
-                  // vertical connector line.
-                  depth={0}
-                  childCount={countDescendants(tn)}
-                  isCollapsed={collapsed.has(tn.node.id)}
-                  onToggleCollapse={() => toggleCollapse(tn.node.id)}
-                  onChanged={onItemChanged}
-                  onCreated={loadList}
-                  onRestarted={handleSubTaskRestarted}
-                  onDeleted={handleSubTaskDeleted}
-                  // Per-card: this child's OWN effective environment decides whether
-                  // Stop is offered. `?? agent_server_id` is the same old-backend
-                  // fallback the environment badge above uses.
-                  canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
-                  adjustModel={adjustModel}
-                  // Per-card runs (Redo / Continue / Adjust) reuse the panel's
-                  // picked reasoning-effort tier — they are implementation work,
-                  // same as the composer. The RAW pick is passed (not the
-                  // displayed default): an unpicked run must leave the field off
-                  // so the backend resolves the configured stage default.
-                  effort={composerEffort ?? undefined}
-                  onAdjustModelChange={setAdjustModel}
-                  retryMax={retryMax}
-                  archivedKbId={archives[tn.node.id]}
-                  archiveBusy={!!archiveBusy[tn.node.id]}
-                  onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
-                  onUnarchive={handleUnarchiveReport}
-                  // The selected card is the detail card: its body is
-                  // always open and its header arrow is gone. The others
-                  // render no body at all.
-                  detailMode={isSelected}
-                  bodyHidden={!isSelected}
-                />
-              </div>
-            );
-          })}
-          {!selectedId && (
-            <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
-          )}
+        <div className={`sub-split-detail${fs.isFullscreen ? ' is-fullscreen' : ''}`}>
+          <div className="sub-split-detail-head">
+            <span className="sub-split-detail-title">
+              {selectedTitle || t('components.subTaskPanel.split.detailTitle')}
+            </span>
+            <FullscreenButton isFullscreen={fs.isFullscreen} onClick={fs.toggle} />
+          </div>
+          <div className="sub-split-detail-body" ref={detailRef}>
+            {/* EVERY card stays mounted — the unselected ones are merely
+                hidden. Unmounting them would drop their SSE connections and
+                clear their log buffers, which is exactly the regression the
+                split panel must not introduce. `flatAll` is collapse-
+                independent for the same reason: folding a subtree must not
+                unload the cards below it. */}
+            {flatAll.map((tn, i) => {
+              const isSelected = tn.node.id === selectedId;
+              return (
+                <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
+                  <SubTaskCard
+                    st={tn.node}
+                    index={i}
+                    total={flatAll.length}
+                    requirementId={requirementId}
+                    isLatestReviewRound={isLatestReviewRound(tn.node)}
+                    // The right column is flat: the hierarchy is the tree's
+                    // job now, so no card is indented and no card draws the
+                    // vertical connector line.
+                    depth={0}
+                    childCount={countDescendants(tn)}
+                    isCollapsed={collapsed.has(tn.node.id)}
+                    onToggleCollapse={() => toggleCollapse(tn.node.id)}
+                    onChanged={onItemChanged}
+                    onCreated={loadList}
+                    onRestarted={handleSubTaskRestarted}
+                    onDeleted={handleSubTaskDeleted}
+                    // Per-card: this child's OWN effective environment decides whether
+                    // Stop is offered. `?? agent_server_id` is the same old-backend
+                    // fallback the environment badge above uses.
+                    canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
+                    adjustModel={adjustModel}
+                    // Per-card runs (Redo / Continue / Adjust) reuse the panel's
+                    // picked reasoning-effort tier — they are implementation work,
+                    // same as the composer. The RAW pick is passed (not the
+                    // displayed default): an unpicked run must leave the field off
+                    // so the backend resolves the configured stage default.
+                    effort={composerEffort ?? undefined}
+                    onAdjustModelChange={setAdjustModel}
+                    retryMax={retryMax}
+                    archivedKbId={archives[tn.node.id]}
+                    archiveBusy={!!archiveBusy[tn.node.id]}
+                    onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
+                    onUnarchive={handleUnarchiveReport}
+                    // The selected card is the detail card: its body is
+                    // always open and its header arrow is gone. The others
+                    // render no body at all.
+                    detailMode={isSelected}
+                    bodyHidden={!isSelected}
+                  />
+                </div>
+              );
+            })}
+            {!selectedId && (
+              <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
+            )}
+          </div>
         </div>
       </div>
     </section>
