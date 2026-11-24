@@ -406,6 +406,7 @@
 /* The tree column. It is the height-clamped box; the inner box below is
    the scroller. */
 .sub-split-aside {
+  position: relative;      /* the drag handle positions against this */
   display: flex;
   flex-direction: column;
   flex: 0 0 var(--sub-aside-w);
@@ -424,6 +425,53 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* The drag handle between the two columns.
+   It is absolutely positioned OVER the 12px gap that already separates
+   the columns, so resizing costs zero layout width — the tree column's
+   width comes from --sub-aside-w, and the gap it straddles was there to
+   begin with. The 1px rule sits on the handle's centre line, which is
+   exactly the middle of that gap. */
+.sub-split-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -12px;          /* the gap is 12px wide (see .sub-split) */
+  width: 12px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;          /* mobile: don't scroll while dragging */
+  user-select: none;
+  -webkit-user-select: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.sub-split-resizer::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--color-border);
+  transition: background 120ms ease;
+}
+.sub-split-resizer:hover::after,
+.sub-split-resizer:focus-visible::after,
+.sub-split.is-resizing .sub-split-resizer::after {
+  background: var(--color-primary);
+}
+.sub-split-resizer:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+/* While dragging, nothing in the split may be selected. */
+.sub-split.is-resizing {
+  user-select: none;
+  cursor: col-resize;
 }
 
 /* The column header: title on the left, follow switch on the right. */
@@ -518,6 +566,8 @@
     width: 100%;
     max-height: var(--sub-split-max-h);
   }
+  /* Single-column layout: there is no side-by-side width to resize. */
+  .sub-split-resizer { display: none; }
 }
 
 /* ─── Sub-task list ─── */
