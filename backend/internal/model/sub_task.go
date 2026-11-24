@@ -222,6 +222,28 @@ type SubTask struct {
 	// first round, +1 per 回归 Review). Only set on TaskKind == review rows;
 	// fix sub-tasks stay at 0 so the round chain is made of Review nodes only.
 	ReviewRound int `json:"review_round,omitempty"`
+	// ChildPID is the OS pid of the claude CLI process this row currently
+	// owns, and ChildPGID its process-group id (equal to the pid because
+	// the child is spawned with Setpgid).
+	//
+	// Both are 0 when nothing is running — before the spawn, after the run
+	// finished, or on rows written before these columns existed.
+	//
+	// Why they are persisted: a backend that dies with SIGKILL leaves the
+	// claude child alive (re-parented to launchd), and that orphan keeps
+	// writing into the requirement's worktree while the UI already shows
+	// the sub-task as "error". The next backend instance reads these
+	// columns at boot, verifies the process is still ours, and kills it.
+	//
+	// Read-only observability fields — the UI shows them so the user can
+	// answer "is there really a second agent running?".
+	ChildPID  int `json:"child_pid,omitempty"`
+	ChildPGID int `json:"child_pgid,omitempty"`
+	// WorkDir is the directory this row's claude child actually ran in —
+	// the working tree it writes into. Exposed so the SubTaskPanel can show
+	// it and the user can see at a glance whether two sub-tasks are
+	// editing the same files.
+	WorkDir string `json:"work_dir,omitempty"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with

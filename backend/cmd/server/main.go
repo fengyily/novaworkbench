@@ -171,6 +171,26 @@ func main() {
 		log.Println("[main] architect role prompt 已升级到「模板驱动」版本")
 	}
 
+	// SINGLE-INSTANCE REGISTRATION.
+	//
+	// Two backends pointed at the same database each ran their own scheduler
+	// tick and their own in-memory JobStore, so the same orchestration batch
+	// was dispatched twice (two claude processes for one sub-task) and a Stop
+	// request could not reach the process owned by the other instance.
+	//
+	// The registration + heartbeat elects ONE dispatcher; the others stand by.
+	// The lease is fail-safe in the "keep working" direction: a lease read
+	// failure dispatches anyway (a stopped scheduler is worse than a
+	// duplicated one).
+	instanceSvc := service.NewBackendInstanceService(database)
+	instanceID, err := instanceSvc.StartHeartbeat("")
+	if err != nil {
+		log.Printf("[main] backend instance registration failed: %v (dispatch lease disabled)", err)
+	} else {
+		log.Printf("[main] backend instance registered: id=%s", instanceID)
+		defer instanceSvc.Stop()
+	}
+
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
 	// running/pending rows orphaned (eternal spinner in the UI). Recover them
 	// to error so the user re-dispatches via 重新拆分.
@@ -178,6 +198,24 @@ func main() {
 		log.Printf("[main] sub-task orphan recovery: %v", err)
 	} else if n > 0 {
 		log.Printf("[main] 回收了 %d 个因服务重启而中断的子任务", n)
+	}
+
+	// Kill the claude processes that outlived the PREVIOUS backend.
+	//
+	// A claude child runs in its own process group, so it does NOT die with
+	// a backend that was SIGKILLed — it is re-parented to launchd and keeps
+	// editing the requirement's worktree for minutes after the UI already
+	// showed the sub-task as "error". The user then saw an agent "repeatedly
+	// answering" because two processes (the orphan + a freshly dispatched
+	// one) were writing to the same tree.
+	//
+	// The child's pid was persisted per row (sub_tasks.child_pid), so the
+	// new instance can find it. The kill is identity-checked (the command
+	// line must still look like our claude CLI) because pids get recycled.
+	if n, err := subTaskSvc.ReapOrphanChildren(); err != nil {
+		log.Printf("[main] orphan agent reaper: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] 回收了 %d 个遗留的 Agent 进程", n)
 	}
 
 
@@ -232,6 +270,9 @@ func main() {
 	// effect on the next run without a restart. Wired with a setter rather
 	// than a third New() argument so llm.New's signature stays unchanged.
 	llmGateway.SetEffortProvider(settingSvc)
+	// The persona delivery mode (append vs replace the CLI's default system
+	// prompt) is a settings-driven choice — see handler/claude_doc_injection.go.
+	llmGateway.SetPersonaModeProvider(settingSvc)
 
 	// Scanner depends on the LLM gateway (auto project description generation)
 	// and the project service (description persistence).
@@ -338,7 +379,15 @@ func main() {
 	log.Printf("[startup] sub-task policy: per-project concurrency=%d auto-retry=%v retry-max=%d (process ceiling=%d)",
 		subTaskConc, subTaskAutoRetry, subTaskRetryMax, subTaskConcurrency)
 	projectLimiter := service.NewProjectLimiter(subTaskConc)
+	// Per-WORKING-DIRECTORY gate, shared by both dispatch paths (the manual
+	// runner and the orchestration queue). Two sub-tasks of the same
+	// requirement share one worktree, so with the project cap above 1 they
+	// used to run concurrently and both edit the same files — each child's
+	// probe result was then invalidated by the sibling's edit, which is what
+	// made the model re-verify and re-state its conclusion over and over.
+	worktreeLimiter := service.NewWorktreeLimiter()
 	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, reqSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency, subTaskGlobalSem, projectLimiter, settingSvc)
+	subTaskRunner.SetWorktreeLimiter(worktreeLimiter)
 	batchSvc := service.NewOrchestrationBatchService(database)
 	if n, err := batchSvc.Recover(); err != nil {
 		log.Printf("[main] orchestration batch recovery: %v", err)
@@ -346,11 +395,22 @@ func main() {
 		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
 	}
 	worktreeH := handler.NewWorktreeHandler(projectSvc, gitCredSvc)
+	// 跨项目需求 (cross-project requirement) — a top-level entity that spans
+	// several projects. Its children are ordinary requirements rows, so they
+	// inherit the whole existing pipeline (analyst / architect / coding /
+	// worktree / PR / review) without any of it being re-implemented.
+	crossReqSvc := service.NewCrossRequirementService(database)
 	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc, settingSvc, worktreeH, gitCredSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
+	// The architect stage injects the cross-project overall design into a
+	// requirement that belongs to one. Optional — nil keeps the existing
+	// design prompt byte-identical.
+	wizardH.SetCrossRequirementSvc(crossReqSvc)
+	crossReqH := handler.NewCrossRequirementHandler(crossReqSvc, reqSvc, projectSvc, llmGateway,
+		sharedJobs, roleSvc, claudeCfgSvc, usageSvc)
 	subTaskRunner.SetAttachmentSvc(attachmentSvc)
 	subTaskRunner.SetRequirementDirSvc(requirementDirSvc)
 	// Requirement handler is constructed here — after wizardH + schedSvc — so
@@ -370,6 +430,8 @@ func main() {
 	schedExec := handler.NewScheduledExecutor(wizardH, schedSvc)
 	schedH := handler.NewScheduleHandler(schedSvc, reqSvc)
 	schedulerRunner := scheduler.New(database, schedExec)
+	// Only the instance holding the dispatch lease runs the tick loops.
+	schedulerRunner.SetLease(instanceSvc)
 	if _, err := schedulerRunner.Recover(); err != nil {
 		log.Printf("[main] scheduler recovery: %v", err)
 	}
@@ -388,6 +450,11 @@ func main() {
 	// children are known not to contend for the same worktree. The process-wide
 	// ceiling (subTaskGlobalSem) still bounds the total across projects.
 	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, reqSvc, wizardH, projectLimiter, settingSvc, subTaskGlobalSem, 10*time.Second)
+	// The SAME worktree gate the manual runner uses — the two paths must
+	// exclude each other, not just themselves.
+	orchQueue.SetWorktreeLimiter(worktreeLimiter)
+	// Only the instance holding the dispatch lease dispatches batches.
+	orchQueue.SetInstanceLease(instanceSvc)
 	if err := orchQueue.Recover(); err != nil {
 		log.Printf("[main] orchestration queue recover: %v", err)
 	}
@@ -502,13 +569,17 @@ func main() {
 	// tests keep working — and so a build that disables the requirement
 	// service simply exposes no /issues endpoint.
 	reviewH.SetRequirementSvc(reqSvc)
+	// The project CLAUDE.md injection policy lives in the settings KV, so
+	// the Review handler needs the settings service to read it (see
+	// handler/claude_doc_injection.go).
+	reviewH.SetSettingService(settingSvc)
 	// 需求级 Review（Review 作为子任务）——独立的 handler，因为它拥有的是
 	// 「轮次链」这一层编排：建 Review 行 → 建 task_kind='review' 的子任务 →
 	// findings 转修复子子任务 → 回归 Review（round +1）。执行面复用同一个
 	// subTaskRunner，报告面复用同一张 code_reviews 表。
 	reqReviewH := handler.NewRequirementReviewHandler(
 		reqSvc, projectSvc, subTaskSvc, codeReviewSvc, codeReviewRevisionSvc,
-		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs,
+		roleSvc, claudeCfgSvc, gitCredSvc, subTaskRunner, sharedJobs, settingSvc,
 	)
 	// 需求级 Review 的「自动迭代」链的兜底巡检：链的正常驱动是事件钩子
 	//（本轮结束 → 建修复子任务 → 修复完成 → 发起下一轮），但后端重启会
@@ -517,6 +588,9 @@ func main() {
 	go reqReviewH.StartAutoIterateReconciler(context.Background())
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
+	// The project CLAUDE.md injection policy lives in the settings KV (see
+	// handler/claude_doc_injection.go).
+	mergeH.SetSettingService(settingSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -606,6 +680,10 @@ func main() {
 	//   POST   /api/projects/{id}/claude-doc/import         → import the on-disk CLAUDE.md
 	//   GET    /api/projects/{id}/claude-doc/jobs/{job_id}/stream → SSE progress
 	claudeDocH := handler.NewProjectClaudeDocHandler(projectSvc, llmGateway, sharedJobs)
+	// The project CLAUDE.md injection policy lives in the settings KV (see
+	// handler/claude_doc_injection.go) — the panel shows which channel is
+	// active.
+	claudeDocH.SetSettingService(settingSvc)
 	mux.HandleFunc("GET /api/projects/{id}/claude-doc", claudeDocH.Get)
 	mux.HandleFunc("PUT /api/projects/{id}/claude-doc", claudeDocH.Put)
 	mux.HandleFunc("DELETE /api/projects/{id}/claude-doc", claudeDocH.Delete)
@@ -809,6 +887,10 @@ func main() {
 	// orchestration tick and SubTaskRunner, so a change needs no restart.
 	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
 	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
+	// The project-level CLAUDE.md injection policy — the rollback surface
+	// for the native channel (see handler/claude_doc_injection.go).
+	mux.HandleFunc("GET /api/settings/claude-doc-injection", settingH.GetClaudeDocInjection)
+	mux.HandleFunc("PUT /api/settings/claude-doc-injection", settingH.UpdateClaudeDocInjection)
 
 	// Reasoning-effort policy (settings) — the per-stage default tiers for the
 	// claude CLI's --effort flag (方案设计 / 开发实现 / 提交推送 / 其他) plus a
@@ -855,6 +937,56 @@ func main() {
 	mux.HandleFunc("GET /api/fs/git-branches", fsB(http.HandlerFunc(fsH.GitBranches)).ServeHTTP)
 
 	// Requirements
+	// 跨项目需求 (cross-project requirement) — a top-level entity spanning
+	// several projects / repositories. The children it creates are ordinary
+	// requirements rows (each in its own project), so the whole existing
+	// development pipeline applies to them unchanged.
+	//
+	//   GET    /api/cross-requirements                       → list + live progress
+	//   POST   /api/cross-requirements                       → create
+	//   GET    /api/cross-requirements/{id}                  → detail
+	//   PUT    /api/cross-requirements/{id}                  → update
+	//   DELETE /api/cross-requirements/{id}                  → delete (children detach)
+	//   PUT    /api/cross-requirements/{id}/projects         → participating projects
+	//   POST   /api/cross-requirements/{id}/design           → start the overall-design job
+	//   GET    /api/cross-requirements/{id}/design/state     → the most recent design run
+	//   GET    /api/cross-requirements/{id}/design/{job}/stream → SSE (result.design)
+	//   PUT    /api/cross-requirements/{id}/design           → save a hand-edited design
+	//   POST   /api/cross-requirements/{id}/split            → start the split job
+	//   GET    /api/cross-requirements/{id}/split/state      → the most recent split run
+	//   GET    /api/cross-requirements/{id}/split/{job}/stream → SSE (result.candidates)
+	//   POST   /api/cross-requirements/{id}/split/confirm    → persist the candidates
+	//   POST   /api/cross-requirements/{id}/phases           → create a phase
+	//   PUT    /api/cross-requirements/{id}/phases/{pid}     → update a phase
+	//   DELETE /api/cross-requirements/{id}/phases/{pid}     → delete a phase
+	//   POST   /api/cross-requirements/{id}/phases/{pid}/verify → start the verification job
+	//   GET    /api/cross-requirements/{id}/phases/{pid}/verify/{job}/stream → SSE
+	// Read routes only need the menu permission (the observer role sees the
+	// progress); every mutating route — create / update / delete, changing
+	// the participating projects, and the three AI jobs (design, split,
+	// verify) that consume tokens — requires the separate write key.
+	crossReadPerm := middleware.RequirePermission(aclSvc, "menu.cross_requirements")
+	crossWritePerm := middleware.RequirePermission(aclSvc, "cross_requirement.manage")
+	mux.HandleFunc("GET /api/cross-requirements", crossReadPerm(http.HandlerFunc(crossReqH.List)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements", crossWritePerm(http.HandlerFunc(crossReqH.Create)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}", crossReadPerm(http.HandlerFunc(crossReqH.Get)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}", crossWritePerm(http.HandlerFunc(crossReqH.Update)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}", crossWritePerm(http.HandlerFunc(crossReqH.Delete)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/projects", crossWritePerm(http.HandlerFunc(crossReqH.SetProjects)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/design", crossWritePerm(http.HandlerFunc(crossReqH.StartDesign)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/state", crossReadPerm(http.HandlerFunc(crossReqH.DesignState)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/design/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamDesignJob)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/design", crossWritePerm(http.HandlerFunc(crossReqH.SaveDesign)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/split", crossWritePerm(http.HandlerFunc(crossReqH.StartSplit)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/split/state", crossReadPerm(http.HandlerFunc(crossReqH.SplitState)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/split/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamSplitJob)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/split/confirm", crossWritePerm(http.HandlerFunc(crossReqH.ConfirmSplit)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/phases", crossWritePerm(http.HandlerFunc(crossReqH.CreatePhase)).ServeHTTP)
+	mux.HandleFunc("PUT /api/cross-requirements/{id}/phases/{pid}", crossWritePerm(http.HandlerFunc(crossReqH.UpdatePhase)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/cross-requirements/{id}/phases/{pid}", crossWritePerm(http.HandlerFunc(crossReqH.DeletePhase)).ServeHTTP)
+	mux.HandleFunc("POST /api/cross-requirements/{id}/phases/{pid}/verify", crossWritePerm(http.HandlerFunc(crossReqH.StartVerify)).ServeHTTP)
+	mux.HandleFunc("GET /api/cross-requirements/{id}/phases/{pid}/verify/{job_id}/stream", crossReadPerm(http.HandlerFunc(crossReqH.StreamVerifyJob)).ServeHTTP)
+
 	mux.HandleFunc("GET /api/requirements", reqH.List)
 	mux.HandleFunc("POST /api/requirements", reqH.Create)
 	// Calendar slim endpoint. MUST be registered before the {id} literal
@@ -1211,6 +1343,15 @@ func main() {
 		// any in-flight dispatcher finishes writing its job_log before we
 		// tear everything down. Stop() waits up to 2s for the loop to exit.
 		schedulerRunner.Stop()
+		// Signal the claude children this backend spawned, so they exit with
+		// their session jsonl intact instead of being re-parented to launchd
+		// and continuing to edit the requirement's worktree after the
+		// backend is gone. The pid is persisted per sub-task row, so even a
+		// child that outlives this process is found by the next boot's
+		// orphan reaper.
+		if n := sharedJobs.CancelAll(); n > 0 {
+			log.Printf("[shutdown] signalled %d running agent process(es)", n)
+		}
 	}()
 
 	log.Printf("Server listening on http://localhost:%s", port)

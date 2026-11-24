@@ -32,6 +32,8 @@ import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
 import ProjectIssueMonitor from './pages/ProjectIssueMonitor';
 import SchedulesPage from './pages/SchedulesPage';
+import CrossRequirementsList from './pages/CrossRequirementsList';
+import CrossRequirementDetail from './pages/CrossRequirementDetail';
 
 // RequireAuth gates the authenticated app: while the session is being
 // restored it shows a minimal loader; once restored with no user it bounces
@@ -43,6 +45,25 @@ function ProjectIssueMonitorWithId() {
   const { id } = useParams();
   if (!id) return null;
   return <ProjectIssueMonitor projectId={id} />;
+}
+
+// RequirementDetailWithId mounts the requirement page under the :id route.
+//
+// The key is load-bearing: React Router keeps a route's element MOUNTED when
+// only a route PARAM changes, so without the key the page would survive a
+// switch from one requirement to another and keep the previous requirement's
+// state — its BASE branch among them. A stale BASE would be sent back on the
+// next design / coding run, and the backend reads a value that differs from
+// the auto value as "the user deliberately chose this": it freezes the base
+// and kills the parent inheritance (a child requirement must develop on its
+// master's branch).
+//
+// Remounting also puts the page back into its loading state until the new
+// row arrives, so no action can fire with the previous requirement's data.
+function RequirementDetailWithId() {
+  const { id } = useParams();
+  if (!id) return null;
+  return <RequirementDetail key={id} />;
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -90,7 +111,13 @@ export default function App() {
             {/* 字面量段 "calendar" 必须早于 ":id" 通配注册，否则会被
                路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}
             <Route path="requirements/calendar" element={<RequirementsCalendar />} />
-            <Route path="requirements/:id" element={<RequirementDetail />} />
+            <Route path="requirements/:id" element={<RequirementDetailWithId />} />
+            {/* Cross-project requirements — a top-level entity spanning
+                several projects. The literal segment "cross-requirements"
+                is a different prefix from "requirements", so there is no
+                ordering conflict with the routes above. */}
+            <Route path="cross-requirements" element={<CrossRequirementsList />} />
+            <Route path="cross-requirements/:id" element={<CrossRequirementDetail />} />
             <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />

@@ -71,7 +71,12 @@ func newReviewClaudeDocRig(t *testing.T, withDoc bool) *reviewClaudeDocRig {
 func TestReviewTaskPromptCarriesProjectClaudeDoc(t *testing.T) {
 	t.Run("with document", func(t *testing.T) {
 		rig := newReviewClaudeDocRig(t, true)
-		got := rig.h.buildReviewTaskPrompt(rig.rv, rig.project, "origin/feat/x", "origin/main", false)
+		// The prompt-mode injection: with no settings service wired the
+		// resolution falls back to the shipped default (native), so the test
+		// asks for the prompt-mode block explicitly.
+		inj := rig.h.projectClaudeDoc(rig.rv.ProjectID, rig.project.LocalPath)
+		inj.Native = false
+		got := rig.h.buildReviewTaskPrompt(rig.rv, rig.project, "origin/feat/x", "origin/main", false, inj)
 		if !strings.Contains(got, prompt.ProjectClaudeDocHeading) {
 			t.Errorf("review prompt missing the project CLAUDE.md block:\n%s", got)
 		}
@@ -88,7 +93,12 @@ func TestReviewTaskPromptCarriesProjectClaudeDoc(t *testing.T) {
 
 	t.Run("without document", func(t *testing.T) {
 		rig := newReviewClaudeDocRig(t, false)
-		got := rig.h.buildReviewTaskPrompt(rig.rv, rig.project, "origin/feat/x", "origin/main", false)
+		// The prompt-mode injection: with no settings service wired the
+		// resolution falls back to the shipped default (native), so the test
+		// asks for the prompt-mode block explicitly.
+		inj := rig.h.projectClaudeDoc(rig.rv.ProjectID, rig.project.LocalPath)
+		inj.Native = false
+		got := rig.h.buildReviewTaskPrompt(rig.rv, rig.project, "origin/feat/x", "origin/main", false, inj)
 		if strings.Contains(got, prompt.ProjectClaudeDocHeading) {
 			t.Errorf("review prompt carries a CLAUDE.md block although the project has none:\n%s", got)
 		}
@@ -114,7 +124,7 @@ func TestReviewTaskPromptCarriesProjectClaudeDoc(t *testing.T) {
 func TestReviewTaskPromptWithoutProjectService(t *testing.T) {
 	h := &ReviewHandler{}
 	rv := &model.CodeReview{ID: "crv_x", ProjectID: "proj_x", ReviewType: model.ReviewTypePR}
-	got := h.buildReviewTaskPrompt(rv, nil, "origin/feat/x", "origin/main", false)
+	got := h.buildReviewTaskPrompt(rv, nil, "origin/feat/x", "origin/main", false, claudeDocInjection{})
 	if got == "" {
 		t.Fatal("buildReviewTaskPrompt returned an empty prompt")
 	}
@@ -128,13 +138,17 @@ func TestReviewTaskPromptWithoutProjectService(t *testing.T) {
 // in front of the user, so it must be graded against the same conventions.
 func TestRegeneratePromptCarriesProjectClaudeDoc(t *testing.T) {
 	rig := newReviewClaudeDocRig(t, true)
-	got := rig.h.regeneratePrompt(rig.rv, rig.project, nil, false, false)
+	inj := rig.h.projectClaudeDoc(rig.rv.ProjectID, rig.project.LocalPath)
+	inj.Native = false
+	got := rig.h.regeneratePrompt(rig.rv, rig.project, nil, false, false, inj)
 	if !strings.Contains(got, prompt.ProjectClaudeDocHeading) {
 		t.Errorf("regenerate prompt missing the project CLAUDE.md block:\n%s", got)
 	}
 
 	rig2 := newReviewClaudeDocRig(t, false)
-	got2 := rig2.h.regeneratePrompt(rig2.rv, rig2.project, nil, false, false)
+	inj2 := rig2.h.projectClaudeDoc(rig2.rv.ProjectID, rig2.project.LocalPath)
+	inj2.Native = false
+	got2 := rig2.h.regeneratePrompt(rig2.rv, rig2.project, nil, false, false, inj2)
 	if strings.Contains(got2, prompt.ProjectClaudeDocHeading) {
 		t.Errorf("regenerate prompt carries a CLAUDE.md block although the project has none:\n%s", got2)
 	}

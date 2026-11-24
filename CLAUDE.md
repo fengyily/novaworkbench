@@ -161,6 +161,31 @@ ACL 落地在 7 张表(`users`/`sessions`/`acl_roles`/`permissions`/`acl_role_pe
 - **子需求的顺序必须落库**(`requirements.split_order`,2026-11)—— 一批子需求**共用同一个 `created_at`**(一个事务、一个 `now`),所以「按创建时间排」在批内是未定义的:实际退化成按随机 `req_<hex>` id 排,子需求回来时顺序是乱的,依赖标记(「依赖 ②」)也跟着指错行。顺序的唯一持久化落点是 `split_order`(批次内序号,1 起算;0 = 不属于有序批次 = 人工创建 / 历史数据):`service.CreateChildren` 按位置写入,`ListChildren` / 列表接口 `ORDER BY` / `UnmetDependencies` 都按它排序(`split_order > 0` 的排前面,其余按创建时间兜底),前端 `RequirementChildrenPanel` 用它渲染序号与依赖标记。**序号空间只有一个**:`service.OrderSplitTasks`(排序 + 重编号成连续 1..N + 给「旧序号 → 新序号」映射)被 handler(`ConfirmSplit`)、prompt 归一化层(`NormalizeSplitOutput` 重编号并同步翻译 `depends_on` / `references`)与前端(`orderRows`)共用 —— 模型的 `order` 可以不连续(1、3、7),但落库前一律归一成 1..N,否则「依赖 3」在模型 / 前端 / 数据库三套坐标系里指的是三行。
 **失败归因与持久化(2026-11)**: `runClaudeStream`(`handler/wizard_stream.go`)的收尾路径**不再先 kill 再 Wait**——失败时先给 CLI `streamExitGrace`(1.5s)自己退出的窗口,拿到的才是它自己的退出码;超时才由我们 SIGTERM 进程组(`killReason=teardown`)。**这不是洁癖**:Claude CLI 把 SIGTERM 当作**正常退出(143)**,所以旧实现里每次提前结束都伪装成「Claude 异常退出: exit status 143」,把 NovaWorkbench 自己的 SIGTERM 记在 CLI 头上。终止原因由 `claudeKillReason` 首写生效地记录(`watchdog` / `guard` / `teardown` / `hard-timeout`),`terminationMessage` 据此分四种文案(看门狗 / 我们杀的 / CLI 自己退的 / 硬超时),并附一行固定字段序的诊断(`耗时/事件数/最后事件类型/stdout结束/stderr/退出码/终止原因`)。**看门狗接线**:`runStallWatchdog` 现在接收调用方的 `*atomic.Bool`(旧实现自建后丢弃 ⇒ `error_kind=stalled` 与「流静默」文案曾是死代码)。`scanner.Err()` 也不再被吞(`stdoutEnded=scan-error`)。stderr 缓冲改 `syncBuffer`(裸 `bytes.Buffer` 与 os/exec 的 copy goroutine 竞态)。**落库诚实**:`job_logs` 新增 `error_kind` 列(`stalled` / `idle-timeout` / `terminated`),失败时 `status=error` / `exit_code=1`,不再出现「error 行 + ✅ 子任务完成！」同屏。**fork 秒崩兜底**: `looksLikeForkInstantCrash` 命中(无结果 / stdout=eof|scan-error / 无 assistant 事件 / <10s / 或是 teardown、或是 transcript 证明**零次 api-request**)时,自动改走已有的「新会话(含需求上下文)」路径重试一次,两次都失败则把两条错误都写进 artifact。判定用的 `claude_transcript_probe.go` **只读记录类型与时间戳**,不读正文(fork 会继承父会话历史,故按运行起始时间窗过滤)。
 
+### 项目级 CLAUDE.md 的注入(原生项目记忆通道)
+
+托管副本(`project_claude_docs.md_content`,只在 DB 里,从不落在仓库文件系统)要**通过 Claude CLI 自己的项目记忆通道**送给模型,而不是拼进用户提示词。统一入口 `handler/claude_doc_injection.go` 决定**带不带、在哪一层带**:
+
+- **原生通道(默认)**——托管副本被物化成真实的 `CLAUDE.md`(`service/claude_doc_memory.go`,落在 `~/.novaworkbench/memory/<projectID>/`,**绝不写进用户的仓库**:自动 commit-push-PR 跑的是 `git add -A`,写进去就会被提交进用户分支),用 `--add-dir` 授权给会话;同时用 `--settings` 的顶层 `claudeMdExcludes` 把**仓库自己那份**排除掉 ⇒ **上下文里只有一份项目文档**,权威性由机制保证,不再靠提示词里一句「以本块为准」。
+
+**CLI 契约是实测出来的,不是推断的**(`scripts/probe-claude-md.sh` 用本地 mock `/v1/messages` 抓真实请求载荷,结论固化在 `internal/llm/claude_md_settings.go` 的文件头):
+
+- `claudeMdExcludes` 是 **settings 顶层键**(不是 env var),值是绝对路径;实测经内联 `--settings` JSON 生效,**不需要** managed/policy settings 文件。
+- `--add-dir` **单独用不会**让 CLI 加载 `<dir>/CLAUDE.md`——它只授权读权限。必须**同时**设 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`,CLI 才会把被授权目录当「CLAUDE.md dirs」。该 env var 是**进程级**的,所以排除清单必须覆盖**所有**被授权目录,否则无关的 CLAUDE.md 会混进上下文。
+- `CLAUDE.md` 与 `AGENTS.md` 是 CLI 眼中的**互斥备选**:有 CLAUDE.md 时 AGENTS.md 不加载,但**排除 CLAUDE.md 会把 AGENTS.md 顶上来**。要真正做到「只有一份」,两个都得排除。
+- **`--system-prompt` 并不会**让 CLI 不再加载仓库的 CLAUDE.md(实测 V2)。计划书里「注入层错位」的前提在这个 CLI 版本上不成立;托管副本与 CLI 自带副本其实**都在用户轮**里,差别在于 CLI 那份带「这些指令覆盖默认行为」的强框架。**因此 persona 是否从 `--system-prompt` 改成 `--append-system-prompt` 与原生通道无关**,它被拆成独立的 `claudedoc.system_prompt_mode` 开关(默认 `replace` = 改动前行为),要单独灰度。
+
+**三个 KV 开关**(`settings` 表,读端走 `service.SettingService`,**不发版即可回滚**):
+
+| key | 默认 | 说明 |
+|---|---|---|
+| `claudedoc.inject_mode` | `native` | `native` = 走 CLI 原生通道;`prompt` = 退回拼进提示词(应急回退)。 |
+| `claudedoc.exclude_repo_doc` | `1` | 排除仓库自己的 CLAUDE.md/AGENTS.md,保证单一副本。 |
+| `claudedoc.system_prompt_mode` | `replace` | persona 用 `--system-prompt`(整体替换)还是 `--append-system-prompt`(追加)。与原生通道**无关**,需单独灰度。 |
+
+物化失败(家目录只读、磁盘满)**降级为提示词注入**,绝不阻断一次需求。远端(Agent Server)同理:托管副本 SFTP 落到 `<worktreeRoot>/<projectID>/memory/CLAUDE.md`,排除清单用的是**远端路径**;上传失败同样降级。worker 侧协议(`claudeMdDir` / `claudeMdExcludes`)与本地路径逐字对齐(`agent-worker/server.mjs` + `deploy/` + Go 内嵌副本三份,靠 `scripts/sync-agent-worker.sh` 保持同步)。
+
+**去重**(原生通道下才生效,否则会连仓库那份一起丢):`collectProjectContext` 的预读不再内联 CLAUDE.md/AGENTS.md,知识库块也过滤掉 `source_ref` 为这两个文件的条目(scanner 把它们索引成了 knowledge 行)——否则同一份文档会从第三条路**绕回**提示词里。
+
 ### Merge & Weekly Reports
 
 `handler/merge.go` + `merge_agent.go` 在 coding 完成后**自动 commit-push-PR**(支持本地 + Agent Server 远端),UI 在 `RequirementDetail` 的 SubTaskPanel 内嵌入口。`weekly_reports` 表 + `handler/report.go` + `service/report.go` 出项目周报(`git log` + 需求聚合);UI 在 `ProjectWeeklyReport.tsx`(`/projects/:id/reports`)。`token_usage` 表 + `service/usage.go` 聚合按需求/项目/Job 的 LLM token 用量(`/api/usage/*`)。

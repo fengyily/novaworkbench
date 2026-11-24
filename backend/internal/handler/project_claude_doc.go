@@ -57,6 +57,10 @@ type ProjectClaudeDocHandler struct {
 	projectSvc *service.ProjectService
 	llm        *llm.Gateway
 	jobs       *store.JobStore
+	// settingSvc exposes the settings KV, which carries the project
+	// CLAUDE.md injection policy (see handler/claude_doc_injection.go).
+	// nil → the shipped defaults apply.
+	settingSvc *service.SettingService
 	// genGate is the admission gate for the generation: one run per project
 	// at a time, plus a platform-wide cap. See project_claude_doc_gate.go.
 	genGate claudeDocGenGate
@@ -69,6 +73,16 @@ func NewProjectClaudeDocHandler(projectSvc *service.ProjectService, llmGateway *
 		jobs:       jobs,
 		genGate:    claudeDocGenGate{globalCap: claudeDocGenerationConcurrency()},
 	}
+}
+
+// SetSettingService wires the settings KV into the handler.
+//
+// The project CLAUDE.md injection policy lives in the settings KV (see
+// handler/claude_doc_injection.go). It is a setter rather than a constructor
+// argument so the existing NewProjectClaudeDocHandler call shape — and its
+// tests — stay put.
+func (h *ProjectClaudeDocHandler) SetSettingService(svc *service.SettingService) {
+	h.settingSvc = svc
 }
 
 // claudeDocResponse is the GET payload. `exists` is false (with an empty
@@ -86,6 +100,14 @@ type claudeDocResponse struct {
 	UpdatedAt      *time.Time  `json:"updated_at,omitempty"`
 	Bytes          int         `json:"bytes"`
 	Disk           diskDocInfo `json:"disk"`
+	// InjectionChannel names HOW the managed document reaches the model:
+	// "native" (the Claude CLI's own project-memory channel — the default)
+	// or "prompt" (spliced into the user prompt).
+	//
+	// The panel shows it because the two channels differ in a way the user
+	// can act on: in native mode the repository's own CLAUDE.md is kept out
+	// of the context, so an edit there has no effect until it is imported.
+	InjectionChannel string `json:"injection_channel,omitempty"`
 }
 
 // diskDocInfo describes the CLAUDE.md that may already exist in the project
@@ -152,6 +174,7 @@ func (h *ProjectClaudeDocHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := claudeDocResponse{Disk: h.diskInfo(p.LocalPath)}
+	resp.InjectionChannel = h.injectionChannel()
 	doc, err := h.projectSvc.ClaudeDoc(p.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LOOKUP_FAILED", err.Error())
@@ -174,6 +197,25 @@ func (h *ProjectClaudeDocHandler) Get(w http.ResponseWriter, r *http.Request) {
 		resp.Disk.Differs = !diskContentMatches(p.LocalPath, resp.Content)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// injectionChannel names the channel the managed document travels through.
+//
+// The panel shows it so the user can tell whether an edit to the
+// repository's own CLAUDE.md has any effect: in native mode it does not
+// (the managed copy is the only project document in the context), in prompt
+// mode it does (both are in the context, and the managed one wins).
+func (h *ProjectClaudeDocHandler) injectionChannel() string {
+	cfg := service.DefaultClaudeDocInjectionConfig()
+	if h.settingSvc != nil {
+		if c, err := h.settingSvc.ClaudeDocInjectionConfig(); err == nil {
+			cfg = c
+		}
+	}
+	if cfg.InjectMode == service.ClaudeDocInjectModePrompt {
+		return service.ClaudeDocInjectModePrompt
+	}
+	return service.ClaudeDocInjectModeNative
 }
 
 // diskInfo stats the CLAUDE.md that may live in the project directory.
@@ -890,19 +932,24 @@ type claudeDocReader interface {
 	ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error)
 }
 
-// claudeDocBlock renders the project-level CLAUDE.md as a prompt section.
+// claudeDocPromptBlock renders the project-level CLAUDE.md as a prompt
+// section.
+//
+// It is the PROMPT-MODE rendering: the document is spliced into the user
+// prompt. The native path (the default) delivers the document through the
+// Claude CLI's own project-memory channel instead — see
+// handler/claude_doc_injection.go, which owns the decision.
 //
 // It returns an EMPTY string when the project has no document — the caller
 // then appends nothing, so a project without a CLAUDE.md keeps a prompt
 // that is byte-for-byte identical to the one from before this feature
-// existed. That is the whole reason the helper returns a string and not a
-// "maybe append this" struct: the no-op has to be impossible to get wrong.
+// existed.
 //
 // diskPath is the directory the model will see (the work dir). When it
 // contains a CLAUDE.md the block states that this one wins, because the
 // Claude CLI auto-loads the file and the model would otherwise see two
 // competing documents.
-func claudeDocBlock(svc claudeDocReader, projectID, diskPath string) string {
+func claudeDocPromptBlock(svc claudeDocReader, projectID, diskPath string) string {
 	if svc == nil || strings.TrimSpace(projectID) == "" {
 		return ""
 	}

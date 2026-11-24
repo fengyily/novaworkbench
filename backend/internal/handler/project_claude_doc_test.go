@@ -227,17 +227,17 @@ func TestClaudeDocHiddenFromOtherUsers(t *testing.T) {
 func TestClaudeDocBlockInjection(t *testing.T) {
 	rig := newClaudeDocTestRig(t, t.TempDir())
 
-	if got := claudeDocBlock(rig.svc, rig.proj, t.TempDir()); got != "" {
+	if got := claudeDocPromptBlock(rig.svc, rig.proj, t.TempDir()); got != "" {
 		t.Errorf("claudeDocBlock without a document = %q, want empty", got)
 	}
-	if got := claudeDocBlock(nil, rig.proj, ""); got != "" {
+	if got := claudeDocPromptBlock(nil, rig.proj, ""); got != "" {
 		t.Errorf("claudeDocBlock with a nil service = %q, want empty", got)
 	}
 
 	if _, err := rig.svc.UpsertClaudeDoc(rig.proj, "# 约定\n\n分层：handler / service / model。", model.ProjectClaudeDocSourceGenerated, true); err != nil {
 		t.Fatalf("seed doc: %v", err)
 	}
-	block := claudeDocBlock(rig.svc, rig.proj, t.TempDir())
+	block := claudeDocPromptBlock(rig.svc, rig.proj, t.TempDir())
 	if !strings.Contains(block, prompt.ProjectClaudeDocHeading) {
 		t.Errorf("block missing the heading:\n%s", block)
 	}
@@ -253,7 +253,7 @@ func TestClaudeDocBlockInjection(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# 仓库自带的"), 0o644); err != nil {
 		t.Fatalf("write CLAUDE.md: %v", err)
 	}
-	block = claudeDocBlock(rig.svc, rig.proj, dir)
+	block = claudeDocPromptBlock(rig.svc, rig.proj, dir)
 	if !strings.Contains(block, "以本块为准") {
 		t.Errorf("block missing the conflict note:\n%s", block)
 	}
@@ -268,7 +268,7 @@ func TestClaudeDocBlockNilServiceIsSafe(t *testing.T) {
 			t.Fatalf("claudeDocBlock panicked: %v", r)
 		}
 	}()
-	if got := claudeDocBlock(nil, "", ""); got != "" {
+	if got := claudeDocPromptBlock(nil, "", ""); got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
 }

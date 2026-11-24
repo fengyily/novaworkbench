@@ -364,7 +364,7 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 	promptText, systemPrompt, modelName, configID string, run splitRuntime, usage *usageCtx) ([]prompt.SplitTask, []prompt.SplitReference, string) {
 	workDir := h.splitWorkDir(reqRow)
 
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+	splitOpts := llm.StreamOpts{
 		Prompt:         promptText,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPrompt,
@@ -379,7 +379,13 @@ func (h *WizardHandler) runLocalSplitTasks(job *store.Job, reqRow *model.Require
 		// Grep stay available so the model can ground the scope in real file
 		// paths.
 		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
-	})
+	}
+	// The project conventions reach the split through the CLI's own
+	// project-memory channel: the split decides how to decompose the work,
+	// so it has to work against the project's own conventions.
+	splitClaudeDoc := resolveClaudeDocInjection(h.projectSvc, h.settingSvc, reqRow.ProjectID, workDir)
+	splitClaudeDoc.ApplyTo(&splitOpts)
+	cmd := h.llm.StreamCmd(context.Background(), splitOpts)
 
 	out := runClaudeStream(jobSink{job}, cmd, "requirement-split", usage, nil, nil, 0, withStallTimeout(splitSplitStallTimeout))
 

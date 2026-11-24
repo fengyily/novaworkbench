@@ -206,7 +206,13 @@ export interface Project {
   last_synced_at?: string;
   last_synced_commit?: string;
   sync_status?: 'idle' | 'ok' | 'error';
-  // Stored counters (set at project creation; not maintained in real time).
+  // Requirement / issue / idea counts, derived server-side from the
+  // requirements table and bucketed by kind: 'requirement' → requirement_count,
+  // 'issue' → issue_count, 'idea' → idea_count. An empty kind (legacy row)
+  // counts as 'requirement'; the 'wiki' kind counts in none of the three;
+  // status is not filtered, so archived requirements still count. The old
+  // implementation read three never-written denormalized columns on projects,
+  // so they always rendered 0.
   requirement_count?: number;
   issue_count?: number;
   idea_count?: number;
@@ -594,6 +600,21 @@ export interface SubTask {
   job_id: string;
   artifact: string;
   model: string;
+  /**
+   * OS pid of the claude child this row currently owns (0 = nothing running).
+   *
+   * Shown on the sub-task card so the user can answer "is there really a
+   * second agent running?" without leaving the UI — the reported symptom was
+   * an agent that kept answering while the card already said "error".
+   */
+  child_pid?: number;
+  /**
+   * The directory this row's claude child writes into.
+   *
+   * Two sub-tasks showing the SAME work_dir are two agents editing the same
+   * files; the card renders it so that is visible at a glance.
+   */
+  work_dir?: string;
   /**
    * Reasoning-effort tier (claude CLI --effort) this child actually ran at.
    * Empty on legacy rows written before the column existed. Audit trail
@@ -1096,6 +1117,11 @@ export interface Requirement {
   // ParentID nests this row under a master requirement (one level, same
   // project). Empty / undefined = top level. Unrelated to source_requirement_id.
   parent_id?: string;
+  // CrossRequirementID links this row to the cross-project requirement
+  // (cross-project requirement) it belongs to. Empty = an ordinary requirement. NOT a
+  // hierarchy edge: the cross-project children are PEERS, each living in
+  // its own project, so ParentID stays empty for them.
+  cross_requirement_id?: string;
   // Derived by List only: number of non-archived children.
   child_count?: number;
   // Derived by List only: how many stage-Q&A turns (方案/开发答疑) this
@@ -2974,6 +3000,33 @@ export const subTaskConfigApi = {
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
 };
 
+// The project-level CLAUDE.md injection policy.
+//
+// `inject_mode` decides HOW the managed document reaches the model:
+// 'native' = the Claude CLI's own project-memory channel (the default — the
+// managed copy is materialized as a real CLAUDE.md and granted with
+// --add-dir, while the repository's own copy is excluded), 'prompt' = the
+// document is spliced into the user prompt (the pre-change behaviour, kept as
+// the rollback switch).
+//
+// `exclude_repo_doc` keeps the repository's own CLAUDE.md / AGENTS.md out of
+// the CLI's load set, so the managed copy is the ONLY project document in the
+// context.
+//
+// `system_prompt_mode` is independent of the above: it decides whether the
+// role persona replaces the CLI's default system prompt ('replace') or is
+// appended to it ('append').
+export interface ClaudeDocInjectionConfig {
+  inject_mode: 'native' | 'prompt';
+  exclude_repo_doc: boolean;
+  system_prompt_mode: 'append' | 'replace';
+}
+export const claudeDocInjectionApi = {
+  get: () => api.get<ClaudeDocInjectionConfig>('/api/settings/claude-doc-injection'),
+  update: (data: ClaudeDocInjectionConfig) =>
+    api.put<ClaudeDocInjectionConfig>('/api/settings/claude-doc-injection', data),
+};
+
 // Reasoning-effort policy (claude CLI --effort). The backend reads it on
 // every claude run, so saving takes effect without a restart.
 //
@@ -3898,6 +3951,16 @@ export interface ProjectClaudeDoc {
   bytes: number;
   /** The CLAUDE.md that may already exist in the project directory. */
   disk: ProjectClaudeDocDisk;
+  /**
+   * How the managed document reaches the model: "native" (the Claude CLI's
+   * own project-memory channel — the default) or "prompt" (spliced into the
+   * user prompt).
+   *
+   * It matters to the user because in native mode the repository's own
+   * CLAUDE.md is kept out of the context: an edit there has no effect until
+   * it is imported into the managed copy.
+   */
+  injection_channel?: 'native' | 'prompt';
 }
 
 /** One frozen version of the project CLAUDE.md. */
@@ -3938,4 +4001,232 @@ export const projectClaudeDocApi = {
     api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/revisions/${revId}/restore`, {}),
   streamJobUrl: (projectId: string, jobId: string) =>
     `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
+};
+
+// ── Cross-project requirements ─────────────────────────────────────────────
+//
+// 一个横跨多个项目 / 仓库的顶层需求实体。它的子需求是**普通的** requirements
+// 行（各归各的项目），所以子需求在各自的项目里走完全一样的开发流程 —— 前端
+// 只需要知道它们带一个 cross_requirement_id 徽章。
+
+export interface CrossRequirement {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  kind: string;
+  acceptance_criteria: string;
+  design_docs: string;
+  design_session_id: string;
+  design_job_id: string;
+  // split_batch_id — the id of the split batch that produced this
+  // requirement's children. Empty = never split. A cross-project
+  // requirement is split at most once, so a non-empty value means the
+  // split button must stay disabled.
+  split_batch_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string;
+}
+
+export interface CrossRequirementProjectProgress {
+  project_id: string;
+  project_name: string;
+  role: string;
+  // base_branch — the base branch of this participating project (its
+  // sub-requirements are developed from this branch). Empty = the project's
+  // own default branch.
+  base_branch: string;
+  total: number;
+  done: number;
+  blocked: number;
+}
+
+// CrossRequirementProjectInput — one participating project (id + role + base
+// branch).
+export interface CrossRequirementProjectInput {
+  project_id: string;
+  role?: string;
+  base_branch?: string;
+}
+
+export interface CrossRequirementProgress {
+  total: number;
+  done: number;
+  blocked: number;
+  percent: number;
+  projects: CrossRequirementProjectProgress[];
+  status_counts: Record<string, number>;
+}
+
+export interface CrossRequirementChild {
+  id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: string;
+  priority: string;
+  split_order: number;
+  // base_branch — the base branch this sub-requirement actually uses
+  // (inherited from its participating project's base branch).
+  base_branch: string;
+  depends_on: string[];
+  blocked_by: string[];
+}
+
+export interface CrossRequirementDependency {
+  requirement_id: string;
+  depends_on_id: string;
+  requirement_title: string;
+  depends_on_title: string;
+  cross_project: boolean;
+  met: boolean;
+}
+
+export interface CrossRequirementPhaseItem {
+  id: string;
+  phase_id: string;
+  requirement_id: string;
+  status: string;
+}
+
+export interface CrossRequirementPhase {
+  id: string;
+  cross_requirement_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  status: string;
+  verify_job_id: string;
+  verify_report: string;
+  verified_at: string;
+  created_at: string;
+  updated_at: string;
+  items: CrossRequirementPhaseItem[];
+}
+
+export interface CrossRequirementDetail extends CrossRequirement {
+  projects: CrossRequirementProjectProgress[];
+  children: CrossRequirementChild[];
+  dependencies: CrossRequirementDependency[];
+  phases: CrossRequirementPhase[];
+  progress: CrossRequirementProgress;
+}
+
+export interface CrossRequirementListPayload {
+  items: CrossRequirement[];
+  progress: Record<string, CrossRequirementProgress>;
+}
+
+/** A candidate sub-requirement produced by the cross-project split. */
+export interface CrossSplitCandidate {
+  title: string;
+  description: string;
+  scope: string[];
+  acceptance: string[];
+  boundary: string;
+  /** The project name the model proposed (display only). */
+  project: string;
+  /** The resolved project id — the server rejects the batch when it is empty
+   *  or points outside the participating project set. */
+  project_id: string;
+  order: number;
+  /** Prerequisites, expressed as batch-local ordinals (1-based). */
+  depends_on: number[];
+}
+
+export interface CrossSplitState {
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  candidates: CrossSplitCandidate[];
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
+/** The state of the most recent overall-design run of a cross requirement. */
+export interface CrossDesignState {
+  /** none | running | done | error */
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  design: string;
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
+export const crossRequirementsApi = {
+  list: (params?: { status?: string; keyword?: string }) => {
+    const q = new URLSearchParams();
+    Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
+    return api.get<CrossRequirementListPayload>(`/api/cross-requirements?${q.toString()}`);
+  },
+  create: (data: {
+    title: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    project_ids?: string[];
+    // projects — the participating projects in full (each may carry its own
+    // base branch). Takes precedence over project_ids when present.
+    projects?: CrossRequirementProjectInput[];
+  }) => api.post<CrossRequirement>('/api/cross-requirements', data),
+  get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
+  // Partial update: an omitted (or empty) field keeps the stored value, so a
+  // status-only call never clobbers the title / priority / kind.
+  update: (id: string, data: {
+    title?: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    status?: string;
+  }) => api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}`, data),
+  remove: (id: string) => api.delete<void>(`/api/cross-requirements/${id}`),
+  setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
+    api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
+  // ── overall design ──────────────────────────────────────────────────────
+  startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/design`, body ?? {}),
+  // designState — the most recent overall-design run. The job survives the
+  // page being closed (it lives in the server's JobStore), but its id only
+  // exists in the server's in-process registry — this endpoint is the only
+  // way for a reopened page to find it again.
+  designState: (id: string) => api.get<CrossDesignState>(`/api/cross-requirements/${id}/design/state`),
+  streamDesignUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/design/${jobId}/stream`,
+  saveDesign: (id: string, designDocs: string) =>
+    api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}/design`, { design_docs: designDocs }),
+  // ── split ───────────────────────────────────────────────────────────────
+  startSplit: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/split`, body ?? {}),
+  splitState: (id: string) => api.get<CrossSplitState>(`/api/cross-requirements/${id}/split/state`),
+  streamSplitUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/split/${jobId}/stream`,
+  confirmSplit: (id: string, candidates: CrossSplitCandidate[]) =>
+    api.post<{ children: CrossRequirementChild[]; detail: CrossRequirementDetail }>(
+      `/api/cross-requirements/${id}/split/confirm`, { candidates }),
+  // ── phases ──────────────────────────────────────────────────────────────
+  createPhase: (id: string, data: { name: string; description?: string; requirement_ids?: string[] }) =>
+    api.post<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases`, data),
+  updatePhase: (id: string, phaseId: string, data: {
+    name?: string;
+    description?: string;
+    requirement_ids?: string[];
+    status?: string;
+    verify_report?: string;
+  }) => api.put<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases/${phaseId}`, data),
+  deletePhase: (id: string, phaseId: string) =>
+    api.delete<void>(`/api/cross-requirements/${id}/phases/${phaseId}`),
+  startVerify: (id: string, phaseId: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/phases/${phaseId}/verify`, body ?? {}),
+  streamVerifyUrl: (id: string, phaseId: string, jobId: string) =>
+    `/api/cross-requirements/${id}/phases/${phaseId}/verify/${jobId}/stream`,
 };

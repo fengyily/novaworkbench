@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/store"
 )
 
@@ -16,7 +17,7 @@ import (
 // unchanged). Per-entry content is capped at ~8KB and the whole block at ~60KB
 // so a large knowledge base can't blow up the prompt budget. The returned
 // titles drive the SSE "knowledge" event so the UI can show what was read.
-func (h *WizardHandler) buildKnowledgeBlock(projectID, requirementTitle string) (block string, titles []string) {
+func (h *WizardHandler) buildKnowledgeBlock(projectID, requirementTitle string, skipProjectConventions bool) (block string, titles []string) {
 	if h.knowledgeSvc == nil {
 		return "", nil
 	}
@@ -26,6 +27,18 @@ func (h *WizardHandler) buildKnowledgeBlock(projectID, requirementTitle string) 
 			log.Printf("[wizard] load knowledge %s: %v", projectID, err)
 		}
 		return "", nil
+	}
+	if skipProjectConventions {
+		// The scanner indexes the repository's own CLAUDE.md / AGENTS.md as
+		// knowledge entries. In native mode the managed copy of the project
+		// document is delivered through the CLI's own project-memory channel
+		// and the repository's copies are excluded there — so keeping these
+		// entries would reintroduce the duplication through the knowledge
+		// block instead.
+		items = filterOutProjectConventionKnowledge(items)
+		if len(items) == 0 {
+			return "", nil
+		}
 	}
 	const (
 		perItem  = 8 * 1024
@@ -176,4 +189,31 @@ func emitKnowledgeResultEvent(job *store.Job, items []knowledgeUseItem, usedCoun
 		"items": jsonItems,
 	})
 	job.Append(store.LogLine{Type: "knowledge_result", Content: string(data)})
+}
+// filterOutProjectConventionKnowledge drops the knowledge entries that mirror
+// the repository's own convention documents.
+//
+// The scanner indexes the files it finds at the project root (CLAUDE.md,
+// AGENTS.md, …) as knowledge rows whose source_ref is the file name. Those
+// rows carry the REPOSITORY's copy of the project document — a different
+// document from the MANAGED copy NovaWorkbench maintains.
+//
+// In native mode the managed copy reaches the model through the CLI's own
+// project-memory channel and the repository's copy is excluded there, so
+// these rows would put a second version of the same document back into the
+// prompt.
+//
+// The match is on source_ref (the indexed file name), not on the title: a
+// user can rename the title of an entry, but the source it was indexed from
+// is what decides whether it duplicates the project document.
+func filterOutProjectConventionKnowledge(items []model.Knowledge) []model.Knowledge {
+	out := make([]model.Knowledge, 0, len(items))
+	for _, k := range items {
+		switch strings.TrimSpace(k.SourceRef) {
+		case "CLAUDE.md", "AGENTS.md":
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }

@@ -67,6 +67,16 @@ type ReviewHandler struct {
 	// into llm.Gateway so the endpoint can be exercised without a model.
 	// nil → the AI-parse endpoint answers 503.
 	extractFindings func(reportMD string) (string, error)
+	// settingSvc exposes the settings KV, which carries the project
+	// CLAUDE.md injection policy (see handler/claude_doc_injection.go). It is
+	// a setter-injected dependency for the same reason as the ones above.
+	// nil → the shipped defaults apply.
+	settingSvc *service.SettingService
+}
+
+// SetSettingService wires the settings KV into the Review handler.
+func (h *ReviewHandler) SetSettingService(svc *service.SettingService) {
+	h.settingSvc = svc
 }
 
 // SetFindingsExtractor wires the LLM-backed findings extractor used by
@@ -744,16 +754,23 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 
 	reviewUsage := h.newReviewUsage(job.ID, rv, modelName)
 
-	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "")
+	// The review runs in the project checkout, so the working directory the
+	// CLI sees is project.LocalPath.
+	reviewClaudeDoc := h.projectClaudeDoc(rv.ProjectID, project.LocalPath)
+	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "", reviewClaudeDoc)
 
-	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+	reviewOpts := llm.StreamOpts{
 		Prompt:         taskPrompt,
 		WorkDir:        project.LocalPath,
 		SystemPrompt:   systemPrompt,
 		Model:          cliModelArg(modelName),
 		Effort:         effort,
 		ClaudeConfigID: claudeConfigID,
-	})
+	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel, not through the prompt text.
+	reviewClaudeDoc.ApplyTo(&reviewOpts)
+	cmd := h.llm.StreamCmd(ctx, reviewOpts)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -998,14 +1015,10 @@ func appendManifest(systemPrompt, manifest string) string {
 //
 // A project without a document yields an empty block, so the prompt stays
 // byte-for-byte identical to what it was before the feature existed.
-func (h *ReviewHandler) buildReviewTaskPrompt(rv *model.CodeReview, project *model.Project, headRef, baseRef string, hasAttachments bool) string {
+func (h *ReviewHandler) buildReviewTaskPrompt(rv *model.CodeReview, project *model.Project, headRef, baseRef string, hasAttachments bool, claudeDoc claudeDocInjection) string {
 	description, extra := rv.Description, ""
 	if rv.ReviewType == model.ReviewTypePR {
 		description, extra = "", rv.Description
-	}
-	diskPath := ""
-	if project != nil {
-		diskPath = project.LocalPath
 	}
 	return prompt.BuildReviewPrompt(prompt.ReviewPromptInput{
 		ReviewType:        rv.ReviewType,
@@ -1018,22 +1031,23 @@ func (h *ReviewHandler) buildReviewTaskPrompt(rv *model.CodeReview, project *mod
 		Description:       description,
 		ExtraRequirements: extra,
 		HasAttachments:    hasAttachments,
-		ProjectContext:    h.projectClaudeDocBlock(rv.ProjectID, diskPath),
+		ProjectContext:    claudeDoc.Block(),
 	})
 }
 
-// projectClaudeDocBlock renders the project-level CLAUDE.md injection block.
+// projectClaudeDoc resolves the project-level CLAUDE.md injection for a
+// review run.
 //
 // It is the single entry point for the review surfaces (the first review and
-// the regeneration), so the two can never disagree about whether the reviewer
-// sees the project's conventions. An unwired project service (unit tests) or
-// a project without a document yields an empty string — the caller then
-// appends nothing and the prompt is unchanged.
-func (h *ReviewHandler) projectClaudeDocBlock(projectID, diskPath string) string {
+// the regeneration), so the two can never disagree about whether the
+// reviewer sees the project's conventions. An unwired project service (unit
+// tests) or a project without a document yields an empty injection — the
+// caller then appends nothing and the prompt is unchanged.
+func (h *ReviewHandler) projectClaudeDoc(projectID, diskPath string) claudeDocInjection {
 	if h.projectSvc == nil {
-		return ""
+		return claudeDocInjection{}
 	}
-	return claudeDocBlock(h.projectSvc, projectID, diskPath)
+	return resolveClaudeDocInjection(h.projectSvc, h.settingSvc, projectID, diskPath)
 }
 
 // buildReviewOutcome maps a finished report onto the row we persist.

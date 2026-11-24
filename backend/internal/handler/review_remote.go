@@ -137,7 +137,21 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	manifest := attachManifestFor(h.attachSvc, rv.ID, attachDir)
 	systemPrompt := appendManifest(rolePrompt, manifest)
 
-	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "")
+	// The remote review runs in the agent host's scratch clone, so the
+	// managed copy has to be written THERE and the exclusion list has to
+	// name the REMOTE paths — the local ones would match nothing.
+	remoteClaudeDoc := h.projectClaudeDoc(rv.ProjectID, baseRepo)
+	if remoteClaudeDoc.Native {
+		memDir := materializeRemoteClaudeDoc(client, job, agentWorktreeRootFor(srv), h.projectSvc, &model.Requirement{ProjectID: rv.ProjectID})
+		if memDir != "" {
+			remoteClaudeDoc.MemDir = memDir
+		} else {
+			// The upload failed: fall back to the prompt-level injection so
+			// the reviewer still sees the project's conventions.
+			remoteClaudeDoc.Native = false
+		}
+	}
+	taskPrompt := h.buildReviewTaskPrompt(rv, project, headRef, baseRef, manifest != "", remoteClaudeDoc)
 
 	ignoreLocal := true
 	opts := llm.StreamOpts{
@@ -149,6 +163,9 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 		ClaudeConfigID:         claudeConfigID,
 		OverrideSettingSources: &ignoreLocal,
 	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel, not through the prompt text.
+	remoteClaudeDoc.ApplyTo(&opts)
 
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行 Review（nova-agent-worker）..."})
 	out, errMsg := h.runRemoteWorkerStream(runCtx, client, srv, job, opts, claudeConfigID, "review",

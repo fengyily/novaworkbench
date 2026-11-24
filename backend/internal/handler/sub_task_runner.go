@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -140,6 +141,26 @@ type subTaskRunSpec struct {
 	adjust bool
 	// fork controls the session-derivation strategy (see Run's docstring).
 	fork bool
+	// continueFork resumes the PREVIOUS attempt's session but writes THIS
+	// turn into a FRESH session file (--resume <old> --fork-session
+	// --session-id <new>).
+	//
+	// Why it exists: 「继续执行」 used to resume the row's own session IN PLACE
+	// (--resume <old>), so the new turn was appended to the very JSONL the
+	// previous attempt wrote. When the previous attempt was an ORPHAN (the
+	// backend was killed and the claude child survived), two processes were
+	// appending to the same file — the corruption source behind the
+	// "agent keeps answering the same thing" report.
+	//
+	// Forking keeps the inherited history (the model still sees what the
+	// previous attempt did) while isolating this turn into its own file.
+	//
+	// It is deliberately NOT the same as spec.fork: the fork path walks the
+	// stale-session candidate chain and silently falls back to another
+	// session when the source is gone. 「继续执行」 keeps its hard-fail
+	// contract — a missing previous session must surface as an error, not
+	// silently redo the work from the developer's session.
+	continueFork bool
 	// freshSession starts a new session and injects the parent context block.
 	freshSession bool
 	// bare starts a new session with no context and no role system prompt.
@@ -527,10 +548,55 @@ type SubTaskRunner struct {
 	// included — queue behind its project's configured concurrency instead of
 	// fanning out per click.
 	limiter *service.ProjectLimiter
+	// wtLimiter is the PER-WORKING-DIRECTORY admission gate, shared with the
+	// orchestration queue.
+	//
+	// The project gate answers "how many children may this project run at
+	// once"; this one answers "may two children write into the SAME
+	// directory at once" — and the answer is always no. Two sub-tasks of the
+	// same requirement share one worktree, so with the project cap at 2 they
+	// used to run concurrently and both write the same files; each child's
+	// probe result was then invalidated by the sibling's edit, which is what
+	// made the model re-verify and re-state its conclusion over and over.
+	//
+	// It is taken LAST (project → runSem → worktree) on every dispatch path,
+	// so the two paths can't deadlock against each other.
+	wtLimiter *service.WorktreeLimiter
 	// settingSvc supplies the per-project concurrency on each Run so a settings
 	// change applies to the next dispatch without a restart. Nil keeps whatever
 	// cap the limiter was constructed with.
 	settingSvc *service.SettingService
+}
+
+// worktreeGateKey derives the key under which a run must serialize against
+// its siblings: the directory the run will write into.
+//
+// It deliberately does NOT create or stat the worktree — the gate is taken
+// BEFORE the run resolves its working directory, and creating a git worktree
+// while a sibling holds the same directory would race on the git index.
+//
+// The derivation mirrors the working-directory resolution below:
+//
+//   - the requirement's persisted worktree path, when it has one (the normal
+//     case: every sub-task of that requirement shares it);
+//   - the requirement id, when the worktree will be created on demand (the
+//     path is derived from the requirement's branch, so it is unique per
+//     requirement — the key still separates two requirements);
+//   - the requirement id as the fallback for a no-branch requirement with no
+//     worktree (it runs in the project checkout, shared with every OTHER
+//     no-branch requirement of that project — see the warning the runner
+//     prints for that legacy case).
+//
+// An empty requirement yields "", which means "no gate" (nothing is known
+// about where the run will land).
+func (r *SubTaskRunner) worktreeGateKey(req *model.Requirement) string {
+	if req == nil {
+		return ""
+	}
+	if p := strings.TrimSpace(req.WorktreePath); p != "" {
+		return p
+	}
+	return "req:" + req.ID
 }
 
 // NewSubTaskRunner wires the shared sub-task executor. All dependencies are
@@ -591,8 +657,24 @@ func NewSubTaskRunner(
 		remoteCoding: remoteCoding,
 		runSem:       globalSem,
 		limiter:      limiter,
+		wtLimiter:    service.NewWorktreeLimiter(),
 		settingSvc:   settingSvc,
 	}
+}
+
+// SetWorktreeLimiter injects the SHARED per-working-directory gate.
+//
+// It must be the SAME instance the orchestration queue uses, otherwise the two
+// dispatch paths would each hold their own gate and a manual sub-task could
+// still run concurrently with an orchestrated child in the same worktree —
+// which is the exact "two agents, one directory" case the gate exists for.
+//
+// Passing nil restores the runner's private gate (tests / single-path use).
+func (r *SubTaskRunner) SetWorktreeLimiter(l *service.WorktreeLimiter) {
+	if l == nil {
+		l = service.NewWorktreeLimiter()
+	}
+	r.wtLimiter = l
 }
 
 // SetRemoteCoding injects WizardHandler.runRemoteCoding after construction.
@@ -923,8 +1005,49 @@ func (r *SubTaskRunner) RunFix(
 	})
 }
 
-// RunReview executes a requirement-level Review sub-task.
+// RunContinue re-runs an interrupted sub-task, resuming the PREVIOUS
+// attempt's session but writing this turn into a FRESH session file
+// (--resume <old> --fork-session --session-id <new>).
 //
+// Why the fork instead of the historical in-place resume:
+//
+//   - The previous attempt's jsonl may still be held open by an ORPHANED
+//     claude process (a backend that was SIGKILLed leaves the child
+//     running). Appending to that file from a second process is what
+//     corrupted the transcript in the first place — and it is why the agent
+//     "kept answering the same thing": every turn re-read a transcript that
+//     two writers were interleaving into.
+//   - Forking still hands the model the previous attempt's conversation, so
+//     it knows what was already done; the isolation is only about WHERE the
+//     new turn is written.
+//
+// The stale-session hard-fail contract is preserved: a missing previous
+// session surfaces as an error (the user picks 重做), it does not silently
+// redo the work from the developer's session.
+func (r *SubTaskRunner) RunContinue(
+	req *model.Requirement,
+	st *model.SubTask,
+	job *store.Job,
+	newSID string,
+	sourceSID string,
+	body string,
+	modelOverride string,
+	configIDOverride string,
+	parentSourceSID string,
+	reportMode string,
+) {
+	r.run(req, st, job, newSID, sourceSID, subTaskRunSpec{
+		body:             body,
+		modelOverride:    modelOverride,
+		configIDOverride: configIDOverride,
+		continueFork:     true,
+		parentSourceSID:  parentSourceSID,
+		reportMode:       reportMode,
+		taskKind:         model.SubTaskKindCode,
+	})
+}
+
+// RunReview executes a requirement-level Review sub-task.
 // It reuses the ENTIRE execution skeleton of a normal sub-task — the project
 // gate, the process-wide semaphore, the worktree resolution, the credential
 // injection, the streaming, the token accounting — and only swaps the three
@@ -1013,10 +1136,21 @@ func (r *SubTaskRunner) run(
 	configIDOverride := spec.configIDOverride
 	adjust := spec.adjust
 	fork := spec.fork
+	continueFork := spec.continueFork
 	freshSession := spec.freshSession
 	bare := spec.bare
 	parentSourceSID := spec.parentSourceSID
 	reportMode := spec.reportMode
+	// attemptSID is the session id THIS attempt owns on the row. The
+	// terminal write uses it as a compare-and-set guard (FinishForSession),
+	// so a late write from a superseded goroutine cannot clobber the
+	// artifact / token / status of the attempt that replaced it.
+	//
+	// It starts as the pre-minted newSID (the id the dispatcher stamped on
+	// the row) and is updated wherever the run re-stamps the row with a
+	// different session id (the stale-session fallback chain, the
+	// fresh-session fallback, the remote path's CLI-reported id).
+	attemptSID := newSID
 	// Reasoning effort (claude CLI --effort). Resolved HERE — at dispatch
 	// time — so a settings change takes effect on the next run without
 	// touching the row. The precedence is: the user's explicit pick (spec)
@@ -1142,6 +1276,30 @@ func (r *SubTaskRunner) run(
 	}
 	defer func() { <-r.runSem }()
 
+	//  3. the PER-WORKING-DIRECTORY gate — two sub-tasks may never write into
+	//     the same directory at the same time. The project gate above is
+	//     keyed on projects.id, but the thing that actually conflicts is the
+	//     FILESYSTEM: every sub-task of one requirement shares that
+	//     requirement's worktree, so with the project cap at 2 they used to
+	//     run concurrently and both edit the same files. Each child's probe
+	//     result was then invalidated by the sibling's edit, which is what
+	//     made the model re-verify and re-state its conclusion over and over
+	//     — the "反复在回答" symptom.
+	//
+	//     The key is derived WITHOUT touching git (see worktreeGateKey): the
+	//     worktree creation is a git operation that must not happen while a
+	//     sibling holds the same directory.
+	wtKey := r.worktreeGateKey(req)
+	if wtKey != "" && !r.wtLimiter.TryAcquire(wtKey) {
+		job.Append(store.LogLine{Type: "phase", Content: "⏳ 排队中（同一工作目录已有子任务在跑，等待其结束）…"})
+		for !r.wtLimiter.TryAcquire(wtKey) {
+			time.Sleep(750 * time.Millisecond)
+		}
+	}
+	if wtKey != "" {
+		defer r.wtLimiter.Release(wtKey)
+	}
+
 	// The wait above can last minutes, and the user may well have stopped the
 	// sub-task while it sat in the queue (StopSubTask accepts a queued row and
 	// flips it to 'stopped'). Honor that before spawning anything — otherwise
@@ -1162,13 +1320,19 @@ func (r *SubTaskRunner) run(
 	// would otherwise flip the row straight back to 运行中 — the exact
 	// "点停止，它又变回运行中" symptom. Losing the CAS means the user won:
 	// don't spawn anything.
-	startTime, won, mErr := r.subTaskSvc.MarkRunning(st.ID)
+	//
+	// The session-scoped variant adds a SINGLE-OWNER guarantee: the row must
+	// still carry the session id THIS dispatcher pre-minted. Two dispatchers
+	// targeting the same row each stamp their own session id; only the last
+	// writer keeps it, so only that dispatcher wins the CAS and the other
+	// aborts instead of spawning a second claude process for one row.
+	startTime, won, mErr := r.subTaskSvc.MarkRunningForSession(st.ID, newSID)
 	if mErr != nil {
 		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
 	}
 	if !won {
-		log.Printf("[sub-task] %s: row was stopped before dispatch — aborting run", st.ID)
-		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止，未启动执行"})
+		log.Printf("[sub-task] %s: row was stopped or claimed by another dispatcher before dispatch — aborting run", st.ID)
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 已被停止或被其它执行者接管，未启动执行"})
 		job.Finish(0, store.JobDone)
 		return
 	}
@@ -1177,7 +1341,7 @@ func (r *SubTaskRunner) run(
 	if !adjust {
 		role = "🤖 子任务启动中..."
 	}
-	if !fork {
+	if !fork || continueFork {
 		role = "🤖 继续子任务执行..."
 	}
 	if isReview {
@@ -1365,6 +1529,16 @@ func (r *SubTaskRunner) run(
 		return
 	}
 	job.Append(store.LogLine{Type: "message", Content: "📁 工作目录: " + workDir})
+	// Persist the working directory on the row so the SubTaskPanel can
+	// show it. It is the answer to "are two agents writing the same
+	// files?" — the user can compare two cards at a glance.
+	if perr := r.subTaskSvc.SetWorkDir(st.ID, workDir); perr != nil {
+		log.Printf("[sub-task] failed to persist work_dir for %s: %v", st.ID, perr)
+	}
+
+	// 项目级 CLAUDE.md 的注入决策，在工作目录确定之后解析：排除清单必须
+	// 覆盖 CLI 真正运行的那个目录。
+	claudeDoc := resolveClaudeDocInjection(r.projectSvc, r.settingSvc, req.ProjectID, workDir)
 
 	// v0.5.x: 三阶段（理解 / 实施 / 小结）只在手动触发路径打开。auto / push_pr
 	// 子任务的 live log 渲染和自动批派逻辑保持不变——它们依然走单一的 artifact
@@ -1421,7 +1595,9 @@ func (r *SubTaskRunner) run(
 		prompt = spec.promptOverride
 	} else {
 		switch {
-		case !fork:
+		case continueFork || !fork:
+			// 「继续执行」 — whether it resumes in place or forks into a
+			// fresh session, the header says the same thing.
 			prompt = "## 继续执行\n\n" + body + "\n"
 		case adjust:
 			prompt = "## 追加调整\n\n" + body + "\n"
@@ -1453,9 +1629,10 @@ func (r *SubTaskRunner) run(
 		prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
 	}
 	// 项目级 CLAUDE.md —— 项目的权威开发约定。子任务（含需求级 Review）都要
-	// 带上：执行者按项目约定写代码，评审者按项目约定判对错。没有文档时
-	// claudeDocBlock 返回空串，prompt 与改动前逐字节一致。
-	if block := claudeDocBlock(r.projectSvc, req.ProjectID, workDir); block != "" {
+	// 带上：执行者按项目约定写代码，评审者按项目约定判对错。
+	// 原生通道下文档由 Claude CLI 自己的项目记忆通道加载（不拼进提示词），
+	// 没有文档时同样是空串，prompt 与改动前逐字节一致。
+	if block := claudeDoc.Block(); block != "" {
 		prompt += "\n" + block + "\n"
 	}
 	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
@@ -1517,7 +1694,7 @@ func (r *SubTaskRunner) run(
 		// goroutine (after the API has returned) so the response is
 		// never blocked on this write. Always runs — see comment above
 		// on why the empty-ctx case must also clear.
-		if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
+		if perr := r.subTaskSvc.UpdateSession(st.ID, attemptSID, ""); perr != nil {
 			log.Printf("[sub-task] failed to clear source_session_id for fresh-session %s: %v", st.ID, perr)
 		}
 		sourceSID = ""
@@ -1525,7 +1702,7 @@ func (r *SubTaskRunner) run(
 	// Bare path also clears source_session_id so the audit trail and the
 	// SubTaskCard display stay consistent with the "new session" framing.
 	if bare {
-		if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
+		if perr := r.subTaskSvc.UpdateSession(st.ID, attemptSID, ""); perr != nil {
 			log.Printf("[sub-task] failed to clear source_session_id for bare-session %s: %v", st.ID, perr)
 		}
 	}
@@ -1613,6 +1790,10 @@ func (r *SubTaskRunner) run(
 		if freshSession || bare {
 			remoteSessionArg = newSID
 		}
+		// A continue that forks needs --fork-session on the remote too: the
+		// worker resumes the previous session and writes this turn into the
+		// fresh id (same semantics as the local path).
+		remoteFork := fork || continueFork
 		out := r.remoteCoding(&remoteCodingInput{
 			job:      job,
 			serverID: effectiveServerID,
@@ -1625,7 +1806,7 @@ func (r *SubTaskRunner) run(
 			reqRow:         req,
 			prompt:         prompt,
 			sourceSID:      sourceSID,
-			fork:           fork,
+			fork:           remoteFork,
 			sessionArg:     remoteSessionArg,
 			forkSessionID:  newSID,
 			model:          modelName,
@@ -1646,8 +1827,9 @@ func (r *SubTaskRunner) run(
 			if perr := r.subTaskSvc.UpdateSession(st.ID, out.sessionID, sourceSID); perr != nil {
 				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
 			}
+			attemptSID = out.sessionID
 		}
-		r.finishSubTask(st, job, out, modelName, startTime, nil, finishHooks)
+		r.finishSubTask(st, job, out, modelName, startTime, nil, finishHooks, attemptSID)
 		return
 	}
 
@@ -1705,7 +1887,37 @@ func (r *SubTaskRunner) run(
 	// decide whether a forked run died instantly.
 	var lastAttemptSID string
 	var lastAttemptStart time.Time
-	if !fork {
+	if continueFork {
+		// 「继续执行」 with a FORKED session: --resume <previous attempt's
+		// session> --fork-session --session-id <this attempt's new id>.
+		//
+		// The model still inherits the previous attempt's conversation (so it
+		// knows what was already done), but this turn lands in its OWN jsonl.
+		// That isolation is the point: the previous attempt's file may still
+		// be held open by an ORPHANED claude process (a backend that was
+		// SIGKILLed leaves the child running), and two processes appending to
+		// the same file is what corrupted the transcript in the first place.
+		//
+		// Unlike the fork path there is NO stale-source fallback chain: a
+		// missing previous session must surface as an error (the user
+		// picks 重做), not silently redo the work from the developer session.
+		lastAttemptStart = time.Now()
+		lastAttemptSID = newSID
+		// Only the session id moves: source_session_id keeps pointing at
+		// the row's real origin (see SubTaskService.UpdateSessionID).
+		if perr := r.subTaskSvc.UpdateSessionID(st.ID, attemptSID); perr != nil {
+			log.Printf("[sub-task] UpdateSessionID warn for %s: %v", st.ID, perr)
+		}
+		out = r.runLocalSubTaskAttempt(
+			st, job, prompt, systemPromptForRun, modelName,
+			sourceSID, newSID,
+			adjust /*adjustFlag*/, true /*forkFlag*/,
+			freshSession, bare,
+			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
+			addDirs, spec.disallowedTools, claudeDoc,
+		)
+		out.errMsg = annotateFailureWithTranscript(out, workDir, lastAttemptSID, lastAttemptStart)
+	} else if !fork {
 		// ContinueSubTask path: single attempt, no fallback. Per user
 		// decision (2026-09-17) the stale-session hard-fail semantics for
 		// --resume-in-place are preserved — a stale parent JSONL here
@@ -1721,7 +1933,7 @@ func (r *SubTaskRunner) run(
 			adjust /*forkFlag*/, false,
 			freshSession, bare,
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-			addDirs, spec.disallowedTools,
+			addDirs, spec.disallowedTools, claudeDoc,
 		)
 		out.errMsg = annotateFailureWithTranscript(out, workDir, lastAttemptSID, lastAttemptStart)
 	} else {
@@ -1758,6 +1970,7 @@ func (r *SubTaskRunner) run(
 			if perr := r.subTaskSvc.UpdateSession(st.ID, sidForThisAttempt, src); perr != nil {
 				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
 			}
+			attemptSID = sidForThisAttempt
 			if idx > 0 {
 				job.Append(store.LogLine{Type: "phase",
 					Content: fmt.Sprintf("🔄 子任务源会话=%s (回退第 %d 层)", src, idx)})
@@ -1771,7 +1984,7 @@ func (r *SubTaskRunner) run(
 				/*forkFlag*/ true,
 				freshSession, bare,
 				workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
-				addDirs, spec.disallowedTools,
+				addDirs, spec.disallowedTools, claudeDoc,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -1803,11 +2016,12 @@ func (r *SubTaskRunner) run(
 			if looksLikeForkInstantCrash(out, probe) {
 				out = r.retryForkAsFreshSession(st, job, req, out, prompt, systemPromptForRun,
 					modelName, sourceSID, workDir, subUsage, finalConfigID, credEnv,
-					phaseTrack, hardTimeout, addDirs, spec.disallowedTools, probe)
+					phaseTrack, hardTimeout, addDirs, spec.disallowedTools, claudeDoc, probe,
+					&attemptSID)
 			}
 		}
 	}
-	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack, finishHooks)
+	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack, finishHooks, attemptSID)
 }
 
 // annotateFailureWithTranscript appends the content-free session-transcript
@@ -1898,7 +2112,9 @@ func (r *SubTaskRunner) retryForkAsFreshSession(
 	hardTimeout time.Duration,
 	addDirs []string,
 	disallowedTools []string,
+	claudeDoc claudeDocInjection,
 	probe claudeTranscriptProbe,
+	attemptSID *string,
 ) claudeStreamOutcome {
 	log.Printf("[sub-task] %s: fork crashed instantly (elapsed=%s events=%d) — %s",
 		st.ID, failed.elapsed.Round(time.Millisecond), failed.streamEventCount, probe.Describe())
@@ -1921,6 +2137,11 @@ func (r *SubTaskRunner) retryForkAsFreshSession(
 	if perr := r.subTaskSvc.UpdateSession(st.ID, fallbackSID, ""); perr != nil {
 		log.Printf("[sub-task] failed to clear source_session_id for fork fallback %s: %v", st.ID, perr)
 	}
+	// The fallback owns the row under a NEW session id now — the terminal
+	// write's compare-and-set must expect that id, not the pre-fallback one.
+	if attemptSID != nil {
+		*attemptSID = fallbackSID
+	}
 
 	fallbackStart := time.Now()
 	out := r.runLocalSubTaskAttempt(
@@ -1931,7 +2152,7 @@ func (r *SubTaskRunner) retryForkAsFreshSession(
 		/*freshSession*/ true,
 		/*bare*/ false,
 		workDir, subUsage, finalConfigID, credEnv, tracker, hardTimeout,
-		addDirs, disallowedTools,
+		addDirs, disallowedTools, claudeDoc,
 	)
 	if out.errMsg == "" && out.finalResult != "" {
 		return out
@@ -1971,6 +2192,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	hardTimeout time.Duration,
 	addDirs []string,
 	disallowedTools []string,
+	claudeDoc claudeDocInjection,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -1992,7 +2214,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		forkFor = false
 		sessionIDForCLI = newSID
 	}
-	cmd, cancel, hb := r.llm.GenerateCode(llm.StreamOpts{
+	localOpts := llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPromptForRun,
@@ -2021,12 +2243,28 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		ExtraEnv:        credEnv,              // HTTPS git creds + committer identity
 		IdleTimeout:     subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
 		AddDirs:         addDirs,
-	})
+	}
+	// The managed project CLAUDE.md travels through the CLI's own project
+	// memory channel (a materialized copy granted via --add-dir), not
+	// through the prompt text.
+	claudeDoc.ApplyTo(&localOpts)
+	cmd, cancel, hb := r.llm.GenerateCode(localOpts)
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
 	// SIGKILL). Must happen BEFORE `defer cancel()` so Stop can fire between
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
+	// Install the process-group killer so a Stop request reaps the whole
+	// tree (claude + its bash/git tool subprocesses), not just the direct
+	// child. See store.Job.Cancel.
+	job.SetGroupKiller(func(pgid int) {
+		if pgid <= 0 {
+			return
+		}
+		if err := llm.KillProcGroup(pgid, syscall.SIGTERM); err != nil {
+			log.Printf("[sub-task] %s: failed to kill process group %d: %v", st.ID, pgid, err)
+		}
+	})
 	defer cancel()
 	// The row may have been stopped while we were getting here: between
 	// MarkRunning and this point the runner resolves the working directory
@@ -2089,7 +2327,26 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 			)
 		}
 	}
-	return runClaudeStream(subTaskSink{jobSink: jobSink{job: job}, workDir: workDir}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, withStallTimeout(codingStallTimeout), withKillReason(&killReason))
+	return runClaudeStream(subTaskSink{jobSink: jobSink{job: job}, workDir: workDir}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, withStallTimeout(codingStallTimeout), withKillReason(&killReason), withOnStarted(func(pid int) {
+		// The child is alive and its pid is known. Record it in BOTH places
+		// that outlive this process:
+		//
+		//   - the JobStore (in-memory): so a Stop can signal the whole
+		//     process GROUP (claude + its tool subprocesses) instead of
+		//     only the direct child.
+		//   - sub_tasks.child_pid (on disk): so a RESTARTED backend can
+		//     find and kill the orphan this process leaves behind if it
+		//     dies mid-run. Without this, the row said "error" while an
+		//     agent kept editing the worktree — the "two agents at once"
+		//     symptom.
+		//
+		// pgid == pid because the child is spawned with Setpgid (it is
+		// the leader of its own process group).
+		job.SetPID(pid, pid)
+		if perr := r.subTaskSvc.SetChildPID(st.ID, pid, pid); perr != nil {
+			log.Printf("[sub-task] failed to persist child_pid for %s: %v", st.ID, perr)
+		}
+	}))
 }
 
 // subTaskSink is jobSink plus the sub-task safety guard (streamGuard).
@@ -2204,7 +2461,15 @@ func (r *SubTaskRunner) saveThinking(st *model.SubTask, out claudeStreamOutcome)
 	}
 }
 
-func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker, hooks subTaskFinishHooks) {
+// attemptSID is the session id this attempt owns on the row. When non-empty
+// the terminal write is a compare-and-set on it (FinishForSession), so a
+// late write from a superseded goroutine cannot clobber the artifact /
+// token / status of the attempt that replaced it.
+//
+// Empty = no session guard (the legacy unconditional write). That is the
+// right choice for rows whose session id the run never established (the
+// push/PR shell children, which do not run a claude session at all).
+func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker, hooks subTaskFinishHooks, attemptSID string) {
 	tokens := model.SubTaskTokens{
 		Input:         out.lastUsage.InputTokens,
 		Output:        out.lastUsage.OutputTokens,
@@ -2223,7 +2488,7 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		// Manual sub-task path: orchestration self-heal doesn't apply
 		// (batch_id='') so the session-id guard is unnecessary; pass "" to
 		// keep the legacy unconditional-write behavior.
-		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, "", modelName, tokens, costCents, startTime); perr != nil {
+		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, attemptSID, modelName, tokens, costCents, startTime); perr != nil {
 			log.Printf("[sub-task] failed to persist run-stats-on-stop for %s: %v", st.ID, perr)
 		}
 		r.saveThinking(st, out)
@@ -2286,7 +2551,13 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		artifactBody = "❌ Claude 未返回结果，请重试"
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 	default:
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		// The CLI's "result" event repeats the assistant's final text, which
+		// was already streamed as "message" lines. Emitting it again showed
+		// the user the same conclusion twice — a big part of the "the agent
+		// keeps answering the same thing" impression. Skip the duplicate.
+		if !out.resultRepeatsLastMessage {
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
 		artifactBody = out.finalResult
 		// A Review rewrites the raw model output into the artifact body
 		// BEFORE the artifact is built: the trailing JSON contract block is
@@ -2329,20 +2600,34 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		u, i, s, e := phaseTrack.flushBuffers()
 		return u, i, s, e
 	}()
+	// The terminal write is a compare-and-set on the attempt's session id
+	// (FinishForSession). A late write from a superseded goroutine — one
+	// whose row was re-claimed by a newer attempt — then matches nothing
+	// and is dropped, instead of overwriting the newer attempt's artifact,
+	// token counters and status.
+	//
+	// An empty attemptSID keeps the legacy unconditional write (the
+	// push/PR shell children, which never establish a claude session).
+	finish := func(expectedSessionID string) error {
+		if expectedSessionID != "" {
+			return r.subTaskSvc.FinishForSession(st.ID, expectedSessionID, finalStatus, artifact, modelName, tokens, costCents, startTime)
+		}
+		return r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime)
+	}
 	if usePhaseFinish && phaseEmitted {
 		if perr := r.subTaskSvc.FinishWithPhases(
 			st.ID, finalStatus, artifact,
 			struct{ Understanding, Implementation, Summary string }{understanding, implementation, summary},
-			modelName, tokens, costCents, startTime, "",
+			modelName, tokens, costCents, startTime, attemptSID,
 		); perr != nil {
 			log.Printf("[sub-task] failed to persist finish-with-phases for %s: %v", st.ID, perr)
 			// Fallback to legacy Finish so the row isn't left stuck in 'running'.
-			if perr2 := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr2 != nil {
+			if perr2 := finish(attemptSID); perr2 != nil {
 				log.Printf("[sub-task] failed to persist fallback Finish for %s: %v", st.ID, perr2)
 			}
 		}
 	} else {
-		if perr := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
+		if perr := finish(attemptSID); perr != nil {
 			log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
 		}
 	}

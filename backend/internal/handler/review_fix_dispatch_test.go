@@ -70,7 +70,7 @@ func TestCreateFixes_DispatchesTheFixSubTask(t *testing.T) {
 	jobLogSvc := service.NewJobLogService(d)
 	runner := NewSubTaskRunner(nil, subTaskSvc, reqSvc, jobs, nil, nil, jobLogSvc, nil, nil, nil, nil, nil, nil, 0, nil, nil, nil)
 
-	h := NewRequirementReviewHandler(reqSvc, nil, subTaskSvc, reviewSvc, nil, nil, nil, nil, runner, jobs)
+	h := NewRequirementReviewHandler(reqSvc, nil, subTaskSvc, reviewSvc, nil, nil, nil, nil, runner, jobs, nil)
 
 	body := strings.NewReader(`{"finding_ref":"P1-1"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/requirements/"+reqID+"/reviews/"+revID+"/fixes", body)
@@ -118,9 +118,26 @@ func TestCreateFixes_DispatchesTheFixSubTask(t *testing.T) {
 	if st.Source != model.SubTaskSourceManual {
 		t.Errorf("Source = %q, want %q", st.Source, model.SubTaskSourceManual)
 	}
-	if st.SessionMode != model.SubTaskSessionModeFork {
-		t.Errorf("SessionMode = %q, want %q (the fixer forks the developer's session)",
-			st.SessionMode, model.SubTaskSessionModeFork)
+	// The fixer's session mode defaults to "with_context", NOT "fork".
+	//
+	// Forking the developer's session handed the fixer the developer's FULL
+	// conversation (95 KB of prompt, 197 tool calls in the recorded
+	// incident), and the resulting context pollution is what made the model
+	// restate the same conclusion over and over. "with_context" gives the
+	// fixer a curated block (requirement + design docs + the parent's recent
+	// turns + sibling digests) instead.
+	//
+	// The "fork" mode stays reachable via settings (subtask.fix_session_mode)
+	// for the rare fixer that genuinely needs the whole transcript.
+	if st.SessionMode != model.SubTaskSessionModeWithContext {
+		t.Errorf("SessionMode = %q, want %q (the fixer gets a curated context, not the developer's full session)",
+			st.SessionMode, model.SubTaskSessionModeWithContext)
+	}
+	// The row must NOT claim a source session it never resumes: with the
+	// with_context mode there is no --resume, so source_session_id stays empty.
+	if st.SourceSessionID != "" {
+		t.Errorf("SourceSessionID = %q, want empty (a with_context fix resumes nothing)",
+			st.SourceSessionID)
 	}
 
 	// The stronger half of the assertion: the row must actually LEAVE

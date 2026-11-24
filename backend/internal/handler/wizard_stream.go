@@ -126,6 +126,16 @@ type claudeStreamCfg struct {
 	// that looks exactly like an external kill, and without this the run
 	// was reported as 终止原因=none — i.e. nobody was blamed for it.
 	ctx context.Context
+	// onStarted, when non-nil, is invoked right after the subprocess was
+	// successfully started, with the child's pid.
+	//
+	// It exists so the caller can persist the child's OS identity BEFORE
+	// the run begins: the sub-task runner writes it to sub_tasks.child_pid
+	// so a restarted backend can find and kill the orphan (see
+	// service.SubTaskService.ReapOrphanChildren). Without it, a backend
+	// that dies mid-run leaves a claude child alive that keeps editing
+	// the requirement's worktree long after the UI said "error".
+	onStarted func(pid int)
 }
 
 // withStallTimeout overrides the per-stream stall (silence) window.
@@ -146,6 +156,12 @@ func withKillReason(k *claudeKillReason) claudeStreamOpt {
 // kill is attributed to that deadline instead of to the CLI.
 func withCtx(ctx context.Context) claudeStreamOpt {
 	return func(c *claudeStreamCfg) { c.ctx = ctx }
+}
+
+// withOnStarted registers a callback invoked with the child's pid right
+// after the subprocess starts. See claudeStreamCfg.onStarted.
+func withOnStarted(fn func(pid int)) claudeStreamOpt {
+	return func(c *claudeStreamCfg) { c.onStarted = fn }
 }
 
 // claudeKillReason records which code path terminated the claude subprocess.
@@ -839,7 +855,21 @@ type claudeStreamOutcome struct {
 	// produced nothing. Handlers use it to pick the honest message and to
 	// decide whether a degraded re-run is worth attempting.
 	emptyResult bool
-	planContent string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// lastMessageText is the text of the last "message" line this run
+	// emitted (the assistant's prose, streamed as text_delta fragments or as
+	// an assistant text block).
+	//
+	// It exists to answer "would the result line repeat what the user just
+	// read?": the CLI's "result" event carries the SAME text the assistant
+	// already streamed, so emitting both rendered every conclusion TWICE —
+	// a large part of the "the agent keeps answering the same thing"
+	// impression.
+	lastMessageText string
+	// resultRepeatsLastMessage is true when the "result" event's text is
+	// identical to lastMessageText. Emitters of the "result" log line skip
+	// it in that case (the content is already on screen).
+	resultRepeatsLastMessage bool
+	planContent              string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// streamText accumulates every text fragment the assistant emits via
 	// stream_event text_delta or assistant-event text blocks. Populated as
 	// text lands so a plan-mode run whose model streamed the plan but did
@@ -1163,6 +1193,14 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		log.Printf("[%s] exec diag: cmd.Start() failed: %T %v", scope, err, err)
 		return claudeStreamOutcome{errMsg: explainExecError(err)}
 	}
+	// Hand the caller the child's pid now that it exists. The sub-task
+	// runner persists it so a restarted backend can reap the orphan (see
+	// service.SubTaskService.ReapOrphanChildren) — the window between
+	// "process spawned" and "pid persisted" is exactly the window in which
+	// a SIGKILLed backend used to leak a live agent.
+	if cfg.onStarted != nil && cmd.Process != nil {
+		cfg.onStarted(cmd.Process.Pid)
+	}
 	logClaudeEnvConfig(scope, cmd)
 	logClaudeCmd(scope, cmd)
 
@@ -1335,6 +1373,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 						continue
 					}
 					out.hadStreamEvents = true
+					out.lastMessageText += text
 					sink.emit(store.LogLine{Type: "message", Content: text})
 					if phaseSink != nil {
 						phaseSink(text)
@@ -1347,18 +1386,18 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					// tool input being assembled — not surfaced to the client
 				}
 			case "content_block_start":
-				// A new tool_use block starting — surface the tool name immediately
-				// so the user sees "calling tool X" before the input is assembled.
-				block, _ := inner["content_block"].(map[string]interface{})
-				if block == nil {
-					continue
-				}
-				if block["type"] == "tool_use" {
-					toolName, _ := block["name"].(string)
-					if toolName != "" {
-						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, nil)})
-					}
-				}
+				// A new tool_use block starting.
+				//
+				// It used to emit a BARE tool label here ("calling tool X",
+				// no input). That produced the SAME tool call twice in the
+				// live log: once bare from this event and once with full
+				// input from the "assistant" event that carries the
+				// complete message. The user saw each tool twice.
+				//
+				// The "assistant" event always carries the tool_use block
+				// with its full input, so the single emission there is
+				// both complete and unique. Nothing is emitted here.
+				continue
 			}
 		case "assistant":
 			// The model was reached — record it so the post-mortem can tell
@@ -1449,17 +1488,22 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					if p := inputToolPath(toolName, input); p != "" {
 						out.toolFiles = append(out.toolFiles, p)
 					}
-					// Emit with full input context (content_block_start fired bare label already,
-					// but only if stream_event was delivered — safe to emit again, client dedupes by rendering order).
-					if !out.hadStreamEvents {
-						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
-					}
+					// Emit the tool call WITH its full input.
+					//
+					// The bare label that used to come from the
+					// content_block_start event is gone, so this is the
+					// ONE line per tool call. It is emitted even when
+					// stream events were delivered — the assistant event
+					// and the stream events describe the same tool call,
+					// and only the assistant event has the input.
+					sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
 				case "text":
 					// Only emit if we never received stream_event deltas for this turn,
 					// i.e. the model batches everything into the assistant event.
 					if !out.hadStreamEvents {
 						text, _ := b["text"].(string)
 						if text != "" {
+							out.lastMessageText = text
 							sink.emit(store.LogLine{Type: "message", Content: text})
 							if phaseSink != nil {
 								phaseSink(text)
@@ -1511,6 +1555,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
 				out.finalResult, _ = evt["result"].(string)
+				// The "result" event repeats the assistant's final text,
+				// which was already streamed as "message" lines. Remember
+				// whether the two are identical so the emitter can skip
+				// the duplicate "result" line.
+				out.resultRepeatsLastMessage = out.finalResult != "" &&
+					strings.TrimSpace(out.finalResult) == strings.TrimSpace(out.lastMessageText)
 				if out.finalResult == "" {
 					// The CLI said "success" and produced NOTHING. This is
 					// the shape of a turn that was eaten by an inherited
@@ -1888,6 +1938,7 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					text, _ := delta["text"].(string)
 					if text != "" {
 						out.hadStreamEvents = true
+						out.lastMessageText += text
 						sink.emit(store.LogLine{Type: "message", Content: text})
 						// Also accumulate into streamText as a tier-3 fallback
 						// for finalizeWikiRun (finalResult is the CLI's "result"
@@ -1899,12 +1950,11 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					tk.addDelta(th)
 				}
 			case "content_block_start":
-				block, _ := inner["content_block"].(map[string]interface{})
-				if block != nil && block["type"] == "tool_use" {
-					if name, _ := block["name"].(string); name != "" {
-						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(name, nil)})
-					}
-				}
+				// The bare tool label that used to be emitted here is
+				// gone — the "assistant" event carries the same tool call
+				// WITH its input, and emitting both showed every tool
+				// twice in the live log. See the runClaudeStream twin.
+				continue
 			}
 		case "assistant":
 			out.sawAssistant = true
@@ -1944,12 +1994,13 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					if p := inputToolPath(toolName, input); p != "" {
 						out.toolFiles = append(out.toolFiles, p)
 					}
-					if !out.hadStreamEvents {
-						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
-					}
+					// The ONE line per tool call — see the runClaudeStream
+					// twin for why the bare label was removed.
+					sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
 				case "text":
 					if !out.hadStreamEvents {
 						if text, _ := b["text"].(string); text != "" {
+							out.lastMessageText = text
 							sink.emit(store.LogLine{Type: "message", Content: text})
 							// Also accumulate into streamText (mirror of the
 							// local-path text branch above) so the wiki tier-3
@@ -1982,6 +2033,10 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
 				out.finalResult, _ = evt["result"].(string)
+				// The "result" event repeats the assistant's final text —
+				// see the runClaudeStream twin.
+				out.resultRepeatsLastMessage = out.finalResult != "" &&
+					strings.TrimSpace(out.finalResult) == strings.TrimSpace(out.lastMessageText)
 				if out.finalResult == "" {
 					out.emptyResult = true
 				}

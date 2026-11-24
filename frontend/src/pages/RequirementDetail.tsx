@@ -1201,6 +1201,13 @@ export default function RequirementDetail() {
   // a value that differs from the auto value as "the user deliberately
   // chose this" and pins the base, killing the inheritance for good.
   //
+  // The latch below is per REQUIREMENT, and that is load-bearing: App.tsx
+  // mounts this page with key={id}, so switching to another requirement
+  // remounts it and the latch starts over. React Router would otherwise
+  // keep THIS instance mounted across an :id change, and the picker would
+  // keep the PREVIOUS requirement's base — the backend would then read
+  // that stale value as an explicit choice and freeze it.
+  //
   // After the first seed, user customisation wins — the effect
   // short-circuits so mid-session project-metadata edits can't clobber an
   // in-flight design/coding choice.
@@ -4323,6 +4330,14 @@ export default function RequirementDetail() {
           >
             {t('requirements.detail2.closedBadge')}
           </span>
+        )}
+        {/* Cross-project requirement: this row is one of the sub-requirements
+            of a 跨项目需求. Rendered as a link so the user can jump back to
+            the overall design / the progress of the sibling repositories. */}
+        {req.cross_requirement_id && (
+          <Link to={`/cross-requirements/${req.cross_requirement_id}`} className="status-badge">
+            {t('requirements.detail2.crossRequirementBadge')}
+          </Link>
         )}
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         {/* Marks (preset chip selector) — inline 多选切换。位于 priority 与

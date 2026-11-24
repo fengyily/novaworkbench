@@ -559,3 +559,52 @@ func TestOrderSplitTasks_MissingOrderKeepsPosition(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateChildren_NoBranchMasterFallsBackToProjectDefault pins the
+// no_branch rule on the SPLIT creation path.
+//
+// A master in "develop on base" mode has no branch of its own, so there is
+// nothing for the children to inherit — they fall back to the project
+// default, exactly like the resolver would resolve it (and exactly like the
+// manual creation path does).
+//
+// Before the rule was shared, the split path persisted the master's OWN
+// base while the resolver computed the project default: the frontend then
+// seeded the children's BASE picker with the project default and the next
+// run rewrote the persisted value, so the children's PR targets drifted away
+// from what the children actually developed on.
+func TestCreateChildren_NoBranchMasterFallsBackToProjectDefault(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	// The master develops on "develop" — NOT the project default ("main") —
+	// and it does so without a branch of its own.
+	if _, err := svc.db.Exec(
+		`INSERT INTO requirements (id, project_id, title, description, status, base_branch, base_branch_source, no_branch, dev_delegated, split_batch_id)
+		 VALUES (?, ?, ?, '', ?, ?, ?, 1, 0, '')`,
+		"req_master", "proj_a", "大需求", "designed", "develop", model.BaseSourceExplicit,
+	); err != nil {
+		t.Fatalf("insert master: %v", err)
+	}
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	children, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{})
+	if err != nil {
+		t.Fatalf("CreateChildren: %v", err)
+	}
+	for _, c := range children {
+		if c.BaseBranch != "main" {
+			t.Errorf("child %s base_branch = %q, want %q", c.ID, c.BaseBranch, "main")
+		}
+		if c.BaseBranchSource != model.BaseSourceParent {
+			t.Errorf("child %s base_branch_source = %q, want %q", c.ID, c.BaseBranchSource, model.BaseSourceParent)
+		}
+		// The read path must resolve the very same value, otherwise the
+		// persisted base is one the resolver would never reproduce.
+		if c.BaseBranchEffective != "main" {
+			t.Errorf("child %s base_branch_effective = %q, want %q", c.ID, c.BaseBranchEffective, "main")
+		}
+	}
+}
