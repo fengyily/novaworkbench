@@ -29,10 +29,12 @@ import { ExecEnvBadge } from './ExecEnvBadge';
 import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentitySelect';
 import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
+import { FullscreenButton } from './FullscreenButton';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { createReplaySkipper } from '../utils/jobStream';
 import { modelContextWindow } from '../utils/modelWindow';
+import { useFullscreen } from '../utils/useFullscreen';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload';
@@ -2454,6 +2456,67 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // the project gate runs one child at a time, so "the one that is
   // running" is unambiguous and the user should not have to click first.
   const [followRunning, setFollowRunning] = useState<boolean>(true);
+  // ── Split-column width + drag state ─────────────────────────────────
+  // Lazily initialised so the FIRST frame already carries the restored
+  // width — no flash at 300px before the stored value lands.
+  const [asideWidth, setAsideWidth] = useState<number>(readStoredAsideWidth);
+  const [resizing, setResizing] = useState<boolean>(false);
+  const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
+  // The width as of the LAST pointermove. `pointerup` reads this instead
+  // of `asideWidth`, whose closure would still hold the previous render's
+  // value.
+  const asideWidthRef = useRef<number>(asideWidth);
+  asideWidthRef.current = asideWidth;
+
+  // Fullscreen is a CSS-class toggle only (see useFullscreen) — the card
+  // tree below is never unmounted, so a running SSE stream survives it.
+  const fs = useFullscreen();
+
+  const onResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    // Left button only: a right-click should open a context menu, not
+    // start a resize.
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();                              // no text selection
+    e.currentTarget.setPointerCapture(e.pointerId); // keep getting moves outside the handle
+    resizeRef.current = { startX: e.clientX, startW: asideWidthRef.current };
+    setResizing(true);
+  }, []);
+
+  const onResizeMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const ctx = resizeRef.current;
+    if (!ctx) return;                                // not dragging
+    e.preventDefault();
+    const next = Math.min(ASIDE_W_MAX, Math.max(ASIDE_W_MIN, ctx.startW + (e.clientX - ctx.startX)));
+    asideWidthRef.current = next;
+    setAsideWidth(next);
+  }, []);
+
+  const onResizeEnd = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!resizeRef.current) return;   // idempotent: pointerup AND lostpointercapture both land here
+    resizeRef.current = null;
+    setResizing(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // already released
+    }
+    persistAsideWidth(asideWidthRef.current);
+  }, []);
+
+  const onResizeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft') next = asideWidthRef.current - 16;
+    else if (e.key === 'ArrowRight') next = asideWidthRef.current + 16;
+    else if (e.key === 'Home') next = ASIDE_W_MIN;
+    else if (e.key === 'End') next = ASIDE_W_MAX;
+    if (next === null) return;
+    e.preventDefault();              // don't scroll the page with the arrows
+    const clamped = Math.min(ASIDE_W_MAX, Math.max(ASIDE_W_MIN, next));
+    asideWidthRef.current = clamped;
+    setAsideWidth(clamped);
+    persistAsideWidth(clamped);
+  }, []);
+
   // The newest requirement the panel has been told about. loadList closes
   // over the requirementId it was created for, so a request still in flight
   // when the user switches requirements would otherwise land the PREVIOUS
@@ -2889,6 +2952,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     walk(tree);
     return out;
   }, [tree]);
+  // The detail column's header shows which sub-task is on display.
+  const selectedTitle = useMemo(() => {
+    const hit = flatAll.find((tn) => tn.node.id === selectedId);
+    if (!hit) return '';
+    return hit.node.title || t('components.subTaskCard.noTitle');
+  }, [flatAll, selectedId, t]);
   // Position of every row in `flatAll` (1-based). The tree rows and the
   // cards quote the SAME number, so the panel never shows two counters.
   const posOf = useMemo(() => {
