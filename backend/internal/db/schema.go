@@ -184,7 +184,20 @@ CREATE TABLE IF NOT EXISTS cross_requirements (
     created_by          TEXT NOT NULL DEFAULT 'user',
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    completed_at        DATETIME
+    completed_at        DATETIME,
+    -- deleted_at — 回收站标记。NULL = 不在回收站；非空 = 被移入回收站的时间。
+    --
+    -- 它与 status **正交**：status 是生命周期（草稿 → … → done / 归档），
+    -- deleted_at 是「这条要不要出现在列表里」。分开的理由是「归档」与「删除」
+    -- 是两件事 —— 归档是保留（只是收起来），删除是移进回收站（可恢复）。
+    --
+    -- **刻意不建索引**：这一列是通过 alterColumns 后补的（见 schema.go 的
+    -- ALTER 列表），而 canonical DDL 里的 CREATE INDEX 跑在 ALTER **之前** ——
+    -- 存量库上 CREATE TABLE 是 no-op（表早就存在、没有这列），于是建索引的
+    -- 语句会因「列不存在」直接失败，整个服务起不来。与 requirements.
+    -- cross_requirement_id 同一个坑（那边也是因此故意不索引）。
+    -- 这张表几十行，全表扫足够。
+    deleted_at          DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_xreq_status ON cross_requirements(status);
 
@@ -1968,6 +1981,14 @@ var alterColumns = []string{
 	// 重算掉 —— 人工的判断被读路径悄悄推翻。同 alterColumns 的其它条目：
 	// 「duplicate column」错误会被吞掉，重复执行安全。
 	`ALTER TABLE cross_requirements ADD COLUMN status_locked INTEGER NOT NULL DEFAULT 0`,
+	// deleted_at: 回收站标记（NULL = 不在回收站）。跨项目需求的「删除」是
+	// **可恢复**的 —— 移进回收站，而不是当场抹掉。
+	//
+	// 与 status 正交：status 是生命周期，deleted_at 是「这条还出现在列表里吗」。
+	// 分开是因为「归档」（保留，收起来）与「删除」（移走，可恢复）是两件事。
+	//
+	// 可空且无默认值 —— 存量行的值自然是 NULL，即「不在回收站」。
+	`ALTER TABLE cross_requirements ADD COLUMN deleted_at DATETIME`,
 	// base_branch: 参与项目的基础分支（逐项目指定）。空串 = 该子需求沿用项目
 	// 默认分支。
 	//
