@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 	}
 
 	// 约定被收集到，并且带着仓库归属。
-	docs := h.crossConventions(x.ID)
+	docs := h.crossConventions(x.ID, nil)
 	if len(docs) != 1 {
 		t.Fatalf("conventions = %d, want 1", len(docs))
 	}
@@ -77,7 +78,7 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 	// 提示词里有约定 —— 用**作业自己的**组装入口（crossDesignPrompt /
 	// crossSplitPrompt / crossPhasePrompt），这样「作业忘了把约定带进提示词」
 	// 会被这条断言抓住。
-	projects, err := h.crossProjectInputs(x.ID)
+	projects, err := h.crossProjectInputs(x.ID, nil)
 	if err != nil {
 		t.Fatalf("project inputs: %v", err)
 	}
@@ -85,11 +86,11 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get cross requirement: %v", err)
 	}
-	designPrompt := h.crossDesignPrompt(xrow, projects, "")
+	designPrompt := h.crossDesignPrompt(xrow, projects, "", nil)
 	if !strings.Contains(designPrompt, "所有组件必须写单测") {
 		t.Fatalf("design prompt lost the convention:\n%s", designPrompt)
 	}
-	splitPrompt := h.crossSplitPrompt(xrow, "## 整体方案\n\n方案正文\n", projects)
+	splitPrompt := h.crossSplitPrompt(xrow, "## 整体方案\n\n方案正文\n", projects, nil)
 	if !strings.Contains(splitPrompt, "所有组件必须写单测") {
 		t.Fatalf("split prompt lost the convention:\n%s", splitPrompt)
 	}
@@ -110,10 +111,17 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 
 	// **CLI 真正收到的那份**（opts.Prompt）里也有约定 —— 这一条才是 P1-1 的
 	// 回归断言：约定曾经在 opts 构造之后才被拼上去，于是从未到达 CLI。
+	// 作业读到的是**工作区**里的隔离 worktree（降级时是共享检出）。
+	// 本测试的仓库不是 git 仓库，所以基线锁不上，读取路径退回共享检出 ——
+	// 这正是降级路径要保证的事。
+	ws, err := h.buildCrossWorkspace(context.Background(), x.ID, nil)
+	if err != nil {
+		t.Fatalf("build workspace: %v", err)
+	}
 	opts := h.crossStreamOpts(crossJobSpec{
-		Prompt:             promptText,
-		WorkDir:            t.TempDir(),
-		CrossRequirementID: x.ID,
+		Prompt:    promptText,
+		WorkDir:   t.TempDir(),
+		Workspace: ws,
 	})
 	if !strings.Contains(opts.Prompt, "所有组件必须写单测") {
 		t.Fatalf("opts.Prompt lost the convention:\n%s", opts.Prompt)
@@ -146,7 +154,7 @@ func TestCrossJobPromptPrefersManagedConvention(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	docs := h.crossConventions(x.ID)
+	docs := h.crossConventions(x.ID, nil)
 	if len(docs) != 1 {
 		t.Fatalf("conventions = %d, want 1", len(docs))
 	}
@@ -178,7 +186,7 @@ func TestCrossJobPromptWithoutConventions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	docs := h.crossConventions(x.ID)
+	docs := h.crossConventions(x.ID, nil)
 	if len(docs) != 0 {
 		t.Fatalf("conventions = %d, want 0", len(docs))
 	}

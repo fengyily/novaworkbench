@@ -3,11 +3,16 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import MarkdownRender from '../components/MarkdownRender';
 import CrossJobPanel, { type CrossJobLine } from '../components/CrossJobPanel';
+import CrossRequirementEditForm from '../components/CrossRequirementForm/CrossRequirementEditForm';
+import CrossRequirementPurgeDialog from '../components/CrossRequirementPurgeDialog';
+import { rewriteNovaLinks } from '../components/RichDescriptionEditor/rewriteNovaLinks';
 import { createEventStream, type EventStream } from '../api/stream';
 import {
+  ApiError,
   crossRequirementsApi,
   fsApi,
   projectsApi,
+  type CrossRequirementBase,
   type CrossRequirementChild,
   type CrossRequirementDetail as Detail,
   type CrossRequirementPhase,
@@ -106,13 +111,33 @@ export default function CrossRequirementDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // ── 回收站 ──────────────────────────────────────────────────────────────
+  //
+  // 删除是两步的：移进回收站（可恢复）→ 彻底删除（不可恢复）。这一页的
+  // 「移到回收站」是软删 —— 不需要确认框，做完给一条提示就行（可撤销的
+  // 动作，确认框只会变成噪音）。
+  //
+  // 回收站里的行是**只读**的：整体方案 / 拆分 / 联调都做不了，后端也一律
+  // 拒绝（409 XREQ_IN_TRASH）。所以这一页要显示一条横幅说清楚现在是什么状态，
+  // 并把写入口置灰 —— 否则用户会以为按钮坏了。
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeAck, setPurgeAck] = useState(false);
+  const [purging, setPurging] = useState(false);
+
   // design editing
   const [editingDesign, setEditingDesign] = useState(false);
   const [designDraft, setDesignDraft] = useState('');
 
+  // description editing — the inline panel replaces the read-only view.
+  const [editingDescription, setEditingDescription] = useState(false);
+
   // split confirmation
   const [candidates, setCandidates] = useState<CrossSplitCandidate[]>([]);
   const [confirming, setConfirming] = useState(false);
+  // splitPanelRef — the inline confirmation panel. It used to be a modal
+  // (fixed overlay, always in view); as an inline panel it has to be
+  // scrolled to, or the user presses 「拆分」 and sees nothing happen.
+  const splitPanelRef = useRef<HTMLElement | null>(null);
   // confirmingSplit — the confirm request is in flight. The button is
   // disabled while it is: a double click would otherwise fire two confirms.
   // The server refuses the second one (409 XREQ_ALREADY_SPLIT), but the
@@ -189,11 +214,66 @@ export default function CrossRequirementDetailPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // ── 回收站动作 ──────────────────────────────────────────────────────────
+
+  // 移到回收站：软删，可恢复 —— 所以没有确认框，只给一条提示。
+  const moveToTrash = async () => {
+    if (!xreqId) return;
+    try {
+      await crossRequirementsApi.trash(xreqId);
+      setToast(t('crossRequirements.trash.movedToTrash'));
+      await load();
+    } catch (err) {
+      // 连点两次：第二个请求撞上「已经在回收站里了」—— 那恰恰是想要的结果。
+      if (err instanceof ApiError && err.code === 'XREQ_IN_TRASH') {
+        setToast(t('crossRequirements.trash.movedToTrash'));
+        await load();
+        return;
+      }
+      setError(errorMessage(err));
+    }
+  };
+
+  const restoreFromTrash = async () => {
+    if (!xreqId) return;
+    try {
+      await crossRequirementsApi.restore(xreqId);
+      setToast(t('crossRequirements.detail.restored'));
+      await load();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const confirmPurge = async () => {
+    if (!xreqId || purging) return;
+    setPurging(true);
+    try {
+      await crossRequirementsApi.purge(xreqId);
+      setPurgeOpen(false);
+      setPurgeAck(false);
+      // 行没了 —— 回列表，不要停在一个永远 404 的详情页上。
+      navigate('/cross-requirements');
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPurging(false);
+    }
+  };
+
   useEffect(() => {
     projectsApi.list()
       .then(list => setAllProjects(Array.isArray(list) ? list : []))
       .catch(() => setAllProjects([]));
   }, []);
+
+  // The split confirmation is an inline panel now, so it has to be scrolled
+  // into view — as a modal it was always in the user's face, and pressing
+  // 「拆分」 with nothing visibly happening reads as a broken button.
+  useEffect(() => {
+    if (!confirming) return;
+    splitPanelRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [confirming]);
 
   // Seed the drafts from the current participating project set (with their
   // role and base branch) when the editor opens.
@@ -703,6 +783,10 @@ export default function CrossRequirementDetailPage() {
   const design = designMarkdown(detail.design_docs);
   const progress = detail.progress;
   const projectRows = detail.projects || [];
+  // Baseline ledger: which commit each repository's design was written
+  // against (written by the overall-design job).
+  const baselineByProject: Record<string, CrossRequirementBase> = {};
+  for (const b of detail.bases || []) baselineByProject[b.project_id] = b;
   // The panel title names the job that is currently driving it.
   const jobTitle = jobKind === 'split'
     ? t('crossRequirements.job.splitTitle')
@@ -713,6 +797,9 @@ export default function CrossRequirementDetailPage() {
   // path) and the children themselves (rows written by an earlier build
   // carry no batch id). Either way the server refuses a second split.
   const alreadySplit = !!detail.split_batch_id || children.length > 0;
+  // 回收站里的行是只读的 —— 后端一律拒绝写操作（409 XREQ_IN_TRASH），所以
+  // 写入口要在 UI 上也置灰，并给一条横幅说明现在是什么状态。
+  const inTrash = !!detail.deleted_at;
 
   return (
     <div className="xreq-page">
@@ -731,7 +818,8 @@ export default function CrossRequirementDetailPage() {
             type="button"
             className="btn"
             onClick={startDesign}
-            disabled={jobRunning || projectRows.length === 0}
+            disabled={jobRunning || inTrash || projectRows.length === 0}
+            title={inTrash ? t('crossRequirements.detail.inTrash') : undefined}
           >
             {design
               ? t('crossRequirements.detail.regenerateDesign')
@@ -744,15 +832,124 @@ export default function CrossRequirementDetailPage() {
             // A cross requirement is split at most once — the server refuses
             // a second split (409 XREQ_ALREADY_SPLIT), so the button is
             // disabled instead of leading the user into a dead end.
-            disabled={jobRunning || !design || alreadySplit}
-            title={alreadySplit ? t('crossRequirements.detail.alreadySplit') : undefined}
+            disabled={jobRunning || inTrash || !design || alreadySplit}
+            title={inTrash
+              ? t('crossRequirements.detail.inTrash')
+              : alreadySplit ? t('crossRequirements.detail.alreadySplit') : undefined}
           >
             {t('crossRequirements.detail.split')}
           </button>
+          {/* 回收站：软删（可恢复，无需确认框）与恢复 / 彻底删除。 */}
+          {inTrash ? (
+            <>
+              <button
+                type="button"
+                className="btn"
+                onClick={restoreFromTrash}
+                disabled={purging}
+              >
+                {t('crossRequirements.trash.restore')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => { setPurgeAck(false); setPurgeOpen(true); }}
+                disabled={purging}
+              >
+                {t('crossRequirements.trash.purge')}
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn" onClick={moveToTrash}>
+              {t('crossRequirements.trash.moveToTrash')}
+            </button>
+          )}
         </div>
       </div>
 
+      {/* 回收站横幅：这一页此刻是只读的，把原因和出路都写清楚。 */}
+      {inTrash && (
+        <div className="xreq-trash-banner">
+          <strong>{t('crossRequirements.detail.inTrash')}</strong>
+          <span>{t('crossRequirements.detail.inTrashHint')}</span>
+        </div>
+      )}
+
+      {/* ── split confirmation ───────────────────────────────────────── */}
+      {/*
+          The split confirmation used to be a modal. It is an inline panel
+          now — and it sits right under the header rather than at the
+          bottom of the page, because the user just pressed 「拆分」 at the
+          top and has to be able to see what they are confirming without
+          scrolling past the whole page.
+      */}
+      {confirming && (
+        <section className="xreq-section xreq-split-panel" ref={splitPanelRef}>
+          <h2 className="xreq-section-title">{t('crossRequirements.split.title')}</h2>
+          {candidates.length === 0 ? (
+            <div className="xreq-hint">{t('crossRequirements.split.empty')}</div>
+          ) : (
+            <div className="xreq-candidates">
+              {candidates.map((c, i) => (
+                <div key={i} className="xreq-candidate">
+                  <div className="xreq-candidate-head">
+                    <span className="xreq-candidate-title">{c.title}</span>
+                    <span className="xreq-candidate-order">#{c.order}</span>
+                  </div>
+                  <div className="xreq-field">
+                    <span className="xreq-field-label">{t('crossRequirements.split.project')}</span>
+                    <select
+                      className="form-input"
+                      value={c.project_id}
+                      onChange={e => updateCandidateProject(i, e.target.value)}
+                    >
+                      <option value="">{'-'}</option>
+                      {projectRows.map(p => (
+                        <option key={p.project_id} value={p.project_id}>
+                          {p.project_name || p.project_id}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {c.depends_on.length > 0 && (
+                    <div className="xreq-hint">
+                      {t('crossRequirements.split.dependsOn')}：
+                      {c.depends_on.map(d => titleById.get(String(d)) || `#${d}`).join('、')}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="xreq-panel-actions">
+            <button type="button" className="btn" onClick={() => setConfirming(false)}>
+              {t('crossRequirements.common.cancel')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={confirmSplit}
+              disabled={candidates.length === 0 || confirmingSplit}
+            >
+              {confirmingSplit
+                ? t('crossRequirements.split.confirming')
+                : t('crossRequirements.split.confirm')}
+            </button>
+          </div>
+        </section>
+      )}
+
       {error && <div className="xreq-error">{error}</div>}
+      <CrossRequirementPurgeDialog
+        open={purgeOpen}
+        busy={purging}
+        title={detail.title}
+        childCount={children.length}
+        ack={purgeAck}
+        onAckChange={setPurgeAck}
+        onConfirm={confirmPurge}
+        onCancel={() => { if (!purging) { setPurgeOpen(false); setPurgeAck(false); } }}
+      />
       {toast && <div className="xreq-toast">{toast}</div>}
       {projectRows.length === 0 && (
         <div className="xreq-hint">{t('crossRequirements.noProjects')}</div>
@@ -776,6 +973,53 @@ export default function CrossRequirementDetailPage() {
         </div>
       </section>
 
+      {/* ── description ─────────────────────────────────────────────── */}
+      {/*
+          The description is the requirement's own brief: it goes to the AI
+          together with the overall design, and it is where inline images
+          live. It used to be invisible on this page — the row carried a
+          description nobody could read back.
+
+          The nova:// markers are rewritten here (not in the editor): the
+          stored text keeps the stable `nova://attachment/<id>` form, and
+          only the rendered copy points at the real bytes.
+      */}
+      <section className="xreq-section">
+        <div className="xreq-section-head">
+          <h2 className="xreq-section-title">{t('crossRequirements.detail.description')}</h2>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setEditingDescription(v => !v)}
+            disabled={inTrash}
+          >
+            {editingDescription
+              ? t('crossRequirements.common.cancel')
+              : t('crossRequirements.detail.edit')}
+          </button>
+        </div>
+
+        {editingDescription ? (
+          <CrossRequirementEditForm
+            requirement={detail}
+            onCancel={() => setEditingDescription(false)}
+            onSaved={async () => {
+              setEditingDescription(false);
+              await load();
+              setToast(t('crossRequirements.detail.edited'));
+            }}
+          />
+        ) : detail.description ? (
+          <div className="md-prose">
+            <MarkdownRender
+              content={rewriteNovaLinks(detail.description, detail.id, 'cross-requirements')}
+            />
+          </div>
+        ) : (
+          <div className="xreq-hint">{t('crossRequirements.detail.descriptionEmpty')}</div>
+        )}
+      </section>
+
       {/* ── participating projects ───────────────────────────────────── */}
       <section className="xreq-section">
         <div className="xreq-section-head">
@@ -784,6 +1028,7 @@ export default function CrossRequirementDetailPage() {
             type="button"
             className="btn btn-sm"
             onClick={() => setEditingProjects(v => !v)}
+            disabled={inTrash}
           >
             {editingProjects
               ? t('crossRequirements.common.cancel')
@@ -832,7 +1077,7 @@ export default function CrossRequirementDetailPage() {
                 );
               })}
             </div>
-            <div className="xreq-modal-actions">
+            <div className="xreq-panel-actions">
               <button type="button" className="btn" onClick={() => setEditingProjects(false)}>
                 {t('crossRequirements.common.cancel')}
               </button>
@@ -855,20 +1100,31 @@ export default function CrossRequirementDetailPage() {
                 <th>{t('crossRequirements.projectLabel')}</th>
                 <th>{t('crossRequirements.roleLabel')}</th>
                 <th>{t('crossRequirements.detail.baseBranch')}</th>
+                <th>{t('crossRequirements.detail.designBaseline')}</th>
                 <th>{t('crossRequirements.detail.matrix')}</th>
                 <th>{t('crossRequirements.detail.progress')}</th>
               </tr>
             </thead>
             <tbody>
-              {projectRows.map(p => (
-                <tr key={p.project_id}>
-                  <td>{p.project_name || p.project_id}</td>
-                  <td>{p.role || '-'}</td>
-                  <td>{p.base_branch || t('crossRequirements.detail.baseBranchDefault')}</td>
-                  <td>{p.total}</td>
-                  <td>{p.done}/{p.total}</td>
-                </tr>
-              ))}
+              {projectRows.map(p => {
+                const base = baselineByProject[p.project_id];
+                return (
+                  <tr key={p.project_id}>
+                    <td>{p.project_name || p.project_id}</td>
+                    <td>{p.role || '-'}</td>
+                    <td>{p.base_branch || t('crossRequirements.detail.baseBranchDefault')}</td>
+                    <td>
+                      {base?.base_sha
+                        ? base.base_sha.slice(0, 7)
+                        : base?.degraded
+                          ? t('crossRequirements.detail.designBaselineUnlocked')
+                          : '-'}
+                    </td>
+                    <td>{p.total}</td>
+                    <td>{p.done}/{p.total}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -883,6 +1139,7 @@ export default function CrossRequirementDetailPage() {
               type="button"
               className="btn btn-sm"
               onClick={() => { setDesignDraft(design); setEditingDesign(true); }}
+              disabled={inTrash}
             >
               {t('crossRequirements.detail.editDesign')}
             </button>
@@ -897,7 +1154,7 @@ export default function CrossRequirementDetailPage() {
               value={designDraft}
               onChange={e => setDesignDraft(e.target.value)}
             />
-            <div className="xreq-modal-actions">
+            <div className="xreq-panel-actions">
               <button type="button" className="btn" onClick={() => setEditingDesign(false)}>
                 {t('crossRequirements.common.cancel')}
               </button>
@@ -991,7 +1248,7 @@ export default function CrossRequirementDetailPage() {
       <section className="xreq-section">
         <div className="xreq-section-head">
           <h2 className="xreq-section-title">{t('crossRequirements.detail.phases')}</h2>
-          <button type="button" className="btn btn-sm" onClick={() => setAddingPhase(v => !v)}>
+          <button type="button" className="btn btn-sm" onClick={() => setAddingPhase(v => !v)} disabled={inTrash}>
             {t('crossRequirements.detail.addPhase')}
           </button>
         </div>
@@ -1024,7 +1281,7 @@ export default function CrossRequirementDetailPage() {
                 ))}
               </div>
             </div>
-            <div className="xreq-modal-actions">
+            <div className="xreq-panel-actions">
               <button type="button" className="btn" onClick={() => setAddingPhase(false)}>
                 {t('crossRequirements.common.cancel')}
               </button>
@@ -1053,7 +1310,7 @@ export default function CrossRequirementDetailPage() {
                     type="button"
                     className="btn btn-sm"
                     onClick={() => startVerify(phase.id)}
-                    disabled={jobRunning || !crossPhaseCanVerify(phase.status)}
+                    disabled={jobRunning || inTrash || !crossPhaseCanVerify(phase.status)}
                   >
                     {phase.verify_report
                       ? t('crossRequirements.detail.reverify')
@@ -1067,6 +1324,7 @@ export default function CrossRequirementDetailPage() {
                       type="button"
                       className="btn btn-sm"
                       onClick={() => setPhaseStatus(phase, 'ready')}
+                      disabled={inTrash}
                     >
                       {t('crossRequirements.detail.phaseReset')}
                     </button>
@@ -1075,6 +1333,7 @@ export default function CrossRequirementDetailPage() {
                     type="button"
                     className="btn btn-sm"
                     onClick={() => setPhaseStatus(phase, 'passed')}
+                    disabled={inTrash}
                   >
                     {t('crossRequirements.detail.verifyPassed')}
                   </button>
@@ -1082,6 +1341,7 @@ export default function CrossRequirementDetailPage() {
                     type="button"
                     className="btn btn-sm"
                     onClick={() => setPhaseStatus(phase, 'failed')}
+                    disabled={inTrash}
                   >
                     {t('crossRequirements.detail.verifyFailed')}
                   </button>
@@ -1089,6 +1349,7 @@ export default function CrossRequirementDetailPage() {
                     type="button"
                     className="btn btn-sm"
                     onClick={() => removePhase(phase)}
+                    disabled={inTrash}
                   >
                     {t('crossRequirements.detail.phaseDelete')}
                   </button>
@@ -1129,64 +1390,6 @@ export default function CrossRequirementDetailPage() {
         </section>
       )}
 
-      {/* ── split confirmation ───────────────────────────────────────── */}
-      {confirming && (
-        <div className="xreq-modal-overlay">
-          <div className="xreq-modal xreq-modal-wide">
-            <h2 className="xreq-modal-title">{t('crossRequirements.split.title')}</h2>
-            {candidates.length === 0 ? (
-              <div className="xreq-hint">{t('crossRequirements.split.empty')}</div>
-            ) : (
-              <div className="xreq-candidates">
-                {candidates.map((c, i) => (
-                  <div key={i} className="xreq-candidate">
-                    <div className="xreq-candidate-head">
-                      <span className="xreq-candidate-title">{c.title}</span>
-                      <span className="xreq-candidate-order">#{c.order}</span>
-                    </div>
-                    <div className="xreq-field">
-                      <span className="xreq-field-label">{t('crossRequirements.split.project')}</span>
-                      <select
-                        className="form-input"
-                        value={c.project_id}
-                        onChange={e => updateCandidateProject(i, e.target.value)}
-                      >
-                        <option value="">{'-'}</option>
-                        {projectRows.map(p => (
-                          <option key={p.project_id} value={p.project_id}>
-                            {p.project_name || p.project_id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    {c.depends_on.length > 0 && (
-                      <div className="xreq-hint">
-                        {t('crossRequirements.split.dependsOn')}：
-                        {c.depends_on.map(d => titleById.get(String(d)) || `#${d}`).join('、')}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="xreq-modal-actions">
-              <button type="button" className="btn" onClick={() => setConfirming(false)}>
-                {t('crossRequirements.common.cancel')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={confirmSplit}
-                disabled={candidates.length === 0 || confirmingSplit}
-              >
-                {confirmingSplit
-                  ? t('crossRequirements.split.confirming')
-                  : t('crossRequirements.split.confirm')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

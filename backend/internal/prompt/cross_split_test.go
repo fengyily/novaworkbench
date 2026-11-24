@@ -184,7 +184,7 @@ func TestBuildCrossContextBlock_Empty(t *testing.T) {
 // 整体方案的 prompt 必须带上参与项目与契约要求。
 func TestBuildCrossDesignPrompt(t *testing.T) {
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
-		[]string{"接口契约可核对"}, crossTestProjects(), "", nil)
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "")
 	if !strings.Contains(p, "跨仓库订单重构") {
 		t.Fatalf("prompt lost the title: %q", p)
 	}
@@ -202,13 +202,55 @@ func TestBuildCrossDesignPrompt_CarriesConventions(t *testing.T) {
 	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
 		[]string{"接口契约可核对"}, crossTestProjects(), "", []CrossProjectDoc{
 			{ProjectName: "web-app", Content: "前端约定：组件必须写单测。"},
-		})
+		}, "")
 	if !strings.Contains(p, "前端约定：组件必须写单测。") {
 		t.Fatalf("prompt lost the project convention: %q", p)
 	}
 	// 约定在输出契约**之前**：模型先读约定，再读契约。
 	if strings.Index(p, "前端约定") > strings.Index(p, "跨项目接口契约") {
 		t.Fatalf("the convention section must come before the output contract: %q", p)
+	}
+}
+
+// 整体方案的 prompt 必须带上用户上传的附件 —— 用户在需求里附了什么，AI 就该
+// 看到什么。附件块在输出契约**之前**：模型先读附件，再读契约。
+func TestBuildCrossDesignPrompt_CarriesAttachments(t *testing.T) {
+	manifest := "## 📎 已附加文件\n\n### 1. err.log  (1.0 KB)\n**位置**：`/root/.novaworkbench/attachments/xreq_1/att_a__ab12__err.log`\n"
+	p := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, manifest)
+	if !strings.Contains(p, "已附加文件") || !strings.Contains(p, "err.log") {
+		t.Fatalf("prompt lost the attachment manifest: %q", p)
+	}
+	if !strings.Contains(p, "att_a__ab12__err.log") {
+		t.Fatalf("prompt lost the attachment path: %q", p)
+	}
+	if strings.Index(p, "已附加文件") > strings.Index(p, "跨项目接口契约") {
+		t.Fatalf("the attachment section must come before the output contract: %q", p)
+	}
+}
+
+// 没有附件时提示词必须逐字节不变 —— 空清单一个字节都不写，这样已有的
+// 期望值不需要为「附件这个特性存在」而改。
+func TestBuildCrossDesignPrompt_NoAttachments(t *testing.T) {
+	withEmpty := BuildCrossDesignPrompt("跨仓库订单重构", "让三个端共用一套订单接口",
+		[]string{"接口契约可核对"}, crossTestProjects(), "", nil, "")
+	if strings.Contains(withEmpty, "已附加文件") {
+		t.Fatalf("an empty manifest must not produce an attachment section: %q", withEmpty)
+	}
+}
+
+// 拆分与阶段验证的 prompt 同样要带上附件。
+func TestBuildCrossSplitAndPhasePrompts_CarryAttachments(t *testing.T) {
+	manifest := "## 📎 已附加文件\n\n### 1. err.log  (1.0 KB)\n"
+
+	split := BuildCrossSplitPrompt("跨仓库订单重构", "## 整体方案", crossTestProjects(), nil, manifest)
+	if !strings.Contains(split, "err.log") {
+		t.Fatalf("split prompt lost the attachment manifest: %q", split)
+	}
+
+	phase := BuildCrossPhasePrompt("联调", "前后端打通", nil, "## 整体方案", nil, manifest)
+	if !strings.Contains(phase, "err.log") {
+		t.Fatalf("phase prompt lost the attachment manifest: %q", phase)
 	}
 }
 

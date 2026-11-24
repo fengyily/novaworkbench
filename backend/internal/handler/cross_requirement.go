@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -41,8 +40,25 @@ type CrossRequirementHandler struct {
 	roleSvc    *service.RoleService
 	claudeCfg  *service.ClaudeConfigService
 	usageSvc   usageRecorder
+	// worktreeH — 建跨项目需求的隔离 worktree（每个参与仓库一份，路径由
+	// 跨项目需求 ID 决定）。注入而不是走包级单例：包级单例在生产环境是
+	// nil（SetDefaultWorktreeHandler 从未被调用），走它会丢掉平台 token 的
+	// 凭据注入 —— 私有 HTTPS 仓库的 fetch 会拿不到授权。
+	worktreeH *WorktreeHandler
+	// settingSvc — 读 git 同步超时等 KV 设置。
+	settingSvc *service.SettingService
 	// runs — 进程内的作业登记处（状态 / 产物 / 并发闸门）。
 	runs *crossRequirementRuns
+	// attachSvc — 跨项目需求的附件存储（owner 列 cross_requirement_id）。
+	//
+	// 与需求 / Review 的附件服务同型，只是换了表与 owner 列。它让跨项目作业
+	// 的提示词能带上附件清单（attachManifestFor），并把描述里的
+	// nova://attachment/<id> 标记重写成真实磁盘路径
+	// （rewriteAttachmentMarkers）—— 否则模型看到的是一串打不开的协议串。
+	//
+	// 可能为 nil（未接线）：两个辅助函数都对 nil 做了处理，届时附件只是
+	// 不会出现在提示词里，不影响作业本身。
+	attachSvc *service.AttachmentService
 }
 
 // NewCrossRequirementHandler builds the handler.
@@ -55,6 +71,9 @@ func NewCrossRequirementHandler(
 	roleSvc *service.RoleService,
 	claudeCfg *service.ClaudeConfigService,
 	usageSvc usageRecorder,
+	worktreeH *WorktreeHandler,
+	settingSvc *service.SettingService,
+	attachSvc *service.AttachmentService,
 ) *CrossRequirementHandler {
 	return &CrossRequirementHandler{
 		svc:        svc,
@@ -65,6 +84,9 @@ func NewCrossRequirementHandler(
 		roleSvc:    roleSvc,
 		claudeCfg:  claudeCfg,
 		usageSvc:   usageSvc,
+		worktreeH:  worktreeH,
+		settingSvc: settingSvc,
+		attachSvc:  attachSvc,
 		runs:       newCrossRequirementRuns(crossRunsCap),
 	}
 }
@@ -415,11 +437,7 @@ func (h *CrossRequirementHandler) Update(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if err := h.svc.Update(id, body); err != nil {
-		if errors.Is(err, service.ErrCrossRequirementNotFound) {
-			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusBadRequest, "UPDATE_FAILED", "更新失败：")
 		return
 	}
 	if status != "" {
@@ -437,23 +455,162 @@ func (h *CrossRequirementHandler) Update(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// Delete removes a cross requirement. Its children are **detached**, not
-// deleted — the code / branches / PRs behind them must survive.
+// Delete moves a cross requirement to the trash.
+//
+// 软删，不是抹掉：跨项目需求被拆过之后，整体方案 / 联调阶段 / 跨项目依赖是
+// **不可再生产**的东西 —— 子需求里的代码还在，但「三个仓库怎么对齐」的上下文
+// 丢了就是丢了。所以删除先落到回收站，用户确认不要了再彻底删除。
+//
+// 子需求完全不受影响：它们继续在各自的项目里活着，开发不中断。
 func (h *CrossRequirementHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if h.svc == nil {
 		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
 		return
 	}
 	id := r.PathValue("id")
-	if err := h.svc.Delete(id); err != nil {
-		if errors.Is(err, service.ErrCrossRequirementNotFound) {
+	if err := h.svc.MoveToTrash(id); err != nil {
+		switch {
+		case errors.Is(err, service.ErrCrossRequirementNotFound):
 			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
-			return
+		case errors.Is(err, service.ErrCrossRequirementInTrash):
+			writeError(w, http.StatusConflict, "XREQ_IN_TRASH", "该跨项目需求已经在回收站里了")
+		default:
+			writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
 		}
-		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"trashed": true})
+}
+
+// Purge permanently removes a cross requirement that sits in the trash.
+//
+// 只有回收站里的行能被彻底删除（NOT_IN_TRASH 闸门）—— 误点在「进行中」的行
+// 上点彻底删除时，应该被挡下来并引导用户先走软删。
+//
+// 子需求**脱离**而不是被删：它们背后可能已经产出了代码、分支和 PR，级联删掉
+// 会造成不可恢复的损失。
+func (h *CrossRequirementHandler) Purge(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	// Read the baseline ledger BEFORE the purge: it is the only record of
+	// which worktrees this cross requirement created.
+	bases, _ := h.svc.ListBases(id)
+	if err := h.svc.Purge(id); err != nil {
+		switch {
+		case errors.Is(err, service.ErrCrossRequirementNotFound):
+			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+		case errors.Is(err, service.ErrCrossRequirementNotInTrash):
+			writeError(w, http.StatusConflict, "NOT_IN_TRASH", "该跨项目需求不在回收站里，无法彻底删除")
+		default:
+			writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		}
+		return
+	}
+	// The rows are gone; the filesystem artifacts they pointed at are not.
+	// Remove the per-repository worktrees and the job working directory so a
+	// purged cross requirement does not leave detached worktrees registered
+	// in the user's repositories.
+	h.cleanupCrossWorktrees(id, bases)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+// Restore brings a cross requirement back from the trash.
+//
+// 恢复后返回详情载荷（含按当前事实重算过的状态）—— 读路径的派生逻辑在这里
+// 就有机会跑一次，前端不必再拉一次详情。
+func (h *CrossRequirementHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.svc.Restore(id); err != nil {
+		switch {
+		case errors.Is(err, service.ErrCrossRequirementNotFound):
+			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+		case errors.Is(err, service.ErrCrossRequirementNotInTrash):
+			writeError(w, http.StatusConflict, "NOT_IN_TRASH", "该跨项目需求不在回收站里，无需恢复")
+		default:
+			writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", err.Error())
+		}
+		return
+	}
+	detail, err := h.svc.DetailFresh(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// Trash returns the cross requirements sitting in the trash, most recently
+// deleted first.
+//
+// 回收站里的行**不刷新派生状态**（状态冻结在「被移走的那一刻」），但子需求
+// 的进展照常聚合 —— 用户判断「这条还有没有用」靠的正是子需求做到哪一步了。
+func (h *CrossRequirementHandler) Trash(w http.ResponseWriter, r *http.Request) {
+	if h.svc == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "跨项目需求服务未启用")
+		return
+	}
+	items, err := h.svc.ListTrash()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	progress := map[string]model.CrossRequirementProgress{}
+	out := make([]model.CrossRequirement, 0, len(items))
+	ids := make([]string, 0, len(items))
+	for i := range items {
+		ids = append(ids, items[i].ID)
+	}
+	if agg, aggErr := h.svc.LoadAggregate(ids); aggErr == nil {
+		for i := range items {
+			progress[items[i].ID] = agg.Progress[items[i].ID]
+		}
+	} else {
+		log.Printf("[xreq] load trash aggregate: %v", aggErr)
+	}
+	out = append(out, items...)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    out,
+		"progress": progress,
+	})
+}
+
+// rejectIfTrashed refuses a write against a cross requirement that sits in
+// the trash.
+//
+// 回收站里的行是**只读**的：整体方案 / 拆分 / 阶段 / 验证 / 改参与项目一律
+// 拒绝。否则用户会在垃圾堆里干活，而作业跑完会把结果写回一条已经被「删掉」
+// 的行。
+func rejectIfTrashed(w http.ResponseWriter, xreq *model.CrossRequirement) bool {
+	if xreq == nil || xreq.DeletedAt == "" {
+		return false
+	}
+	writeError(w, http.StatusConflict, "XREQ_IN_TRASH", "该跨项目需求在回收站中，请先恢复再操作")
+	return true
+}
+
+// writeCrossErr maps a service-layer error onto the HTTP status the
+// cross-requirement endpoints use.
+//
+// 「在回收站里」是 409 而不是 400：请求本身合法，只是这条实体此刻不可写 ——
+// 前端要靠这个码把按钮置灰 / 提示「请先恢复」，而不是弹一个看不懂的报错。
+func writeCrossErr(w http.ResponseWriter, err error, genericStatus int, genericCode, genericMsg string) {
+	switch {
+	case errors.Is(err, service.ErrCrossRequirementNotFound):
+		writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+	case errors.Is(err, service.ErrCrossRequirementInTrash):
+		writeError(w, http.StatusConflict, "XREQ_IN_TRASH", "该跨项目需求在回收站中，请先恢复再操作")
+	case errors.Is(err, service.ErrCrossRequirementNotInTrash):
+		writeError(w, http.StatusConflict, "NOT_IN_TRASH", "该跨项目需求不在回收站里")
+	default:
+		writeError(w, genericStatus, genericCode, genericMsg+err.Error())
+	}
 }
 
 // SetProjects replaces the participating project set.
@@ -473,7 +630,7 @@ func (h *CrossRequirementHandler) SetProjects(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusBadRequest, "DUPLICATE_PROJECT", err.Error())
 			return
 		}
-		writeError(w, http.StatusBadRequest, "SET_PROJECTS_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusBadRequest, "SET_PROJECTS_FAILED", "设置参与项目失败：")
 		return
 	}
 	projects, err := h.svc.ListProjects(id)
@@ -512,7 +669,7 @@ func (h *CrossRequirementHandler) SaveDesign(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := h.svc.SaveDesign(id, markdown, "", ""); err != nil {
-		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusInternalServerError, "SAVE_FAILED", "保存失败：")
 		return
 	}
 	if err := h.svc.RefreshDerivedStatus(id); err != nil {
@@ -561,10 +718,8 @@ func (h *CrossRequirementHandler) ConfirmSplit(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadRequest, "SPLIT_DEPENDENCY_CYCLE", "前置依赖成环，无法创建子需求")
 		case errors.Is(err, service.ErrCrossAlreadySplit):
 			writeError(w, http.StatusConflict, "XREQ_ALREADY_SPLIT", "该跨项目需求已经拆分过了，不能重复拆分")
-		case errors.Is(err, service.ErrCrossRequirementNotFound):
-			writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
 		default:
-			writeError(w, http.StatusInternalServerError, "SPLIT_CREATE_FAILED", err.Error())
+			writeCrossErr(w, err, http.StatusInternalServerError, "SPLIT_CREATE_FAILED", "创建子需求失败：")
 		}
 		return
 	}
@@ -598,7 +753,7 @@ func (h *CrossRequirementHandler) CreatePhase(w http.ResponseWriter, r *http.Req
 	}
 	phase, err := h.svc.CreatePhase(id, body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "CREATE_PHASE_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusBadRequest, "CREATE_PHASE_FAILED", "创建阶段失败：")
 		return
 	}
 	writeJSON(w, http.StatusCreated, phase)
@@ -619,7 +774,7 @@ func (h *CrossRequirementHandler) UpdatePhase(w http.ResponseWriter, r *http.Req
 	}
 	phase, err := h.svc.UpdatePhase(id, phaseID, body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "UPDATE_PHASE_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusBadRequest, "UPDATE_PHASE_FAILED", "更新阶段失败：")
 		return
 	}
 	writeJSON(w, http.StatusOK, phase)
@@ -634,7 +789,7 @@ func (h *CrossRequirementHandler) DeletePhase(w http.ResponseWriter, r *http.Req
 	id := r.PathValue("id")
 	phaseID := r.PathValue("pid")
 	if err := h.svc.DeletePhase(id, phaseID); err != nil {
-		writeError(w, http.StatusBadRequest, "DELETE_PHASE_FAILED", err.Error())
+		writeCrossErr(w, err, http.StatusBadRequest, "DELETE_PHASE_FAILED", "删除阶段失败：")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
@@ -642,28 +797,25 @@ func (h *CrossRequirementHandler) DeletePhase(w http.ResponseWriter, r *http.Req
 
 // ── 工具 ───────────────────────────────────────────────────────────────────
 
-// crossWorkDir creates the scratch working directory for a cross-requirement
-// job.
-//
-// 跨项目需求不属于任何单一项目，所以它没有 worktree 可用 —— 用一个临时目录做
-// 工作区，各参与项目通过 --add-dir 授权只读访问（D5）。临时目录保证了对 N 个
-// 仓库的对称性：用某个项目的 worktree 会让模型误以为那是「主仓库」。
-func crossWorkDir(prefix string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "nova-xreq-"+prefix+"-")
-	if err != nil {
-		return "", func() {}, err
-	}
-	return dir, func() { _ = os.RemoveAll(dir) }, nil
-}
-
 // crossProjectInputs assembles the participating projects for a prompt.
+//
+// The path handed to the model is the **workspace read path** — the detached
+// worktree pinned to the locked baseline commit, not the shared checkout.
+// The baseline SHA rides along so the model can tell exactly which tree it is
+// reasoning about.
 //
 // A project whose checkout is missing (deleted / not cloned yet) still appears
 // in the list — the model must know it exists — but it contributes no path.
-func (h *CrossRequirementHandler) crossProjectInputs(xreqID string) ([]prompt.CrossProjectInput, error) {
+func (h *CrossRequirementHandler) crossProjectInputs(xreqID string, ws *crossWorkspace) ([]prompt.CrossProjectInput, error) {
 	projects, err := h.svc.ListProjects(xreqID)
 	if err != nil {
 		return nil, err
+	}
+	byProject := map[string]crossWorkspaceProject{}
+	if ws != nil {
+		for _, p := range ws.Projects {
+			byProject[p.ProjectID] = p
+		}
 	}
 	out := make([]prompt.CrossProjectInput, 0, len(projects))
 	for _, p := range projects {
@@ -673,43 +825,27 @@ func (h *CrossRequirementHandler) crossProjectInputs(xreqID string) ([]prompt.Cr
 			Role:       p.Role,
 			BaseBranch: strings.TrimSpace(p.BaseBranch),
 		}
+		var localPath string
 		if h.projectSvc != nil {
 			if proj, pErr := h.projectSvc.Get(p.ProjectID); pErr == nil && proj != nil {
-				item.Path = strings.TrimSpace(proj.LocalPath)
 				item.Summary = strings.TrimSpace(proj.Description)
+				localPath = strings.TrimSpace(proj.LocalPath)
 			}
+		}
+		if wp, ok := byProject[p.ProjectID]; ok {
+			item.Path = wp.ReadPath()
+			item.BaseSHA = wp.BaseSHA
+			if item.BaseBranch == "" {
+				item.BaseBranch = wp.BaseBranch
+			}
+		} else {
+			// No workspace entry (the job did not build one) — fall back to
+			// the shared checkout so the model still has something to read.
+			item.Path = localPath
 		}
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-// crossProjectDirs returns the local paths of the participating projects —
-// the directories handed to the CLI via --add-dir.
-func (h *CrossRequirementHandler) crossProjectDirs(xreqID string) []string {
-	projects, err := h.svc.ListProjects(xreqID)
-	if err != nil {
-		return nil
-	}
-	dirs := []string{}
-	for _, p := range projects {
-		if h.projectSvc == nil {
-			continue
-		}
-		proj, pErr := h.projectSvc.Get(p.ProjectID)
-		if pErr != nil || proj == nil {
-			continue
-		}
-		path := strings.TrimSpace(proj.LocalPath)
-		if path == "" {
-			continue
-		}
-		if st, sErr := os.Stat(path); sErr != nil || !st.IsDir() {
-			continue
-		}
-		dirs = append(dirs, path)
-	}
-	return dirs
 }
 
 // crossAcceptance decodes the JSON acceptance criteria of a cross requirement.

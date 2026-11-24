@@ -54,9 +54,73 @@ export const crossRequirements = {
     cancel: 'Cancel',
     failed: 'Failed to create',
   },
+  // form — shared by the create / edit panels. The panels replaced the old
+  // modal, so the field names mirror the ordinary "new requirement" panel.
+  form: {
+    createTitle: 'New cross-project requirement',
+    editTitle: 'Edit cross-project requirement',
+    labelTitle: 'Title',
+    titlePlaceholder: 'e.g. Cross-repo order rework',
+    labelDescription: 'Description',
+    descriptionPlaceholder:
+      'Which repositories does it span? What capability does it deliver? You can paste screenshots or drop images here.',
+    descriptionHint: 'Markdown is supported; pasted images are inlined into the description.',
+    labelPriority: 'Priority',
+    labelProjects: 'Participating projects',
+    projectsHint: 'Pick at least one project — the overall design reads these repositories.',
+    attachments: '📎 Attachments',
+    attachmentsHint: 'The overall design, the split and the phase verification all see these',
+    save: 'Save',
+    saving: 'Saving…',
+    submit: 'Create',
+    cancel: 'Cancel',
+    shortcut: '⌘/Ctrl + Enter to save',
+    errNeedTitle: 'A title is required',
+    errNeedProjects: 'Pick at least one participating project',
+    saveFailed: 'Failed to save: ',
+    draftFailed: 'Failed to pre-create the draft — inline images and attachments are unavailable: ',
+    discardConfirm: 'There are unsaved changes. Discard them?',
+  },
+  // ── Trash ───────────────────────────────────────────────────────────────
+  //
+  // Deletion is two steps: move to the trash (restorable) → purge (permanent).
+  // The list only offers the first one; the irreversible step is reachable
+  // from the trash only.
+  trash: {
+    openTrash: 'Trash',
+    backToList: 'Back to list',
+    title: 'Trash',
+    subtitle: 'Deleted cross-project requirements. Restore to bring one back; purging cannot be undone.',
+    empty: 'The trash is empty',
+    emptyHint: 'Deleted cross-project requirements land here first — restore them at any time.',
+    moveToTrash: 'Move to trash',
+    movedToTrash: 'Moved to the trash',
+    restore: 'Restore',
+    restored: 'Restored to the list',
+    purge: 'Delete permanently',
+    purgeTitle: 'Delete this cross-project requirement for good?',
+    purgeConfirmPrefix: 'Permanently delete',
+    purgeConfirmSuffix: '? This cannot be undone.',
+    keepTitle: 'The sub-requirements survive',
+    keepDesc: '{{n}} sub-requirements are detached from this cross-project requirement and stay ordinary requirements in their own projects — the code, branches and PRs behind them are unaffected.',
+    loseTitle: 'These are deleted for good',
+    loseDesc: 'The overall design (including the cross-project interface contract), the integration phases and their verification reports, the cross-project dependencies, the repository baseline ledger and every attachment.',
+    purgeAck: 'I understand, delete it anyway',
+    purging: 'Deleting…',
+    purged: 'Deleted permanently',
+    cancel: 'Cancel',
+    deletedAt: 'Deleted at {{time}}',
+    childrenCount: '{{n}} sub-requirements',
+    originalStatus: 'Status before deletion: {{status}}',
+  },
   detail: {
     back: 'Back',
     overview: 'Overview',
+    description: 'Description',
+    descriptionEmpty: 'No description yet',
+    descriptionEmptyHint: 'The description goes to the AI together with the overall design. Screenshots can be pasted into it.',
+    edit: 'Edit',
+    edited: 'Saved',
     status: 'Status',
     priority: 'Priority',
     progress: 'Overall progress',
@@ -82,6 +146,10 @@ export const crossRequirements = {
     baseBranchHint: 'The base branch is set per project: when the requirement is split, that project\'s sub-requirements are developed from this branch. Leave it empty to use the repository\'s own default branch.',
     baseBranchPlaceholder: 'Empty = project default branch',
     baseBranchDefault: '(project default branch)',
+    // Design baseline — the commit the overall design was written against.
+    // "Unlocked" when the baseline could not be pinned.
+    designBaseline: 'Design baseline',
+    designBaselineUnlocked: 'not pinned',
     matrix: 'Sub-requirement matrix',
     matrixEmpty: 'Not split yet',
     matrixEmptyHint: 'Split the overall design per project to get each repository its own sub-requirements.',
@@ -112,11 +180,12 @@ export const crossRequirements = {
     verdictSaved: 'Phase verdict saved',
     blockedBy: 'Blocked by: {{titles}}',
     crossProject: 'Cross-project',
-    deleted: 'Delete cross-project requirement',
-    deletedHint: 'Deleting detaches the sub-requirements (they are not deleted) — the produced code and branches survive.',
-    deletedDone: 'Cross-project requirement deleted',
-    archive: 'Archive',
-    unarchive: 'Unarchive',
+    // The detail page of a cross-project requirement sitting in the trash. It
+    // is read-only there — restore it before designing / splitting / verifying
+    // again.
+    inTrash: 'This cross-project requirement is in the trash',
+    inTrashHint: 'A cross-project requirement in the trash is read-only — restore it before designing, splitting or verifying again.',
+    restored: 'Restored',
   },
   split: {
     title: 'Split per project',

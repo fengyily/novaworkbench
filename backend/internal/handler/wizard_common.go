@@ -37,6 +37,10 @@ type projectService interface {
 	EnsureCloned(id string) error
 	EnsureClonedAndSynced(ctx context.Context, id string, logf func(string)) (service.ProjectSyncResult, error)
 	SyncDesignBase(ctx context.Context, projectID, baseBranch string, timeout time.Duration, logf func(string)) (service.GitSyncResult, error)
+	// FetchBaseBranch — fetch-only base sync (never touches the working
+	// tree). The cross-requirement jobs use it to lock a baseline commit
+	// without moving the user's checkout.
+	FetchBaseBranch(ctx context.Context, projectID, baseBranch string, timeout time.Duration) (service.FetchBaseResult, error)
 	Get(id string) (*model.Project, error)
 	// ClaudeDoc returns the project-level CLAUDE.md (nil when the project
 	// has none). It is injected into the stages that need the project's

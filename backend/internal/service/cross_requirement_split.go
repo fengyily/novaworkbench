@@ -73,7 +73,7 @@ func (s *CrossRequirementService) ConfirmSplit(
 		candidates = candidates[:crossSplitMaxTasks]
 	}
 
-	xreq, err := s.Get(xreqID)
+	xreq, err := s.requireActive(xreqID)
 	if err != nil {
 		return nil, err
 	}

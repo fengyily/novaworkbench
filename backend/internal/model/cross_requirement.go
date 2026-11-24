@@ -91,11 +91,21 @@ type CrossRequirement struct {
 	//
 	// The lock is released when the facts behind the status change (a new
 	// overall design / a new batch of sub-requirements).
-	StatusLocked bool   `json:"status_locked"`
+	StatusLocked bool `json:"status_locked"`
 	CreatedBy    string `json:"created_by"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
 	CompletedAt  string `json:"completed_at"`
+	// DeletedAt — 回收站标记。空串 = 不在回收站；非空 = 被移入回收站的时间。
+	//
+	// 与 Status **正交**：status 是生命周期（草稿 → … → done / 归档），
+	// deleted_at 是「这条要不要出现在列表里」。分开的理由是「归档」（保留，
+	// 只是收起来）与「删除」（移进回收站，可恢复）是两件事 —— 混成一个状态，
+	// 「恢复」就无从谈起。
+	//
+	// 回收站里的行**只读**：设计 / 拆分 / 阶段 / 验证等写路径一律拒绝
+	// （service 层的 ErrCrossRequirementInTrash）。
+	DeletedAt string `json:"deleted_at"`
 }
 
 // CrossRequirementProject — 参与项目映射（一个跨项目需求 ↔ N 个项目）。
@@ -210,6 +220,29 @@ type CrossRequirementDetail struct {
 	Phases []CrossRequirementPhase `json:"phases"`
 	// Progress — 整体进展。
 	Progress CrossRequirementProgress `json:"progress"`
+	// Bases — 各参与仓库的基线台账（整体方案作业写）。
+	//
+	// 空数组 = 还没跑过整体方案（或跑的时候没能锁定任何基线）。
+	Bases []CrossRequirementBase `json:"bases"`
+}
+
+// CrossRequirementBase — 某个参与仓库的基线台账行。
+//
+// 它回答的是「这份整体方案是对着哪个提交写的」：base_sha 是锁定的提交，
+// worktree_path 是承载这份代码的隔离 worktree（detached HEAD）。
+//
+// Degraded = true 表示这个仓库没能锁定基线（非 git 仓库 / 没有 origin /
+// 仓库还没有提交）—— 此时方案读的是共享检出，可能不是最新内容。
+type CrossRequirementBase struct {
+	ProjectID string `json:"project_id"`
+	// BaseBranch — 该参与项目这次锁定的基础分支。
+	BaseBranch string `json:"base_branch"`
+	// BaseSHA — 锁定的提交（40 hex）。空 = 未锁定。
+	BaseSHA string `json:"base_sha"`
+	// WorktreePath — 隔离 worktree 的绝对路径。
+	WorktreePath string `json:"worktree_path"`
+	// Degraded — true = 没能锁定基线，读的是共享检出。
+	Degraded bool `json:"degraded"`
 }
 
 // CrossRequirementDependency — 一条跨项目依赖边。
@@ -246,12 +279,30 @@ type CreateCrossRequirementReq struct {
 	//
 	// 非空时优先于 ProjectIDs。
 	Projects []CrossRequirementProjectInput `json:"projects"`
+	// Draft — 草稿行标志。
+	//
+	// 面板式创建流程（与「新建需求」同构）需要在用户填完之前就有一条
+	// **可写入**的行：插图 / 附件必须有一个已存在的宿主行才能落库。
+	// Draft=true 时允许标题为空（落库用占位标题）与零参与项目，提交时
+	// 由前端补齐两者。
+	//
+	// 「至少一个项目」这条不变量的真正落点**不在创建**，而在开始设计 /
+	// 开始拆分 —— 那两个动作没有参与项目就没有工作区可跑（见
+	// handler/cross_requirement_jobs.go 的两处 len(projects)==0 守卫）。
+	// 所以放开创建这一处不会让一个没有项目的跨项目需求进入设计流程。
+	Draft bool `json:"draft"`
 }
 
 // UpdateCrossRequirementReq — PUT /api/cross-requirements/{id} 的请求体。
 type UpdateCrossRequirementReq struct {
-	Title              string   `json:"title"`
-	Description        string   `json:"description"`
+	Title string `json:"title"`
+	// Description — nil = 保持原值；非 nil = 覆盖（"" = 清空）。
+	//
+	// 指针而不是普通字符串，因为面板式编辑必须能区分「没传这个字段」与
+	// 「把这个字段清空」：普通字符串下两者都是 ""，用户**删不掉**描述。
+	// Title / Priority / Kind 保持原有的「空 = 不改」语义（标题本来就不
+	// 允许为空，优先级 / 类型空值一律回落到存量值）。
+	Description        *string  `json:"description"`
 	Priority           string   `json:"priority"`
 	Kind               string   `json:"kind"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`

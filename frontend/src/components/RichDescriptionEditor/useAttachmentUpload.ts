@@ -10,7 +10,7 @@
 // in that case) and surfaces as a real rejection so the dev sees it.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { attachmentsApi } from '../../api/client';
+import { attachmentsApi, type AttachmentResource } from '../../api/client';
 import { compressImage } from './compressImage';
 
 export type UploadStatus = 'compressing' | 'uploading' | 'done' | 'error';
@@ -42,7 +42,20 @@ function nextLocalId(): string {
   return `t_${Date.now().toString(36)}_${localTaskCounter}`;
 }
 
-export function useAttachmentUpload(requirementId: string | null) {
+/**
+ * useAttachmentUpload — the upload pipeline the RichDescriptionEditor drives
+ * for every paste / drop / file-picker image.
+ *
+ * ownerId is the id of the row the attachment hangs off (a requirement id, a
+ * code-review session id, a cross-requirement id …) and `resource` says which
+ * backend collection it belongs to. They travel together because the marker
+ * the editor writes (`nova://attachment/<id>`) carries no owner information —
+ * the renderer has to be told where to look the bytes up.
+ */
+export function useAttachmentUpload(
+  ownerId: string | null,
+  resource: AttachmentResource = 'requirements',
+) {
   const [uploads, setUploads] = useState<UploadTask[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -55,12 +68,12 @@ export function useAttachmentUpload(requirementId: string | null) {
     };
   }, []);
 
-  // Reset the controller when the requirement id changes (the editor
-  // re-mounts in that case anyway, but defensive).
+  // Reset the controller when the owner id changes (the editor re-mounts in
+  // that case anyway, but defensive).
   useEffect(() => {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
-  }, [requirementId]);
+  }, [ownerId]);
 
   const updateTask = useCallback((id: string, patch: Partial<UploadTask>) => {
     setUploads(prev => prev.map(t => (t.id === id ? { ...t, ...patch } : t)));
@@ -68,8 +81,8 @@ export function useAttachmentUpload(requirementId: string | null) {
 
   const upload = useCallback(
     async (file: File | Blob, opts: UploadOptions = {}): Promise<string | null> => {
-      if (!requirementId) {
-        throw new Error('requirementId is required');
+      if (!ownerId) {
+        throw new Error('ownerId is required');
       }
       const taskId = nextLocalId();
       const filename = (file as File).name || 'pasted-image';
@@ -88,8 +101,8 @@ export function useAttachmentUpload(requirementId: string | null) {
         updateTask(taskId, { status: 'uploading' });
 
         const att = await attachmentsApi.upload(
-          'requirements',
-          requirementId,
+          resource,
+          ownerId,
           compressed instanceof File ? compressed : new File([compressed], filename, { type: compressed.type }),
           opts.description,
         );
@@ -107,7 +120,7 @@ export function useAttachmentUpload(requirementId: string | null) {
         return null;
       }
     },
-    [requirementId, updateTask],
+    [ownerId, resource, updateTask],
   );
 
   const remove = useCallback((taskId: string) => {

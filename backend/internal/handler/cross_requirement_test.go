@@ -36,7 +36,7 @@ func newCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB, *servi
 	reqSvc := service.NewRequirementService(d, nil)
 	crossSvc := service.NewCrossRequirementService(d)
 	h := NewCrossRequirementHandler(crossSvc, reqSvc, projSvc, nil, store.NewJobStore(16),
-		nil, nil, nil)
+		nil, nil, nil, nil, nil, nil)
 	return h, d, projSvc
 }
 
@@ -562,7 +562,7 @@ func newCountingCrossHandlerTest(t *testing.T) (*CrossRequirementHandler, *db.DB
 	reqSvc := service.NewRequirementService(d, nil)
 	crossSvc := service.NewCrossRequirementService(d)
 	h := NewCrossRequirementHandler(crossSvc, reqSvc, projSvc, nil, store.NewJobStore(16),
-		nil, nil, nil)
+		nil, nil, nil, nil, nil, nil)
 	return h, d, count
 }
 
@@ -642,5 +642,126 @@ func TestCrossRequirementHandler_ListQueryCountIsConstant(t *testing.T) {
 	if twoReqs != oneReq {
 		t.Fatalf("list statement count grew with the number of rows: %d for one requirement, %d for two — the N+1 is back",
 			oneReq, twoReqs)
+	}
+}
+
+// T — 回收站端点：DELETE = 软删（可恢复），POST /restore = 恢复，
+// DELETE /purge = 永久删除，GET /trash = 回收站列表。
+//
+// 这条链路的价值全在**顺序**上：不可逆的那一步只能从回收站里发起，所以
+// 误点一次「删除」不会当场抹掉整体方案与联调记录。
+func TestCrossRequirementHandler_TrashFlow(t *testing.T) {
+	h, d, _ := newCrossHandlerTest(t)
+	projID := seedCrossProject(t, d, "web-app")
+
+	code, env := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title:      "回收站链路",
+		ProjectIDs: []string{projID},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	id, _ := data["id"].(string)
+
+	// The trash starts empty.
+	code, env = callCross(t, h.Trash, http.MethodGet, "/api/cross-requirements/trash", nil)
+	if code != http.StatusOK {
+		t.Fatalf("trash status = %d", code)
+	}
+	trashData, _ := env["data"].(map[string]any)
+	if items, _ := trashData["items"].([]any); len(items) != 0 {
+		t.Fatalf("trash items = %d, want 0", len(items))
+	}
+
+	// Soft delete.
+	code, env = callCross(t, h.Delete, http.MethodDelete, "/api/cross-requirements/"+id, nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %v", code, env)
+	}
+	if env["success"] != true {
+		t.Fatalf("delete envelope = %v", env)
+	}
+
+	// It left the working list and landed in the trash.
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	listData, _ := env["data"].(map[string]any)
+	if items, _ := listData["items"].([]any); len(items) != 0 {
+		t.Fatalf("list items = %d after trashing, want 0", len(items))
+	}
+	code, env = callCross(t, h.Trash, http.MethodGet, "/api/cross-requirements/trash", nil)
+	if code != http.StatusOK {
+		t.Fatalf("trash status = %d", code)
+	}
+	trashData, _ = env["data"].(map[string]any)
+	items, _ := trashData["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("trash items = %d, want 1", len(items))
+	}
+	trashRow, _ := items[0].(map[string]any)
+	if trashRow["deleted_at"] == "" {
+		t.Fatalf("trashed row has no deleted_at: %v", trashRow)
+	}
+
+	// A trashed row is read-only: the update path says so with 409.
+	code, env = callCross(t, h.Update, http.MethodPut, "/api/cross-requirements/"+id,
+		model.UpdateCrossRequirementReq{Title: "改名"})
+	if code != http.StatusConflict {
+		t.Fatalf("update on a trashed row status = %d, want 409 (body %v)", code, env)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj["code"] != "XREQ_IN_TRASH" {
+		t.Fatalf("error code = %v, want XREQ_IN_TRASH", errObj["code"])
+	}
+
+	// Purging a row that is NOT in the trash is refused — the destructive
+	// action must go through the soft delete first.
+	_, other := callCross(t, h.Create, http.MethodPost, "/api/cross-requirements", model.CreateCrossRequirementReq{
+		Title:      "还在进行中",
+		ProjectIDs: []string{projID},
+	})
+	otherData, _ := other["data"].(map[string]any)
+	otherID, _ := otherData["id"].(string)
+	code, _ = callCross(t, h.Purge, http.MethodDelete, "/api/cross-requirements/"+otherID+"/purge", nil)
+	if code != http.StatusConflict {
+		t.Fatalf("purge on a live row status = %d, want 409", code)
+	}
+
+	// Restore brings it back.
+	code, env = callCross(t, h.Restore, http.MethodPost, "/api/cross-requirements/"+id+"/restore", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("restore status = %d, body = %v", code, env)
+	}
+	code, env = callCross(t, h.List, http.MethodGet, "/api/cross-requirements", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d", code)
+	}
+	listData, _ = env["data"].(map[string]any)
+	items, _ = listData["items"].([]any)
+	restored := false
+	for _, it := range items {
+		row, _ := it.(map[string]any)
+		if row["id"] == id {
+			restored = true
+		}
+	}
+	if !restored {
+		t.Fatalf("restored row is missing from the list: %v", items)
+	}
+
+	// Trash it again and purge for good.
+	if code, _ = callCross(t, h.Delete, http.MethodDelete, "/api/cross-requirements/"+id, nil); code != http.StatusOK {
+		t.Fatalf("second delete status = %d", code)
+	}
+	code, env = callCross(t, h.Purge, http.MethodDelete, "/api/cross-requirements/"+id+"/purge", nil)
+	if code != http.StatusOK {
+		t.Fatalf("purge status = %d, body = %v", code, env)
+	}
+	code, _ = callCross(t, h.Get, http.MethodGet, "/api/cross-requirements/"+id, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("detail after purge status = %d, want 404", code)
 	}
 }

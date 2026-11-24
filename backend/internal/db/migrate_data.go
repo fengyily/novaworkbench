@@ -31,6 +31,12 @@ var copyOrder = []string{
 	"cross_requirement_projects",
 	"cross_requirement_phases",
 	"cross_requirement_phase_items",
+	// 基线台账 — 记录整体方案是对着哪个提交写的。It is a child of the
+	// cross requirement (and of the projects it names), so it travels after
+	// both.
+	"cross_requirement_bases",
+	// 跨项目需求的附件 — owner 是 cross_requirements 行，随它一起搬。
+	"cross_requirement_attachments",
 	// Dependency edges between sibling sub-requirements — both endpoints are
 	// requirements, and "requirements" has already been copied above.
 	"requirement_dependencies",

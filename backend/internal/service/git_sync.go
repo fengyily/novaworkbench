@@ -413,6 +413,139 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 	return res, nil
 }
 
+// FetchBaseResult — the outcome of a fetch-only base sync.
+type FetchBaseResult struct {
+	// SHA — the 40-char commit `origin/<base>` points at after the fetch.
+	// Empty when Skipped is true.
+	SHA string
+	// Skipped — true when the repository cannot be synced at all: not a git
+	// repo / no origin remote / unborn HEAD. The caller degrades to the
+	// project's shared checkout and says so in the UI.
+	Skipped bool
+	// Reason — human-readable explanation of the Skipped case.
+	Reason string
+}
+
+// FetchBaseBranch fetches `origin/<baseBranch>` for the project and returns
+// the SHA it points at.
+//
+// **It only moves the remote-tracking ref — it never touches the working
+// tree.** That is the whole difference from SyncToOriginBase, which
+// fast-forwards the shared checkout and therefore refuses to run against a
+// dirty one. The cross-requirement jobs do not want the user's checkout moved
+// at all: they read a detached worktree pinned at the fetched commit, so a
+// dirty (or checked-out-on-another-branch) shared checkout is irrelevant.
+//
+// Unlike SyncDesignBase this function does NOT tolerate a failed fetch. A
+// cross-requirement overall design is written against several repositories at
+// once; producing one from a stale tree would silently hand the user a plan
+// that does not match the code they are about to change. The failure modes
+// are distinguished so the message is actionable:
+//
+//   - the upstream provably has no such branch (ls-remote exit code 2) →
+//     "基础分支不存在" — a configuration error worth naming;
+//   - the fetch failed for network / credential reasons → "无法拉取" with
+//     git's own stderr, because we know nothing about the upstream.
+//
+// baseBranch is an explicit override: when empty it falls back to
+// project.DefaultBranch and then to "main".
+func (s *ProjectService) FetchBaseBranch(ctx context.Context, projectID, baseBranch string, timeout time.Duration) (FetchBaseResult, error) {
+	var res FetchBaseResult
+	if projectID == "" {
+		return res, fmt.Errorf("projectID is empty")
+	}
+	p, err := s.Get(projectID)
+	if err != nil {
+		return res, err
+	}
+	if strings.TrimSpace(baseBranch) == "" {
+		baseBranch = p.DefaultBranch
+	}
+	if strings.TrimSpace(baseBranch) == "" {
+		baseBranch = "main"
+	}
+	if p.LocalPath == "" {
+		res.Skipped = true
+		res.Reason = "项目没有配置本地检出目录"
+		return res, nil
+	}
+	// Auto-clone when the directory is missing — same as SyncDesignBase. A
+	// cross-requirement design must be able to READ every participating
+	// repository; the project row knows where to clone it from.
+	if _, statErr := os.Stat(p.LocalPath); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return res, fmt.Errorf("stat project dir: %w", statErr)
+		}
+		if cerr := s.EnsureCloned(projectID); cerr != nil {
+			return res, fmt.Errorf("自动克隆失败: %w", cerr)
+		}
+	}
+	repoPath := p.LocalPath
+
+	// Step 0: not a git working tree at all.
+	if _, err := gitRunPlain(repoPath, "rev-parse", "--is-inside-work-tree"); err != nil {
+		res.Skipped = true
+		res.Reason = "项目目录不是 git 仓库"
+		return res, nil
+	}
+	// Step 0b: no origin remote → nothing to fetch.
+	if _, err := gitRunPlain(repoPath, "remote", "get-url", "origin"); err != nil {
+		res.Skipped = true
+		res.Reason = "项目未配置 origin 远程"
+		return res, nil
+	}
+	// Step 0c: empty repo (clone landed but no first commit yet).
+	if _, err := gitRunPlain(repoPath, "rev-parse", "--verify", "HEAD"); err != nil {
+		res.Skipped = true
+		res.Reason = "仓库尚未创建提交"
+		return res, nil
+	}
+
+	// Step C: fetch origin/<base>. Plain fetch only moves origin/<base>; it
+	// never touches the working tree, so a dirty shared checkout does not
+	// matter here. GIT_TERMINAL_PROMPT=0 keeps a missing credential from
+	// hanging the job on an interactive prompt.
+	fctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	fetchCmd := exec.CommandContext(fctx, "git", "-C", repoPath, "fetch", "origin", baseBranch)
+	fetchEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if s.gitCredSvc != nil {
+		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(ctx, projectID)
+		if credCleanup != nil {
+			defer credCleanup()
+		}
+		fetchEnv = append(fetchEnv, credEnv...)
+	}
+	fetchCmd.Env = fetchEnv
+	var fetchErrOut strings.Builder
+	fetchCmd.Stderr = &fetchErrOut
+	if err := fetchCmd.Run(); err != nil {
+		fetchStderr := fetchErrOut.String()
+		// Triage before giving up. Only "the remote provably has no such
+		// branch" is a configuration error we can name precisely; every other
+		// failure means we know nothing about the upstream.
+		if s.probeRemoteRef(ctx, repoPath, projectID, baseBranch, timeout) == remoteRefAbsent {
+			return res, fmt.Errorf("仓库「%s」的上游没有分支 %s，请检查基础分支设置", p.Name, baseBranch)
+		}
+		return res, fmt.Errorf("无法拉取 origin/%s（仓库「%s」）: %s", baseBranch, p.Name, capStderr(fetchStderr))
+	}
+
+	// The fetch succeeded; resolve the SHA. `git fetch origin <branch>`
+	// opportunistically updates refs/remotes/origin/<branch>, but a repo with
+	// an unusual refspec may not have it — fall back to the local branch.
+	sha, shaErr := gitRunPlain(repoPath, "rev-parse", "origin/"+baseBranch)
+	if shaErr != nil {
+		localSha, localErr := gitRunPlain(repoPath, "rev-parse", baseBranch)
+		if localErr != nil {
+			return res, fmt.Errorf("无法解析 origin/%s 的提交（仓库「%s」）", baseBranch, p.Name)
+		}
+		res.SHA = strings.TrimSpace(localSha)
+		return res, nil
+	}
+	res.SHA = strings.TrimSpace(sha)
+	return res, nil
+}
+
 // atoiTrimmed parses a small non-negative integer from a git output line,
 // tolerating leading/trailing whitespace. Negative / overflow / non-numeric
 // input returns an error so the caller can fall back to its own handling.

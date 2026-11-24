@@ -83,6 +83,13 @@ type CrossProjectInput struct {
 	// 空 = 该项目沿用自己的默认分支。写进提示词是为了让模型知道各仓库
 	// 处在不同的发布线上 —— 方案里的版本 / 兼容性结论必须按各自的线来写。
 	BaseBranch string
+	// BaseSHA — 本次方案锁定的基础提交（40 hex）。
+	//
+	// 写进提示词是为了让模型知道它读的到底是哪个提交：Path 指向的是一份
+	// detached worktree（见 handler/cross_requirement_workspace.go），它停在
+	// 这个提交上。方案里的「现状是这样的」因此有一个可复核的锚点，而不是
+	// 「大概是现在仓库的样子」。
+	BaseSHA string
 }
 
 // BuildCrossDesignPrompt renders the overall-design prompt.
@@ -90,13 +97,14 @@ type CrossProjectInput struct {
 // Inputs: the cross requirement itself (title / description / acceptance),
 // the participating projects, the overall design document produced by a
 // previous run (empty on the first run — the "regenerate" path feeds it back
-// so the model can refine instead of starting from scratch) and the
-// participating projects' CLAUDE.md conventions.
+// so the model can refine instead of starting from scratch), the
+// participating projects' CLAUDE.md conventions and the attachment manifest
+// (empty when the cross requirement has no attachments).
 //
 // The conventions go BEFORE the output contract: the model reads the
 // contract last, and it must read the conventions before it starts
 // designing.
-func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string, conventions []CrossProjectDoc) string {
+func BuildCrossDesignPrompt(title, description string, acceptance []string, projects []CrossProjectInput, previousDesign string, conventions []CrossProjectDoc, attachManifest string) string {
 	var b strings.Builder
 
 	b.WriteString("请为下面这个**横跨多个仓库**的需求编写一份整体技术方案。\n\n")
@@ -137,6 +145,12 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 		if path := strings.TrimSpace(p.Path); path != "" {
 			b.WriteString("（路径：" + path + "）")
 		}
+		if sha := strings.TrimSpace(p.BaseSHA); sha != "" {
+			if len(sha) > 7 {
+				sha = sha[:7]
+			}
+			b.WriteString("（基线提交：" + sha + "）")
+		}
 		b.WriteString("\n")
 		if summary := strings.TrimSpace(p.Summary); summary != "" {
 			b.WriteString("  - 说明：" + truncateRunes(summary, 1024) + "\n")
@@ -155,6 +169,9 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 		b.WriteString(section)
 		b.WriteString("\n\n")
 	}
+
+	// 用户上传的附件 —— 整体方案必须看得见它们（截图 / 日志 / 契约文档）。
+	appendCrossAttachment(&b, attachManifest)
 
 	b.WriteString(CrossDesignContract)
 	b.WriteString(crossDesignTail)

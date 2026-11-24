@@ -186,6 +186,29 @@ ACL 落地在 7 张表(`users`/`sessions`/`acl_roles`/`permissions`/`acl_role_pe
 
 **去重**(原生通道下才生效,否则会连仓库那份一起丢):`collectProjectContext` 的预读不再内联 CLAUDE.md/AGENTS.md,知识库块也过滤掉 `source_ref` 为这两个文件的条目(scanner 把它们索引成了 knowledge 行)——否则同一份文档会从第三条路**绕回**提示词里。
 
+### 跨项目需求(附件 + 富文本/插图 + 面板化)
+
+跨项目需求(`cross_requirements`,xreq_*)是横跨多个仓库的顶层实体。它是**独立实体**,不是 `requirements` 的一种 kind(`requirements.project_id` NOT NULL + FK + CASCADE,既有数十条路径假设「一需求一项目」);子需求 = 普通 `requirements` 行,靠 `requirements.cross_requirement_id` 挂回父实体。派生数据(完成百分比、各项目完成数)**不落库**,是读路径实时聚合的。
+
+**附件**(`cross_requirement_attachments` 表)与需求 / Review 的附件同型:逐列照抄 `requirement_attachments`,只把 owner 列换成 `cross_requirement_id`。`service.NewCrossRequirementAttachmentService` 复用同一套 `AttachmentService`(表名 + owner 列在**构造期**固定,SQL 方法体完全共用),所以 `handler.NewAttachmentHandler` 一行不改就能挂在 `/api/cross-requirements/{id}/attachments/...` 下 —— 三个 owner id 空间(`req_*` / `crv_*` / `xreq_*`)互不冲突,可共用一个磁盘根 `attachmentRoot/<owner_id>/`。
+
+- **插图**走 `nova://attachment/<id>` 标记(与需求同一套约定):前端 `RichDescriptionEditor` 粘贴/拖拽/选图 → `useAttachmentUpload` 压缩上传 → 光标处插入标记;渲染时 `rewriteNovaLinks` 把标记换成 `/api/cross-requirements/<id>/attachments/<attId>/content`。**标记里没有 owner 信息**,所以渲染方必须被告知附件在哪个集合 —— 这就是 `rewriteNovaLinks(md, ownerId, resource)` / `useAttachmentUpload(ownerId, resource)` 多出来的 `resource` 参数。`MarkdownRender` 的 `isAuthedImageUrl` 也必须认得 `cross-requirements`,否则登录态下插图渲染成碎图标。
+- **AI 也能看到**:`attachManifestFor` + `rewriteAttachmentMarkers`(两个都是 owner 无关的纯函数)把附件清单与描述里的标记带进跨项目作业的提示词(整体方案 / 拆分 / 阶段验证)。跨项目作业**只在本地跑**(工作目录 `~/.novaworkbench/xreq/<id>/<kind>`),所以 `attachDir` 恒为本地根,不需要 `resolveAttachDirFor` 那套 SSH 同步。
+- **删除**要显式删附件行:SQLite 从不开 `PRAGMA foreign_keys`,schema 里的 `ON DELETE CASCADE` 是装饰。
+
+**草稿行**:`POST /api/cross-requirements` 带 `draft:true` 时允许**空标题 + 零参与项目**(占位标题 `（草稿）`),其余校验一步不松(基础分支名非法照样整批拒绝)。原因是面板式创建流程要在用户填完之前先落一行 —— 插图 / 附件必须有一个**已存在的宿主行**才能落库(与 `CreateRequirementForm` 预建需求草稿同构)。「至少一个项目」这条不变量的真正落点**不在创建**,而在**开始设计 / 开始拆分** —— 那两个动作没有参与项目就没有工作区可跑。
+
+**面板而非弹窗**:新建 / 编辑 / 拆分确认 / 详情页显示描述四处都是**页面内联面板**(跨项目需求页原本有两个 `.xreq-modal`,均已删除;只剩被内联编辑器复用的 `.xreq-panel-actions`)。表单组件在 `components/CrossRequirementForm/`,复用 `RichDescriptionEditor` + `AttachmentPanel`,视觉对齐普通需求的 `.create-req-form`。新建面板的**草稿清理是 mount-only effect**:依赖驱动的 cleanup 会在每次击键时重跑(React 先跑上一次的 cleanup),把用户正在写的草稿删掉 —— 与 `CreateRequirementForm` 里同一段注释讲的是同一个坑。
+
+**回收站(删除是两步的)**:`cross_requirements.deleted_at`(DATETIME,NULL = 不在回收站)。**删除 = 移进回收站 → 彻底删除**,不可逆的那一步只能从回收站里发起 —— 因为跨项目需求被拆过之后,整体方案 / 联调阶段 / 跨项目依赖是**不可再生产**的东西(子需求里的代码还在,但「三个仓库怎么对齐」的上下文丢了就是丢了)。这一套**逐字照抄 `projects` 的回收站**(active/trash 双视图、`Remove` 软删 / `Restore` / `Purge` 带 `NOT_IN_TRASH` 闸门 / `ListTrash`),不发明第二套词汇。
+
+- **接口**:`DELETE /api/cross-requirements/{id}`(软删)**语义已变**、新增 `POST .../{id}/restore`、`DELETE .../{id}/purge`、`GET /api/cross-requirements/trash`。`DELETE` 原本是硬删,改语义是**有意的**:不可逆删除从此需要两步。
+- **回收站里的行只读**:`service.requireActive` 是所有写路径(更新 / 归档 / 改参与项目 / 存方案 / 拆分 / 阶段 / 验证)共用的闸门,返回 `ErrCrossRequirementInTrash` → HTTP 409 `XREQ_IN_TRASH`。少这道闸门,用户会在垃圾堆里干活,作业跑完还会把结果写回一条已被「删掉」的行。
+- **恢复不是回滚**:只清 `deleted_at`,**不碰 `status_locked`**(人工标过的 done / 归档继续有效);没锁的行由读路径按**当前事实**重算 —— 子需求可能在回收站期间被做完了,恢复回来时显示旧状态就是错的。回收站期间派生刷新早退(`ApplyDerivedStatus`),状态冻结在「被移走的那一刻」。
+- **子需求一律脱离保留**,不级联删(它们背后可能有代码 / 分支 / PR)。`Purge` 才把 `cross_requirement_id` 置空并删阶段 / 映射 / 基线 / 附件行 + 清理 worktree。确认框(`components/CrossRequirementPurgeDialog.tsx`,列表页与详情页共用)把「会保留的」与「会永久丢的」分成两块风险面板 —— 子需求那半句是让人敢点这个按钮的关键。
+- **草稿清理要两步**:新建面板放弃时走「软删 + 立即 purge」(`discardDraft`),否则废弃草稿会堆在回收站里。
+- **状态筛选补「已归档」**:跨项目需求的 `archived` 状态此前在前端**完全不可达**(筛选器里没有这一项,后端默认又排除归档行)—— 归档行存在库里但用户永远看不到。
+
 ### Merge & Weekly Reports
 
 `handler/merge.go` + `merge_agent.go` 在 coding 完成后**自动 commit-push-PR**(支持本地 + Agent Server 远端),UI 在 `RequirementDetail` 的 SubTaskPanel 内嵌入口。`weekly_reports` 表 + `handler/report.go` + `service/report.go` 出项目周报(`git log` + 需求聚合);UI 在 `ProjectWeeklyReport.tsx`(`/projects/:id/reports`)。`token_usage` 表 + `service/usage.go` 聚合按需求/项目/Job 的 LLM token 用量(`/api/usage/*`)。

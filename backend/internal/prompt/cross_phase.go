@@ -68,20 +68,27 @@ type CrossPhaseMember struct {
 	Status string
 	// Description — 子需求描述（自包含，含跨项目契约）。
 	Description string
+	// WorktreePath — 该子需求的**实现目录**（它自己的隔离 worktree）。
+	//
+	// 这是验证要读的地方 —— 实现代码在那里，不在共享检出里。空 = 该子需求
+	// 还没进入开发，没有可验证的实现（提示词会如实说明，模型应当给「无法
+	// 验证」而不是拿基线代码充数）。
+	WorktreePath string
 }
 
 // BuildCrossPhasePrompt renders the phase-verification prompt.
 //
 // Inputs: the phase (name / description), its member sub-requirements, the
 // overall design (so the contract the report must check against is in front
-// of the model) and the CLAUDE.md conventions of the projects the phase
-// touches.
+// of the model), the CLAUDE.md conventions of the projects the phase
+// touches, and the attachment manifest (empty when the cross requirement
+// has no attachments).
 //
 // The conventions go BEFORE the output contract: the model reads the
 // contract last, and it must read the conventions before it starts
 // verifying — a verdict against the wrong repository's rules is worse than
 // no verdict at all.
-func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPhaseMember, designMarkdown string, conventions []CrossProjectDoc) string {
+func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPhaseMember, designMarkdown string, conventions []CrossProjectDoc, attachManifest string) string {
 	var b strings.Builder
 
 	b.WriteString("请对下面这个阶段做跨项目验证。\n\n")
@@ -109,6 +116,13 @@ func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPh
 			b.WriteString("（项目：" + p + "）")
 		}
 		b.WriteString("（状态：" + strings.TrimSpace(m.Status) + "）\n")
+		if wt := strings.TrimSpace(m.WorktreePath); wt != "" {
+			// The implementation directory — the model MUST verify against
+			// this tree, not against the shared checkout.
+			b.WriteString("  - 实现目录：" + wt + "（**验证以这个目录里的代码为准**）\n")
+		} else {
+			b.WriteString("  - 实现目录：（无 —— 该子需求尚未进入开发，没有可验证的实现；结论请写「无法验证」）\n")
+		}
 		if desc := strings.TrimSpace(m.Description); desc != "" {
 			b.WriteString("  - " + truncateRunes(desc, 2*1024) + "\n")
 		}
@@ -126,6 +140,9 @@ func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPh
 		b.WriteString(section)
 		b.WriteString("\n\n")
 	}
+
+	// 用户上传的附件 —— 验证要以附件里给出的事实为准。
+	appendCrossAttachment(&b, attachManifest)
 
 	b.WriteString(CrossPhaseContract)
 	b.WriteString(crossPhaseContractTail)

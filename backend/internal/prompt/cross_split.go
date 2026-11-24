@@ -87,13 +87,14 @@ const crossSplitTitleMaxRunes = 40
 //
 // Inputs: the cross requirement, the overall design document (the material
 // being split), the participating projects (the closed set the model must
-// pick from) and the participating projects' CLAUDE.md conventions.
+// pick from), the participating projects' CLAUDE.md conventions and the
+// attachment manifest (empty when the cross requirement has no attachments).
 //
 // The conventions go BEFORE the output contract: the model reads the
 // contract last, and it must read the conventions before it starts
 // splitting — a sub-requirement scoped by the wrong repository's rules is
 // worse than no sub-requirement at all.
-func BuildCrossSplitPrompt(title string, designDocs string, projects []CrossProjectInput, conventions []CrossProjectDoc) string {
+func BuildCrossSplitPrompt(title string, designDocs string, projects []CrossProjectInput, conventions []CrossProjectDoc, attachManifest string) string {
 	var b strings.Builder
 
 	b.WriteString("请把下面这份**跨项目整体方案**拆分成若干个可独立交付、各归各的项目、可独立提 PR 的子需求。\n\n")
@@ -134,6 +135,9 @@ func BuildCrossSplitPrompt(title string, designDocs string, projects []CrossProj
 		b.WriteString(section)
 		b.WriteString("\n\n")
 	}
+
+	// 用户上传的附件 —— 拆分时要按附件里给出的信息划分边界。
+	appendCrossAttachment(&b, attachManifest)
 
 	b.WriteString(CrossSplitJSONContract)
 	b.WriteString(crossSplitContractTail)

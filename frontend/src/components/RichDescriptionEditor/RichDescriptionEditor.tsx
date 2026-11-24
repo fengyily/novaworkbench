@@ -5,7 +5,7 @@
 //      that wraps the current selection with the matching Markdown syntax.
 //   2. Image-paste / drop / file-picker ingestion: any image/* blob goes
 //      through useAttachmentUpload, which compresses (compressImage.ts),
-//      uploads to the existing requirement_attachments table, and inserts
+//      uploads to the owner's attachment collection, and inserts
 //      a `![image](nova://attachment/<att_id>)` marker at the cursor.
 //   3. An edit / preview tab toggle so the writer can sanity-check the
 //      rendered output without leaving the field.
@@ -15,13 +15,19 @@
 // The textarea's source content is never rewritten — the user always sees
 // what will be persisted.
 //
-// requirementId gates every image-touching interaction. When it's null the
+// ownerId gates every image-touching interaction. When it's null the
 // editor is still usable as a plain Markdown textarea (the @mention popover
 // keeps working), but the toolbar's image button and the paste/drop hooks
 // are inert.
+//
+// `resource` says which backend collection the attachments belong to. The
+// marker carries no owner information, so the renderer has to be told where
+// to look the bytes up — 'requirements' (req_*) by default,
+// 'cross-requirements' (xreq_*) for the cross-requirement form.
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { AttachmentResource } from '../../api/client';
 import AtMentionTextarea from '../AtMentionTextarea';
 import MarkdownRender from '../MarkdownRender';
 import { useAttachmentUpload, type UploadTask } from './useAttachmentUpload';
@@ -39,7 +45,9 @@ export interface RichDescriptionEditorProps {
   /** Owner of any uploaded images. Set to null while the parent is still
    *  pre-creating the draft row; in that state image entry points are
    *  disabled (the toolbar shows a hint instead). */
-  requirementId: string | null;
+  ownerId: string | null;
+  /** Which backend collection owns the attachments. */
+  resource?: AttachmentResource;
   placeholder?: string;
   minRows?: number;
   disabled?: boolean;
@@ -56,7 +64,8 @@ type Mode = 'edit' | 'preview';
 const RichDescriptionEditor = forwardRef<RichDescriptionEditorHandle, RichDescriptionEditorProps>(function RichDescriptionEditor({
   value,
   onChange,
-  requirementId,
+  ownerId,
+  resource = 'requirements',
   placeholder,
   minRows = 7,
   disabled,
@@ -74,8 +83,8 @@ const RichDescriptionEditor = forwardRef<RichDescriptionEditorHandle, RichDescri
   // doesn't get a chance to read selectionStart between renders.
   const cursorRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
-  const ready = !!requirementId;
-  const { uploads, upload } = useAttachmentUpload(requirementId);
+  const ready = !!ownerId;
+  const { uploads, upload } = useAttachmentUpload(ownerId, resource);
 
   // Bubble upload state out so the parent can show a badge / disable submit.
   // useEffect avoids the "setState during render" foot-gun from prop wiring.
@@ -308,7 +317,7 @@ const RichDescriptionEditor = forwardRef<RichDescriptionEditorHandle, RichDescri
       ) : (
         <div className="rich-editor__preview md-prose">
           {value.trim() ? (
-            <MarkdownRender content={rewriteNovaLinks(value, requirementId || '')} />
+            <MarkdownRender content={rewriteNovaLinks(value, ownerId || '', resource)} />
           ) : (
             <span className="rich-editor__preview-empty">
               {t('components.richEditor.previewEmpty')}

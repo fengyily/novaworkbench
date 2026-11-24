@@ -479,7 +479,7 @@ export const scannerApi = {
 // requirement_attachments / code_review_attachments respectively. The
 // (owner, sha256) unique pair on the server means re-uploading the same bytes
 // reuses the same row — treat identical content as idempotent.
-export type AttachmentResource = 'requirements' | 'code-reviews';
+export type AttachmentResource = 'requirements' | 'code-reviews' | 'cross-requirements';
 
 export interface Attachment {
   id: string;
@@ -4029,6 +4029,14 @@ export interface CrossRequirement {
   created_at: string;
   updated_at: string;
   completed_at: string;
+  // deleted_at — the trash stamp. Empty = not in the trash; non-empty = the
+  // time it was moved there.
+  //
+  // It is orthogonal to `status`: status is the lifecycle (draft → … → done /
+  // archived), deleted_at is "does this row still show up in the list". The
+  // split exists because "archive" (keep, just hide) and "delete" (move away,
+  // restorable) are two different things.
+  deleted_at: string;
 }
 
 export interface CrossRequirementProjectProgress {
@@ -4113,6 +4121,23 @@ export interface CrossRequirementDetail extends CrossRequirement {
   dependencies: CrossRequirementDependency[];
   phases: CrossRequirementPhase[];
   progress: CrossRequirementProgress;
+  // bases — 各参与仓库的基线台账：整体方案是对着哪个提交写的。
+  bases: CrossRequirementBase[];
+}
+
+/**
+ * CrossRequirementBase — one participating repository's baseline.
+ *
+ * base_sha is the commit the overall design was written against; empty means
+ * the baseline could not be locked (non-git repo / no origin) and the design
+ * read the shared checkout instead.
+ */
+export interface CrossRequirementBase {
+  project_id: string;
+  base_branch: string;
+  base_sha: string;
+  worktree_path: string;
+  degraded: boolean;
 }
 
 export interface CrossRequirementListPayload {
@@ -4168,7 +4193,7 @@ export const crossRequirementsApi = {
     return api.get<CrossRequirementListPayload>(`/api/cross-requirements?${q.toString()}`);
   },
   create: (data: {
-    title: string;
+    title?: string;
     description?: string;
     priority?: string;
     kind?: string;
@@ -4177,10 +4202,20 @@ export const crossRequirementsApi = {
     // projects — the participating projects in full (each may carry its own
     // base branch). Takes precedence over project_ids when present.
     projects?: CrossRequirementProjectInput[];
+    // draft — pre-create a placeholder row so inline images / file
+    // attachments have an owner to hang off before the form is filled in.
+    // The server then accepts an empty title and zero projects; the panel
+    // completes both on submit.
+    draft?: boolean;
   }) => api.post<CrossRequirement>('/api/cross-requirements', data),
   get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
-  // Partial update: an omitted (or empty) field keeps the stored value, so a
+  // Partial update: an omitted field keeps the stored value, so a
   // status-only call never clobbers the title / priority / kind.
+  //
+  // `description` is the one exception: pass "" to CLEAR it. The server
+  // distinguishes "field absent" (keep) from "field present but empty"
+  // (clear) — without that distinction the panel could never empty the
+  // description.
   update: (id: string, data: {
     title?: string;
     description?: string;
@@ -4189,7 +4224,20 @@ export const crossRequirementsApi = {
     acceptance_criteria?: string[];
     status?: string;
   }) => api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}`, data),
-  remove: (id: string) => api.delete<void>(`/api/cross-requirements/${id}`),
+  // ── trash ───────────────────────────────────────────────────────────────
+  // Deletion is TWO steps: move to the trash (restorable), then purge
+  // (permanent, only reachable from the trash).
+  //
+  // The reason for the extra step: once a cross-project requirement has been
+  // split, the overall design / integration phases / cross-project
+  // dependencies are no longer reproducible — the code inside the children
+  // survives, but the context that aligned several repositories is gone for
+  // good. So the irreversible action must never be one click away.
+  trash: (id: string) => api.delete<{ trashed: boolean }>(`/api/cross-requirements/${id}`),
+  restore: (id: string) => api.post<CrossRequirementDetail>(`/api/cross-requirements/${id}/restore`, {}),
+  purge: (id: string) => api.delete<{ deleted: boolean }>(`/api/cross-requirements/${id}/purge`),
+  // trashList — the rows sitting in the trash, most recently deleted first.
+  trashList: () => api.get<CrossRequirementListPayload>('/api/cross-requirements/trash'),
   setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
     api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
   // ── overall design ──────────────────────────────────────────────────────

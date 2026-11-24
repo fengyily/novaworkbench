@@ -105,6 +105,121 @@ func TestCrossRequirement_CreateWithoutProjects(t *testing.T) {
 	}
 }
 
+// T1c — 草稿行可以既没有标题也没有参与项目。
+//
+// 面板式创建流程要在用户填完之前先落一行（插图 / 附件需要已存在的宿主行），
+// 所以 Draft=true 时这两条校验都放开。非草稿路径的校验一个字都不能松 ——
+// 上面那两个测试就是这个不变量。
+func TestCrossRequirement_CreateDraftAllowsEmptyTitleAndNoProjects(t *testing.T) {
+	svc, _, _ := newCrossFixture(t)
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{Draft: true})
+	if err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+	if x.Title != DraftCrossRequirementTitle {
+		t.Fatalf("draft title = %q, want %q", x.Title, DraftCrossRequirementTitle)
+	}
+	if x.Status != model.XReqStatusDraft {
+		t.Fatalf("status = %q, want draft", x.Status)
+	}
+	projects, err := svc.ListProjects(x.ID)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("draft projects = %d, want 0", len(projects))
+	}
+}
+
+// T1d — 草稿行放开的只有「零项目 / 空标题」这两条，别的校验一步都不松。
+//
+// 基础分支名会被塞进 git 命令，所以它必须**在写库前**就是合法的（非法值
+// 整批拒绝）。草稿路径不能因为放宽了项目数量就把这条也放过去。
+func TestCrossRequirement_CreateDraftStillValidatesBaseBranch(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	if _, err := svc.Create(model.CreateCrossRequirementReq{
+		Draft: true,
+		Projects: []model.CrossRequirementProjectInput{
+			{ProjectID: p1.ID, BaseBranch: "bad branch/name"},
+		},
+	}); err == nil {
+		t.Fatal("draft with an illegal base branch accepted, want an error")
+	}
+}
+
+// T1e — 草稿行提交时补齐标题与参与项目。
+func TestCrossRequirement_DraftCanBeCompleted(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{Draft: true})
+	if err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+	newTitle := "跨仓库订单重构"
+	if err := svc.Update(x.ID, model.UpdateCrossRequirementReq{Title: newTitle}); err != nil {
+		t.Fatalf("update draft title: %v", err)
+	}
+	if err := svc.SetProjects(x.ID, []model.CrossRequirementProjectInput{{ProjectID: p1.ID}}); err != nil {
+		t.Fatalf("set draft projects: %v", err)
+	}
+	got, err := svc.Get(x.ID)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	if got.Title != newTitle {
+		t.Fatalf("title = %q, want %q", got.Title, newTitle)
+	}
+	projects, err := svc.ListProjects(x.ID)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 1 || projects[0].ProjectID != p1.ID {
+		t.Fatalf("projects = %+v, want the seeded project", projects)
+	}
+}
+
+// T1f — 描述可以被清空。
+//
+// 面板式编辑必须能区分「没传这个字段」与「把这个字段清空」：普通字符串下
+// 两者都是 ""，用户永远删不掉描述。所以 Description 是 *string，nil = 不改，
+// "" = 清空。
+func TestCrossRequirement_UpdateCanClearDescription(t *testing.T) {
+	svc, _, projSvc := newCrossFixture(t)
+	p1 := seedCrossProject(t, projSvc, "web-app")
+
+	x, err := svc.Create(model.CreateCrossRequirementReq{
+		Title:       "统一登录",
+		Description: "先做单点登录",
+		ProjectIDs:  []string{p1.ID},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 不传描述 → 保持原值。
+	if err := svc.Update(x.ID, model.UpdateCrossRequirementReq{Priority: "high"}); err != nil {
+		t.Fatalf("update priority: %v", err)
+	}
+	got, _ := svc.Get(x.ID)
+	if got.Description != "先做单点登录" {
+		t.Fatalf("description = %q, want it unchanged", got.Description)
+	}
+
+	// 传空串 → 清空。
+	empty := ""
+	if err := svc.Update(x.ID, model.UpdateCrossRequirementReq{Description: &empty}); err != nil {
+		t.Fatalf("clear description: %v", err)
+	}
+	got, _ = svc.Get(x.ID)
+	if got.Description != "" {
+		t.Fatalf("description = %q, want it cleared", got.Description)
+	}
+}
+
 // T7 — 进度聚合。
 func TestCrossRequirement_Progress(t *testing.T) {
 	svc, reqSvc, projSvc := newCrossFixture(t)
@@ -297,8 +412,11 @@ func TestCrossRequirement_PhaseCanBeResetToReady(t *testing.T) {
 	}
 }
 
-// T9 — 删除 XReq：子需求保留且 cross_requirement_id 置空。
-func TestCrossRequirement_DeleteDetachesChildren(t *testing.T) {
+// T9 — 彻底删除 XReq：子需求保留且 cross_requirement_id 置空。
+//
+// 删除是**两步**的：先移进回收站（软删），再彻底删除（purge）。本测试覆盖的
+// 是 purge 那一半 —— 子需求脱离而不是被删。
+func TestCrossRequirement_PurgeDetachesChildren(t *testing.T) {
 	svc, reqSvc, projSvc := newCrossFixture(t)
 	p1 := seedCrossProject(t, projSvc, "web-app")
 	p2 := seedCrossProject(t, projSvc, "api-svc")
@@ -324,8 +442,12 @@ func TestCrossRequirement_DeleteDetachesChildren(t *testing.T) {
 		t.Fatalf("create phase: %v", err)
 	}
 
-	if err := svc.Delete(x.ID); err != nil {
-		t.Fatalf("delete: %v", err)
+	// 彻底删除只对回收站里的行开放 —— 先软删，再 purge。
+	if err := svc.MoveToTrash(x.ID); err != nil {
+		t.Fatalf("move to trash: %v", err)
+	}
+	if err := svc.Purge(x.ID); err != nil {
+		t.Fatalf("purge: %v", err)
 	}
 
 	// The children survive — only the link is severed.

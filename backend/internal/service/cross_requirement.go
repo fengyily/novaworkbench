@@ -42,6 +42,32 @@ var ErrProjectNotInScope = errors.New("project is not part of the cross requirem
 // ErrDuplicateProject — 参与项目集合里有重复的项目。
 var ErrDuplicateProject = errors.New("duplicate project in cross requirement")
 
+// ErrCrossRequirementNoProject — 跨项目需求没有参与项目。
+//
+// 做成哨兵错误而不是一句 fmt.Errorf：草稿行的创建路径要能**只**吞掉这一条
+// （零项目对草稿合法），而把别的失败（项目不存在、基础分支名非法）照旧拒绝。
+var ErrCrossRequirementNoProject = errors.New("cross requirement needs at least one project")
+
+// ErrCrossRequirementInTrash — 该跨项目需求在回收站里，写操作一律拒绝。
+//
+// 回收站里的行是**只读**的：整体方案 / 拆分 / 阶段 / 验证 / 改参与项目一律
+// 拒绝。否则用户会在垃圾堆里干活，而作业跑完会把结果写回一条已经被「删掉」
+// 的行 —— 状态从此错乱，且用户以为自己已经删干净了。
+var ErrCrossRequirementInTrash = errors.New("cross requirement is in the trash")
+
+// ErrCrossRequirementNotInTrash — 该跨项目需求不在回收站里，不能彻底删除。
+//
+// 防御性闸门，抄 projects 的做法（service/project.go Purge 的 NOT_IN_TRASH）：
+// 误点在「进行中」的行上点「彻底删除」时，应该被挡下来并引导用户先走软删。
+var ErrCrossRequirementNotInTrash = errors.New("cross requirement is not in the trash")
+
+// DraftCrossRequirementTitle — 草稿行的占位标题。
+//
+// 面板式创建流程在用户填完标题之前就先落一行（插图 / 附件需要一个已存在的
+// 宿主行），标题此时还是空的。跨项目需求的 title 是 NOT NULL，所以草稿先用
+// 一个占位标题顶上，提交时由前端改回真标题。
+const DraftCrossRequirementTitle = "（草稿）"
+
 // CrossRequirementService — 跨项目需求的实体 / 映射 / 阶段 / 进展聚合。
 type CrossRequirementService struct {
 	db *db.DB
@@ -60,10 +86,21 @@ func NewCrossRequirementService(database *db.DB) *CrossRequirementService {
 // requirement without any project is useless (the AI has nothing to read),
 // so a partial write would only produce a broken row the user has to fix by
 // hand.
+//
+// req.Draft relaxes exactly two of those constraints (empty title, zero
+// projects) so the panel-style create flow can pre-create a writable row the
+// moment it opens — inline images and file attachments need a row that
+// already exists to hang off (the same trick CreateRequirementForm plays for
+// ordinary requirements). Everything else (branch-name validation, project
+// existence, status / priority defaults) is unchanged, and a draft that never
+// gets submitted is deleted by the client.
 func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*model.CrossRequirement, error) {
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
-		return nil, fmt.Errorf("cross requirement title is required")
+		if !req.Draft {
+			return nil, fmt.Errorf("cross requirement title is required")
+		}
+		title = DraftCrossRequirementTitle
 	}
 	kind := strings.TrimSpace(req.Kind)
 	if kind == "" {
@@ -82,10 +119,18 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 
 	projects, err := s.normalizeCreateProjects(req)
 	if err != nil {
-		return nil, err
+		// A draft may legitimately carry zero projects, so the "at least one"
+		// complaint is the one error we swallow here. Any other failure (a
+		// duplicated project, an illegal base-branch name) still rejects the
+		// row — the branch name goes straight into a git command, so it has
+		// to be legal before it is written.
+		if !req.Draft || !errors.Is(err, ErrCrossRequirementNoProject) {
+			return nil, err
+		}
+		projects = nil
 	}
-	if len(projects) == 0 {
-		return nil, fmt.Errorf("cross requirement needs at least one project")
+	if len(projects) == 0 && !req.Draft {
+		return nil, ErrCrossRequirementNoProject
 	}
 
 	id := util.NewID("xreq")
@@ -117,33 +162,76 @@ func (s *CrossRequirementService) Create(req model.CreateCrossRequirementReq) (*
 	return s.Get(id)
 }
 
-// Get reads one cross requirement by id.
-func (s *CrossRequirementService) Get(id string) (*model.CrossRequirement, error) {
-	row := s.db.QueryRow(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,status_locked,created_by,created_at,updated_at,completed_at
-		 FROM cross_requirements WHERE id = ?`, id)
+// xreqColumns — the column list shared by Get / List / ListTrash.
+//
+// 一处定义，三处使用：新增列时漏改一处，就会出现「详情页显示 A、列表页显示
+// B」这种只有用户才看得出的分叉。
+const xreqColumns = `id,title,description,status,priority,kind,acceptance_criteria,design_docs,` +
+	`design_session_id,design_job_id,split_batch_id,status_locked,created_by,created_at,updated_at,completed_at,deleted_at`
+
+// scanXReq scans one row into a CrossRequirement.
+//
+// created_at / updated_at / completed_at / deleted_at 都是可空的时间戳：
+// 统一扫进 sql.NullString（驱动给 time.Time 时 convertAssign 会转成
+// RFC3339 字符串），空值在模型层表现为空串。
+func scanXReq(scan func(dest ...any) error) (model.CrossRequirement, error) {
 	var x model.CrossRequirement
-	var createdAt, updatedAt, completedAt sql.NullString
-	if err := row.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
+	var createdAt, updatedAt, completedAt, deletedAt sql.NullString
+	if err := scan(
+		&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
 		&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.StatusLocked, &x.CreatedBy,
-		&createdAt, &updatedAt, &completedAt); err != nil {
+		&createdAt, &updatedAt, &completedAt, &deletedAt,
+	); err != nil {
+		return x, err
+	}
+	x.CreatedAt = createdAt.String
+	x.UpdatedAt = updatedAt.String
+	x.CompletedAt = completedAt.String
+	x.DeletedAt = deletedAt.String
+	return x, nil
+}
+
+// Get reads one cross requirement by id.
+//
+// 回收站里的行**照样读得到** —— 详情页要显示「已移入回收站」的横幅，用户
+// 也要能从回收站里点进去看它长什么样再决定恢复还是彻底删除。
+func (s *CrossRequirementService) Get(id string) (*model.CrossRequirement, error) {
+	x, err := scanXReq(s.db.QueryRow(
+		`SELECT `+xreqColumns+` FROM cross_requirements WHERE id = ?`, id).Scan)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrCrossRequirementNotFound
 		}
 		return nil, err
 	}
-	x.CreatedAt = createdAt.String
-	x.UpdatedAt = updatedAt.String
-	x.CompletedAt = completedAt.String
 	return &x, nil
+}
+
+// requireActive loads a cross requirement and refuses to act on it when it
+// sits in the trash.
+//
+// 回收站里的行是只读的：这个闸门由**所有**写路径共用（更新 / 归档 / 改参与
+// 项目 / 存方案 / 拆分 / 阶段 / 验证），否则用户会在垃圾堆里干活。
+func (s *CrossRequirementService) requireActive(id string) (*model.CrossRequirement, error) {
+	x, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if x.DeletedAt != "" {
+		return nil, ErrCrossRequirementInTrash
+	}
+	return x, nil
 }
 
 // List returns the cross requirements, newest first.
 //
-// Archived rows are hidden unless status == "archived" is asked for
-// explicitly — same convention as the requirement list.
+// 两层过滤：
+//   - 回收站里的行（deleted_at 非空）**不在这里** —— 它们由 ListTrash 单独
+//     提供（抄 projects 的 active / trash 双视图）。
+//   - 已归档的行除非显式按 status == "archived" 查，否则隐藏 —— 与需求列表
+//     同一口径。
 func (s *CrossRequirementService) List(status string, keyword string) ([]model.CrossRequirement, error) {
-	where := "WHERE 1=1"
+	where := "WHERE deleted_at IS NULL"
 	args := []interface{}{}
 	if status != "" && status != "all" {
 		if status == "archived" {
@@ -162,8 +250,7 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id,title,description,status,priority,kind,acceptance_criteria,design_docs,design_session_id,design_job_id,split_batch_id,status_locked,created_by,created_at,updated_at,completed_at
-		 FROM cross_requirements `+where+` ORDER BY updated_at DESC, id DESC`, args...)
+		`SELECT `+xreqColumns+` FROM cross_requirements `+where+` ORDER BY updated_at DESC, id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -171,16 +258,35 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 
 	out := []model.CrossRequirement{}
 	for rows.Next() {
-		var x model.CrossRequirement
-		var createdAt, updatedAt, completedAt sql.NullString
-		if err := rows.Scan(&x.ID, &x.Title, &x.Description, &x.Status, &x.Priority, &x.Kind,
-			&x.AcceptanceCriteria, &x.DesignDocs, &x.DesignSessionID, &x.DesignJobID, &x.SplitBatchID, &x.StatusLocked, &x.CreatedBy,
-			&createdAt, &updatedAt, &completedAt); err != nil {
+		x, err := scanXReq(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		x.CreatedAt = createdAt.String
-		x.UpdatedAt = updatedAt.String
-		x.CompletedAt = completedAt.String
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListTrash returns the cross requirements sitting in the trash, most
+// recently deleted first.
+//
+// 回收站列表**不按 status 过滤**：回收站里的行带着它被删时的生命周期状态
+// （这是用户判断「这条是不是还有用」的关键信息），按删除时间倒序才是这个
+// 视图的主序。
+func (s *CrossRequirementService) ListTrash() ([]model.CrossRequirement, error) {
+	rows, err := s.db.Query(
+		`SELECT ` + xreqColumns + ` FROM cross_requirements WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []model.CrossRequirement{}
+	for rows.Next() {
+		x, err := scanXReq(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, x)
 	}
 	return out, rows.Err()
@@ -198,10 +304,12 @@ func (s *CrossRequirementService) List(status string, keyword string) ([]model.C
 // `PUT {"status":"archived"}` 就会顺手把标题、优先级、类型、验收标准全清成
 // 默认值；如果空标题被当成非法，请求会直接 400，归档在 API 层根本不可用。
 //
-// 验收标准是唯一的例外：它用「字段缺省 = nil，字段给了 = 非 nil（哪怕是空
-// 数组）」区分，所以 `[]` 仍然可以清空它。
+// 验收标准与描述是唯一的例外：它们用「字段缺省 = nil，字段给了 = 非 nil」
+// 区分，所以 `[]` / `""` 仍然可以清空它们。描述之所以要跟着验收标准一起改成
+// 指针，是因为面板式编辑必须能**删掉**描述 —— 普通字符串下「没传这个字段」
+// 与「把这个字段清空」都是 ""，用户永远删不掉它。
 func (s *CrossRequirementService) Update(id string, req model.UpdateCrossRequirementReq) error {
-	current, err := s.Get(id)
+	current, err := s.requireActive(id)
 	if err != nil {
 		return err
 	}
@@ -209,9 +317,9 @@ func (s *CrossRequirementService) Update(id string, req model.UpdateCrossRequire
 	if title == "" {
 		title = current.Title
 	}
-	description := req.Description
-	if description == "" {
-		description = current.Description
+	description := current.Description
+	if req.Description != nil {
+		description = *req.Description
 	}
 	kind := strings.TrimSpace(req.Kind)
 	if kind == "" {
@@ -262,7 +370,7 @@ func (s *CrossRequirementService) SetStatus(id string, status string) error {
 	if err := validateCrossStatus(status); err != nil {
 		return err
 	}
-	current, err := s.Get(id)
+	current, err := s.requireActive(id)
 	if err != nil {
 		return err
 	}
@@ -343,13 +451,82 @@ func validateCrossStatus(status string) error {
 	return fmt.Errorf("invalid cross requirement status: %q", status)
 }
 
-// Delete removes a cross requirement and detaches (never deletes) its
-// children.
+// MoveToTrash soft-deletes a cross requirement: the row stays, deleted_at is
+// stamped, and the row disappears from the working list.
+//
+// 「回收站」不是「归档」的另一个名字 —— 归档是**保留**（收起来不显示），
+// 删除是**移走**（可恢复）。两件事分开，status 与 deleted_at 也就分开了。
+//
+// 三件事刻意**不动**：
+//
+//   - 子需求 —— 它们继续在各自的项目里活着，开发不中断；
+//   - 子需求与本体的关联（cross_requirement_id 不变）—— 所以「恢复」是
+//     零成本的：整体方案 / 阶段 / 依赖关系全都还在原处；
+//   - worktree —— 恢复之后还要用同一份基线读代码。清理留给 Purge。
+func (s *CrossRequirementService) MoveToTrash(id string) error {
+	now := time.Now()
+	res, err := s.db.Exec(
+		`UPDATE cross_requirements SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
+		now, now, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// 0 行 = 要么行不存在，要么它已经在回收站里了。回读一次区分这两种
+		// 情况 —— 调用方需要知道是「没这条」还是「已经删过了」。
+		if _, err := s.Get(id); err != nil {
+			return err
+		}
+		return ErrCrossRequirementInTrash
+	}
+	return nil
+}
+
+// Restore brings a cross requirement back from the trash.
+//
+// 只清 deleted_at，**不碰 status / status_locked**：
+//
+//   - 人工锁定过的状态（手动标 done / 归档）继续有效 —— 那是人的判断；
+//   - 没锁的行由读路径的派生逻辑按**当前事实**重算（子需求可能在回收站期间
+//     推进过，恢复时按旧状态显示才是错的）。
+//
+// updated_at 会刷新：恢复回来的行应该排在「进行中」列表的前面，而不是回到
+// 它被删时的那一天。
+func (s *CrossRequirementService) Restore(id string) error {
+	now := time.Now()
+	res, err := s.db.Exec(
+		`UPDATE cross_requirements SET deleted_at=NULL, updated_at=? WHERE id=? AND deleted_at IS NOT NULL`,
+		now, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := s.Get(id); err != nil {
+			return err
+		}
+		return ErrCrossRequirementNotInTrash
+	}
+	return nil
+}
+
+// Purge permanently removes a cross requirement and detaches (never deletes)
+// its children.
+//
+// 只有**回收站里的行**才能 purge（防御性闸门，抄 projects 的 NOT_IN_TRASH）：
+// 误点在「进行中」的行上点「彻底删除」时，应该被挡下来并引导用户先走软删。
 //
 // 删跨项目需求 ≠ 删子需求：子需求背后可能已经产出了代码、分支和 PR，级联删
 // 掉会造成不可恢复的损失。所以这里只把 cross_requirement_id 置空（子需求
 // 变成普通需求），再删映射 / 阶段 / 阶段成员 / 实体行。
-func (s *CrossRequirementService) Delete(id string) error {
+func (s *CrossRequirementService) Purge(id string) error {
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if current.DeletedAt == "" {
+		return ErrCrossRequirementNotInTrash
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -367,6 +544,17 @@ func (s *CrossRequirementService) Delete(id string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM cross_requirement_projects WHERE cross_requirement_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM cross_requirement_bases WHERE cross_requirement_id=?`, id); err != nil {
+		return err
+	}
+	// 附件行必须显式删：schema 声明了 ON DELETE CASCADE，但 SQLite 从不开
+	// PRAGMA foreign_keys，级联是装饰 —— 留着就是孤儿行（与
+	// service.Requirement.Delete 对 requirement_attachments 的处理同构）。
+	// 磁盘上的文件不删（需求删除也是同一口径：泄漏的是磁盘空间，没有功能
+	// 后果）。
+	if _, err := tx.Exec(`DELETE FROM cross_requirement_attachments WHERE cross_requirement_id=?`, id); err != nil {
 		return err
 	}
 	res, err := tx.Exec(`DELETE FROM cross_requirements WHERE id=?`, id)
@@ -397,7 +585,7 @@ func (s *CrossRequirementService) normalizeProjectInputs(ids []string) ([]model.
 		out = append(out, model.CrossRequirementProjectInput{ProjectID: id})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("cross requirement needs at least one project")
+		return nil, ErrCrossRequirementNoProject
 	}
 	return out, nil
 }
@@ -427,7 +615,7 @@ func (s *CrossRequirementService) normalizeCreateProjects(req model.CreateCrossR
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateProject, pid)
 		}
 		seen[pid] = struct{}{}
-		base, err := normalizeBaseBranch(p.BaseBranch)
+		base, err := NormalizeBaseBranch(p.BaseBranch)
 		if err != nil {
 			return nil, fmt.Errorf("project %s: %w", pid, err)
 		}
@@ -438,17 +626,20 @@ func (s *CrossRequirementService) normalizeCreateProjects(req model.CreateCrossR
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("cross requirement needs at least one project")
+		return nil, ErrCrossRequirementNoProject
 	}
 	return out, nil
 }
 
-// normalizeBaseBranch cleans a user-supplied base branch name.
+// NormalizeBaseBranch cleans a user-supplied base branch name.
 //
 // 空 = 不指定（子需求沿用项目默认分支）。非空时必须是一个**合法**的分支名 ——
 // 它会直接进 git 命令（`git checkout <base>`），所以空格 / 控制字符 / 路径
 // 分隔符一律拒绝，而不是让 git 在运行时炸出一条看不懂的错。
-func normalizeBaseBranch(raw string) (string, error) {
+//
+// 导出的原因：跨项目作业（整体方案 / 拆分）会把这条分支名带进 git 命令，
+// 读路径上要**再校验一次** —— 写进来时合法，不代表库里的旧值还合法。
+func NormalizeBaseBranch(raw string) (string, error) {
 	b := strings.TrimSpace(raw)
 	if b == "" {
 		return "", nil
@@ -484,8 +675,11 @@ func normalizeBaseBranch(raw string) (string, error) {
 // 每个参与项目可以带一个**基础分支**：这个仓库里的子需求从哪条分支开发。
 // 非法分支名整批拒绝（它会进 git 命令，脏值必须在这里挡住）。
 func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossRequirementProjectInput) error {
+	if _, err := s.requireActive(id); err != nil {
+		return err
+	}
 	if len(projects) == 0 {
-		return fmt.Errorf("cross requirement needs at least one project")
+		return ErrCrossRequirementNoProject
 	}
 	seen := map[string]struct{}{}
 	normalized := make([]model.CrossRequirementProjectInput, 0, len(projects))
@@ -505,7 +699,7 @@ func (s *CrossRequirementService) SetProjects(id string, projects []model.CrossR
 		if exists == 0 {
 			return fmt.Errorf("project %s not found", pid)
 		}
-		base, err := normalizeBaseBranch(p.BaseBranch)
+		base, err := NormalizeBaseBranch(p.BaseBranch)
 		if err != nil {
 			return fmt.Errorf("project %s: %w", pid, err)
 		}
@@ -704,7 +898,10 @@ func (s *CrossRequirementService) RefreshDerivedStatus(id string) error {
 	}
 	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖 —— 早退，省掉
 	// 一次没必要的进展聚合。
-	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived {
+	//
+	// 回收站里的行同样早退：派生刷新会写 updated_at，而回收站按删除时间排序
+	// —— 让读路径持续改写一条已经收起来的行没有意义。
+	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived || x.DeletedAt != "" {
 		return nil
 	}
 	progress, err := s.Progress(id)
@@ -741,6 +938,11 @@ func (s *CrossRequirementService) ApplyDerivedStatus(
 	}
 	// 设计中 / 已归档是「用户显式状态」，不被派生逻辑覆盖。
 	if x.Status == model.XReqStatusDesigning || x.Status == model.XReqStatusArchived {
+		return x.Status, nil
+	}
+	// 回收站里的行不刷新：它的状态冻结在「被移走的那一刻」，恢复之后由派生
+	// 逻辑按当前事实重算（见 Restore）。
+	if x.DeletedAt != "" {
 		return x.Status, nil
 	}
 
@@ -819,6 +1021,9 @@ func phasesPendingConclusion(phases []model.CrossRequirementPhase) bool {
 // 保存方案 = 状态所依据的事实变了，所以这里顺带**释放人工锁**：机器重新接管
 // 生命周期（调用方随后会刷新一次派生状态）。
 func (s *CrossRequirementService) SaveDesign(id string, markdown string, sessionID string, jobID string) error {
+	if _, err := s.requireActive(id); err != nil {
+		return err
+	}
 	docs := "[]"
 	if trimmed := strings.TrimSpace(markdown); trimmed != "" {
 		if raw, err := json.Marshal([]string{trimmed}); err == nil {
@@ -908,6 +1113,9 @@ func derivePhaseStatus(stored string, members []model.CrossRequirementPhaseItem)
 
 // CreatePhase adds a phase to a cross requirement.
 func (s *CrossRequirementService) CreatePhase(id string, req model.CrossRequirementPhaseReq) (*model.CrossRequirementPhase, error) {
+	if _, err := s.requireActive(id); err != nil {
+		return nil, err
+	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		return nil, fmt.Errorf("phase name is required")
@@ -948,6 +1156,9 @@ func (s *CrossRequirementService) CreatePhase(id string, req model.CrossRequirem
 
 // UpdatePhase updates a phase's editable fields / members / verdict.
 func (s *CrossRequirementService) UpdatePhase(id string, phaseID string, req model.UpdateCrossRequirementPhaseReq) (*model.CrossRequirementPhase, error) {
+	if _, err := s.requireActive(id); err != nil {
+		return nil, err
+	}
 	current, err := s.GetPhase(id, phaseID)
 	if err != nil {
 		return nil, err
@@ -1027,6 +1238,9 @@ func (s *CrossRequirementService) GetPhase(id string, phaseID string) (*model.Cr
 
 // DeletePhase removes a phase and its member rows.
 func (s *CrossRequirementService) DeletePhase(id string, phaseID string) error {
+	if _, err := s.requireActive(id); err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1133,6 +1347,10 @@ func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDeta
 	if err != nil {
 		return nil, err
 	}
+	bases, err := s.ListBases(id)
+	if err != nil {
+		return nil, err
+	}
 
 	return &model.CrossRequirementDetail{
 		CrossRequirement: *x,
@@ -1141,5 +1359,85 @@ func (s *CrossRequirementService) Detail(id string) (*model.CrossRequirementDeta
 		Dependencies:     deps,
 		Phases:           agg.Phases[id],
 		Progress:         agg.Progress[id],
+		Bases:            bases,
 	}, nil
+}
+
+// ── 基线台账 ───────────────────────────────────────────────────────────────
+
+// UpsertBases records the baseline each participating repository was locked
+// to during an overall-design / split run.
+//
+// One row per (cross requirement, project). The write is an upsert rather
+// than a replace so a run that only reached some of the repositories does not
+// erase what the previous run learned about the others — but the rows it DID
+// reach are overwritten, because "the baseline moved" is exactly the fact
+// that must not go stale.
+func (s *CrossRequirementService) UpsertBases(xreqID string, bases []model.CrossRequirementBase) error {
+	if strings.TrimSpace(xreqID) == "" {
+		return fmt.Errorf("cross requirement id is empty")
+	}
+	now := time.Now()
+	for _, b := range bases {
+		pid := strings.TrimSpace(b.ProjectID)
+		if pid == "" {
+			continue
+		}
+		degraded := 0
+		if b.Degraded {
+			degraded = 1
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO cross_requirement_bases (id,cross_requirement_id,project_id,base_branch,base_sha,worktree_path,degraded,updated_at)
+			 VALUES (?,?,?,?,?,?,?,?)`+
+				s.db.OnConflict("cross_requirement_id,project_id",
+					"base_branch=excluded.base_branch, base_sha=excluded.base_sha, worktree_path=excluded.worktree_path, degraded=excluded.degraded, updated_at=excluded.updated_at"),
+			util.NewID("xbase"), xreqID, pid,
+			strings.TrimSpace(b.BaseBranch), strings.TrimSpace(b.BaseSHA),
+			strings.TrimSpace(b.WorktreePath), degraded, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListBases returns the recorded baselines, ordered by the participating
+// project's sort order so the UI can line them up with the project table.
+//
+// Projects that were never reached (no baseline row) are simply absent —
+// the caller maps them onto its own project list.
+func (s *CrossRequirementService) ListBases(xreqID string) ([]model.CrossRequirementBase, error) {
+	if strings.TrimSpace(xreqID) == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT b.project_id,b.base_branch,b.base_sha,b.worktree_path,b.degraded
+		   FROM cross_requirement_bases b
+		  WHERE b.cross_requirement_id = ?
+		  ORDER BY b.project_id ASC`, xreqID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.CrossRequirementBase{}
+	for rows.Next() {
+		var b model.CrossRequirementBase
+		var degraded int
+		if err := rows.Scan(&b.ProjectID, &b.BaseBranch, &b.BaseSHA, &b.WorktreePath, &degraded); err != nil {
+			return nil, err
+		}
+		b.Degraded = degraded != 0
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// DeleteBases drops the baseline ledger of a cross requirement.
+//
+// Called when the cross requirement is deleted — the rows are meaningless
+// without it, and the worktree paths they carry are cleaned up by the
+// handler (the service layer does not touch the filesystem).
+func (s *CrossRequirementService) DeleteBases(xreqID string) error {
+	_, err := s.db.Exec(`DELETE FROM cross_requirement_bases WHERE cross_requirement_id=?`, xreqID)
+	return err
 }

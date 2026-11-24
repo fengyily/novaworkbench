@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -51,7 +53,7 @@ type crossJobReq struct {
 type crossJobSpec struct {
 	// Prompt — 已经组装好的提示词（**含各参与仓库的项目约定**）。
 	Prompt string
-	// WorkDir — 临时工作区（作业不在任何仓库里跑）。
+	// WorkDir — 作业工作目录（~/.novaworkbench/xreq/<xreqID>/<kind>）。
 	WorkDir string
 	// SystemPrompt — persona（architect）。
 	SystemPrompt string
@@ -61,8 +63,12 @@ type crossJobSpec struct {
 	Effort string
 	// ClaudeConfigID — 生效的 claude 配置（空 = 当前激活配置）。
 	ClaudeConfigID string
-	// CrossRequirementID — 跨项目需求 id（用来解析要授权的参与仓库）。
-	CrossRequirementID string
+	// Workspace — 各参与仓库的隔离 worktree（读取路径 + 锁定的基线 SHA）。
+	// 作业从这里读代码，而不是从共享检出。
+	Workspace *crossWorkspace
+	// ExtraDirs — 额外授权给 CLI 的目录（阶段验证用它挂上子需求的实现
+	// worktree）。与 Workspace 的目录合并后去重。
+	ExtraDirs []string
 }
 
 // crossStreamOpts 组装一个跨项目作业的 claude 调用参数。
@@ -85,12 +91,38 @@ func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamO
 		Effort:         spec.Effort,
 		ClaudeConfigID: spec.ClaudeConfigID,
 		// The participating repositories must be readable, otherwise the
-		// model cannot ground the contract in real file paths.
-		AddDirs: h.crossProjectDirs(spec.CrossRequirementID),
+		// model cannot ground the contract in real file paths. The paths are
+		// the **workspace read paths** — detached worktrees pinned to the
+		// locked baseline commit, not the shared checkouts.
+		AddDirs: mergeCrossDirs(crossWorkspaceDirs(spec.Workspace), spec.ExtraDirs),
 		// Read-only: producing a design / a split / a verification report
 		// must not touch any repository.
 		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
 	}
+}
+
+// mergeCrossDirs merges two directory lists, dropping duplicates and paths
+// that do not exist on disk (the CLI rejects an unreadable --add-dir).
+func mergeCrossDirs(lists ...[]string) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, list := range lists {
+		for _, d := range list {
+			d = strings.TrimSpace(d)
+			if d == "" {
+				continue
+			}
+			if _, dup := seen[d]; dup {
+				continue
+			}
+			if st, err := os.Stat(d); err != nil || !st.IsDir() {
+				continue
+			}
+			seen[d] = struct{}{}
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // ── 项目约定的送达方式 ─────────────────────────────────────────────────────
@@ -111,9 +143,10 @@ func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamO
 // 所以约定随提示词一起送达，每个参与仓库一节、标题带仓库名（见
 // handler/cross_claude_doc.go 与 prompt/cross_claude_doc.go）。代价是受管副本
 // 不再经过 CLI 自己的项目记忆通道 —— 但那份通道在跨项目作业里本来就用不上：
-// 作业跑在临时目录里，CLI 没有任何项目文档可读（--add-dir 只给读权限，不让
-// CLI 加载目录里的 CLAUDE.md；要它加载必须打开那个进程级的环境变量，而打开
-// 它会让 gateway 把所有 --add-dir 目录的 CLAUDE.md 都算进排除列表）。
+// 作业的工作目录不属于任何仓库（~/.novaworkbench/xreq/<xreqID>/<kind>），
+// CLI 没有任何项目文档可读（--add-dir 只给读权限，不让 CLI 加载目录里的
+// CLAUDE.md；要它加载必须打开那个进程级的环境变量，而打开它会让 gateway 把
+// 所有 --add-dir 目录的 CLAUDE.md 都算进排除列表）。
 //
 // 结论：这里刻意**不**调用 claudeDocInjection.ApplyTo —— 它会设置
 // opts.ClaudeMdDir，于是 gateway 打开那个环境变量、并把参与仓库目录里的
@@ -123,21 +156,60 @@ func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamO
 // ── 三个作业的提示词组装 ───────────────────────────────────────────────────
 //
 // 每个作业的提示词都必须带上**参与仓库的项目级 CLAUDE.md 约定**：跨项目作业
-// 跑在临时目录里，CLI 的项目记忆通道读不到任何项目文档（见上一节），约定只能
-// 随提示词一起送达。
+// 的工作目录不属于任何仓库，CLI 的项目记忆通道读不到任何项目文档（见上一节），
+// 约定只能随提示词一起送达。约定取自**本次作业读的那棵树**（隔离 worktree，
+// 落在锁定的基线上），与模型读到的代码同源。
 //
 // 提示词在**构造 llm.StreamOpts 之前**组装完毕 —— StreamOpts.Prompt 是值拷贝，
 // 事后往那个字符串上追加内容对已经构造好的 opts 没有任何影响。
 
+// crossAttachDir — 跨项目需求的附件在本地磁盘上的根目录。
+//
+// 跨项目作业**只在本地跑**（工作目录 ~/.novaworkbench/xreq/<id>/<kind>，没有
+// 远端执行环境），所以附件目录恒为本地根，不需要 resolveAttachDirFor 那套
+// SSH 同步。
+func crossAttachDir(xreqID string) string {
+	return filepath.Join(service.AttachmentRoot(), xreqID)
+}
+
+// crossAttachManifest — 跨项目需求的附件清单（Markdown）。
+//
+// 空串 = 该跨项目需求没有附件（或附件服务未接线）—— 调用方据此让提示词保持
+// 原样。
+func (h *CrossRequirementHandler) crossAttachManifest(xreqID string) string {
+	if h.attachSvc == nil {
+		return ""
+	}
+	return attachManifestFor(h.attachSvc, xreqID, crossAttachDir(xreqID))
+}
+
+// crossDescriptionForPrompt — 把描述里的 nova://attachment/<id> 标记重写成
+// 真实磁盘路径。
+//
+// 不重写的话模型看到的是一串它打不开的协议串 —— 图片在它眼里就等于不存在。
+// 跨需求引用的 id 刻意不重写（rewriteAttachmentMarkers 的既有语义），留在
+// 文本里让模型自己发现那是别的需求的附件。
+func (h *CrossRequirementHandler) crossDescriptionForPrompt(xreq *model.CrossRequirement) string {
+	if h.attachSvc == nil {
+		return xreq.Description
+	}
+	return rewriteAttachmentMarkers(h.attachSvc, xreq.ID, crossAttachDir(xreq.ID), xreq.Description)
+}
+
 // crossDesignPrompt 组装整体方案的提示词。
-func (h *CrossRequirementHandler) crossDesignPrompt(xreq *model.CrossRequirement, projects []prompt.CrossProjectInput, previousDesign string) string {
-	return prompt.BuildCrossDesignPrompt(xreq.Title, xreq.Description,
-		crossAcceptance(xreq.AcceptanceCriteria), projects, previousDesign, h.crossConventions(xreq.ID))
+//
+// ws 是本次作业读代码的工作目录集合 —— 约定也从**同一棵树**里取，这样提示词里
+// 的规矩与模型实际读到的代码出自同一处基线。
+func (h *CrossRequirementHandler) crossDesignPrompt(xreq *model.CrossRequirement, projects []prompt.CrossProjectInput, previousDesign string, ws *crossWorkspace) string {
+	return prompt.BuildCrossDesignPrompt(xreq.Title, h.crossDescriptionForPrompt(xreq),
+		crossAcceptance(xreq.AcceptanceCriteria), projects, previousDesign,
+		h.crossConventions(xreq.ID, ws), h.crossAttachManifest(xreq.ID))
 }
 
 // crossSplitPrompt 组装按项目拆分的提示词。
-func (h *CrossRequirementHandler) crossSplitPrompt(xreq *model.CrossRequirement, design string, projects []prompt.CrossProjectInput) string {
-	return prompt.BuildCrossSplitPrompt(xreq.Title, design, projects, h.crossConventions(xreq.ID))
+func (h *CrossRequirementHandler) crossSplitPrompt(xreq *model.CrossRequirement, design string, projects []prompt.CrossProjectInput, ws *crossWorkspace) string {
+	return prompt.BuildCrossSplitPrompt(xreq.Title, design, projects,
+		h.crossConventions(xreq.ID, ws), h.crossAttachManifest(xreq.ID))
 }
 
 // crossPhasePrompt 组装阶段验证的提示词。
@@ -146,7 +218,8 @@ func (h *CrossRequirementHandler) crossSplitPrompt(xreq *model.CrossRequirement,
 // 规矩去判它，结论就没有意义。
 func (h *CrossRequirementHandler) crossPhasePrompt(xreq *model.CrossRequirement, phase *model.CrossRequirementPhase, members []prompt.CrossPhaseMember) string {
 	return prompt.BuildCrossPhasePrompt(phase.Name, phase.Description, members,
-		service.DesignDocsToMarkdown(xreq.DesignDocs), h.crossPhaseConventions(members))
+		service.DesignDocsToMarkdown(xreq.DesignDocs), h.crossPhaseConventions(members),
+		h.crossAttachManifest(xreq.ID))
 }
 
 // ── 整体方案 ───────────────────────────────────────────────────────────────
@@ -175,6 +248,9 @@ func (h *CrossRequirementHandler) StartDesign(w http.ResponseWriter, r *http.Req
 	xreq, err := h.svc.Get(xreqID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+		return
+	}
+	if rejectIfTrashed(w, xreq) {
 		return
 	}
 	if xreq.Status == model.XReqStatusArchived {
@@ -230,29 +306,40 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 		}
 	}()
 
-	projects, err := h.crossProjectInputs(xreq.ID)
+	// Prepare the working set BEFORE the prompt is built: the prompt tells the
+	// model which paths to read and which baseline it is reasoning about, so
+	// the paths have to exist first. A failed fetch aborts the job — a design
+	// written against a tree we know is stale is worse than no design.
+	ws, wsErr := h.buildCrossWorkspace(context.Background(), xreq.ID, func(s string) {
+		job.Append(store.LogLine{Type: "message", Content: s})
+	})
+	if wsErr != nil {
+		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "准备仓库基线失败: "+wsErr.Error())
+		return
+	}
+
+	projects, err := h.crossProjectInputs(xreq.ID, ws)
 	if err != nil {
 		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "读取参与项目失败: "+err.Error())
 		return
 	}
 	previous := service.DesignDocsToMarkdown(xreq.DesignDocs)
-	promptText := h.crossDesignPrompt(xreq, projects, previous)
+	promptText := h.crossDesignPrompt(xreq, projects, previous, ws)
 
-	workDir, cleanup, err := crossWorkDir("design")
+	workDir, err := crossWorkspaceDir(xreq.ID, crossRunDesign)
 	if err != nil {
-		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "创建临时工作区失败: "+err.Error())
+		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "创建工作目录失败: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	opts := h.crossStreamOpts(crossJobSpec{
-		Prompt:             promptText,
-		WorkDir:            workDir,
-		SystemPrompt:       systemPrompt,
-		Model:              modelName,
-		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID:     configID,
-		CrossRequirementID: xreq.ID,
+		Prompt:         promptText,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          modelName,
+		Effort:         resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID: configID,
+		Workspace:      ws,
 	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧭 正在生成跨项目整体方案…"})
@@ -284,6 +371,12 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 	if err := h.svc.SaveDesign(xreq.ID, markdown, "", job.ID); err != nil {
 		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "保存整体方案失败: "+err.Error())
 		return
+	}
+	// Record which commit each repository was read at. The ledger is what
+	// makes "这份方案是对着哪个提交写的" answerable later — and it is the
+	// only record of which worktrees this cross requirement created.
+	if err := h.svc.UpsertBases(xreq.ID, crossWorkspaceBases(ws)); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 写入基线台账失败：" + err.Error()})
 	}
 	if err := h.svc.RefreshDerivedStatus(xreq.ID); err != nil {
 		_ = err
@@ -321,6 +414,9 @@ func (h *CrossRequirementHandler) StartSplit(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
 		return
 	}
+	if rejectIfTrashed(w, xreq) {
+		return
+	}
 	if xreq.Status == model.XReqStatusArchived {
 		writeError(w, http.StatusBadRequest, "XREQ_ARCHIVED", "已归档的跨项目需求不能拆分")
 		return
@@ -339,7 +435,7 @@ func (h *CrossRequirementHandler) StartSplit(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "XREQ_NO_DESIGN", "请先生成整体方案，再按项目拆分")
 		return
 	}
-	projects, err := h.crossProjectInputs(xreqID)
+	projects, err := h.crossProjectInputs(xreqID, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 		return
@@ -375,12 +471,12 @@ func (h *CrossRequirementHandler) StartSplit(w http.ResponseWriter, r *http.Requ
 
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	go h.runSplit(job, xreq, body, design, projects, systemPrompt, modelName, configID)
+	go h.runSplit(job, xreq, body, design, systemPrompt, modelName, configID)
 }
 
 // runSplit is the goroutine body of the cross-project split job.
 func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequirement, body crossJobReq,
-	design string, projects []prompt.CrossProjectInput, systemPrompt, modelName, configID string) {
+	design string, systemPrompt, modelName, configID string) {
 	defer h.runs.release(crossRunSplit, xreq.ID, "")
 	defer func() {
 		if r := recover(); r != nil {
@@ -388,23 +484,37 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 		}
 	}()
 
-	promptText := h.crossSplitPrompt(xreq, design, projects)
-
-	workDir, cleanup, err := crossWorkDir("split")
-	if err != nil {
-		h.finishCrossError(job, crossRunSplit, xreq.ID, "", "创建临时工作区失败: "+err.Error())
+	// Same working set as the overall design: the split reads the very same
+	// repositories the design was written against, so it prepares them the
+	// same way — fetch, lock the baseline, hand the model the pinned worktree.
+	ws, wsErr := h.buildCrossWorkspace(context.Background(), xreq.ID, func(s string) {
+		job.Append(store.LogLine{Type: "message", Content: s})
+	})
+	if wsErr != nil {
+		h.finishCrossError(job, crossRunSplit, xreq.ID, "", "准备仓库基线失败: "+wsErr.Error())
 		return
 	}
-	defer cleanup()
+	projects, pErr := h.crossProjectInputs(xreq.ID, ws)
+	if pErr != nil {
+		h.finishCrossError(job, crossRunSplit, xreq.ID, "", "读取参与项目失败: "+pErr.Error())
+		return
+	}
+	promptText := h.crossSplitPrompt(xreq, design, projects, ws)
+
+	workDir, err := crossWorkspaceDir(xreq.ID, crossRunSplit)
+	if err != nil {
+		h.finishCrossError(job, crossRunSplit, xreq.ID, "", "创建工作目录失败: "+err.Error())
+		return
+	}
 
 	opts := h.crossStreamOpts(crossJobSpec{
-		Prompt:             promptText,
-		WorkDir:            workDir,
-		SystemPrompt:       systemPrompt,
-		Model:              modelName,
-		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID:     configID,
-		CrossRequirementID: xreq.ID,
+		Prompt:         promptText,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          modelName,
+		Effort:         resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID: configID,
+		Workspace:      ws,
 	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在按项目拆分整体方案…"})
@@ -425,6 +535,12 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 
 	h.runs.setResult(job.ID, "", candidates, "")
 	h.runs.finish(job.ID, store.JobDone, "")
+	// Refresh the ledger: the split may have run on a newer baseline than the
+	// design did (the fetch moves with the upstream), and the ledger should
+	// say which commit the CURRENT reading came from.
+	if err := h.svc.UpsertBases(xreq.ID, crossWorkspaceBases(ws)); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 写入基线台账失败：" + err.Error()})
+	}
 	job.Append(store.LogLine{Type: "message", Content: prompt.CrossSplitSummary(candidates)})
 	job.Finish(0, store.JobDone)
 }
@@ -539,6 +655,14 @@ func (h *CrossRequirementHandler) StartVerify(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusNotFound, "PHASE_NOT_FOUND", "阶段不存在")
 		return
 	}
+	xreq, err := h.svc.Get(xreqID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "CROSS_REQUIREMENT_NOT_FOUND", "跨项目需求不存在")
+		return
+	}
+	if rejectIfTrashed(w, xreq) {
+		return
+	}
 	if existing, running := h.runs.peek(crossRunVerify, xreqID, phaseID); running {
 		writeError(w, http.StatusConflict, "XREQ_IN_PROGRESS",
 			fmt.Sprintf("已有阶段验证任务在运行（job %s），请等待结束", existing))
@@ -597,21 +721,42 @@ func (h *CrossRequirementHandler) runVerify(job *store.Job, xreqID, phaseID stri
 	members := h.crossPhaseMembers(xreqID, phase)
 	promptText := h.crossPhasePrompt(xreq, phase, members)
 
-	workDir, cleanup, err := crossWorkDir("verify")
+	// The verification reads TWO sets of directories:
+	//
+	//   - the **baseline** worktrees (the cross requirement's own), so the
+	//     model can see the tree the contract was written against;
+	//   - each member's **implementation** worktree — the code that was
+	//     actually written for this phase. Without this the verification
+	//     inspects the base branch and "verifies" code that does not exist.
+	//
+	// The baseline fetch is best-effort here: the implementation is what is
+	// being judged, so a repository that cannot be synced must not abort the
+	// verification — it just means the contract side is unavailable.
+	ws, wsErr := h.buildCrossWorkspace(context.Background(), xreqID, func(s string) {
+		job.Append(store.LogLine{Type: "message", Content: s})
+	})
+	if wsErr != nil {
+		job.Append(store.LogLine{Type: "error", Content: "⚠️ 准备基线工作区失败（不影响验证实现代码）：" + wsErr.Error()})
+		ws = &crossWorkspace{Projects: []crossWorkspaceProject{}}
+	}
+
+	implDirs := h.crossPhaseImplDirs(members)
+
+	workDir, err := crossWorkspaceDir(xreqID, crossRunVerify)
 	if err != nil {
-		h.finishCrossError(job, crossRunVerify, xreqID, phaseID, "创建临时工作区失败: "+err.Error())
+		h.finishCrossError(job, crossRunVerify, xreqID, phaseID, "创建工作目录失败: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	opts := h.crossStreamOpts(crossJobSpec{
-		Prompt:             promptText,
-		WorkDir:            workDir,
-		SystemPrompt:       systemPrompt,
-		Model:              modelName,
-		Effort:             resolveEffort(h.llm, body.Effort, llm.StageDesign),
-		ClaudeConfigID:     configID,
-		CrossRequirementID: xreqID,
+		Prompt:         promptText,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          modelName,
+		Effort:         resolveEffort(h.llm, body.Effort, llm.StageDesign),
+		ClaudeConfigID: configID,
+		Workspace:      ws,
+		ExtraDirs:      implDirs,
 	})
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在做阶段验证…"})
@@ -673,6 +818,9 @@ func (h *CrossRequirementHandler) crossPhaseMembers(xreqID string, phase *model.
 		if h.reqSvc != nil {
 			if row, rErr := h.reqSvc.Get(child.ID); rErr == nil && row != nil {
 				member.Description = row.Description
+				// The implementation lives in the member's own worktree —
+				// that is the code the phase has to verify.
+				member.WorktreePath = strings.TrimSpace(row.WorktreePath)
 			}
 		}
 		if h.projectSvc != nil {
@@ -683,6 +831,24 @@ func (h *CrossRequirementHandler) crossPhaseMembers(xreqID string, phase *model.
 		out = append(out, member)
 	}
 	return out
+}
+
+// crossPhaseImplDirs returns the implementation directories of a phase's
+// members — their own worktrees.
+//
+// A member that has not started development yet has no worktree; it is
+// skipped here and the prompt says so, so the model knows the implementation
+// is missing rather than silently reading the base branch and reporting the
+// phase as verified.
+func (h *CrossRequirementHandler) crossPhaseImplDirs(members []prompt.CrossPhaseMember) []string {
+	dirs := []string{}
+	for _, m := range members {
+		if m.WorktreePath == "" {
+			continue
+		}
+		dirs = append(dirs, m.WorktreePath)
+	}
+	return dirs
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────

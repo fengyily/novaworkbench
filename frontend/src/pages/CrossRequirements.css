@@ -64,6 +64,14 @@
   flex-wrap: wrap;
 }
 
+/* 新建面板的落位：挂在工具栏**上方**、紧跟头部。
+   列表可能有十几张卡片，面板放在列表底部时用户点了「新建」却要滚到底
+   才看见它展开 —— 与普通需求的新建面板同一个教训（ProjectDetail 把
+   CreateRequirementForm 挂在列表上方）。 */
+.xreq-create-anchor {
+  margin-bottom: 18px;
+}
+
 .xreq-filter {
   width: auto;
   min-width: 140px;
@@ -105,6 +113,53 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+/* 标题本身是一个按钮（键盘可达），整张卡片也可点 —— 按钮要吃掉自己的点击，
+   否则一次点击会既走按钮又走卡片的导航（同一个目的地，触发两次）。 */
+.xreq-item-title-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 行内的破坏性入口（移到回收站）。
+   软删 —— 可恢复，所以它不需要确认框，只需要一个说得清的图标 + title。 */
+.xreq-item-action {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.xreq-item-action:hover {
+  color: var(--color-error);
+  border-color: var(--color-border);
+  background: var(--color-hover);
+}
+
+/* 回收站视图的行内动作（恢复 / 彻底删除）。 */
+.xreq-item-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .xreq-item-title {
@@ -219,6 +274,26 @@
   padding: 10px 12px;
   margin-bottom: 12px;
   font-size: 13px;
+}
+
+/* 回收站横幅：回收站里的跨项目需求是只读的，横幅把「为什么不能操作」与
+   「怎么才能继续」一起说清楚（而不是让按钮莫名其妙地灰着）。 */
+.xreq-trash-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.xreq-trash-banner strong {
+  color: var(--color-warning-deep);
+  font-size: 14px;
 }
 
 /* ── 详情区块 ─────────────────────────────────────────────────────────── */
@@ -468,42 +543,15 @@
   margin-bottom: 8px;
 }
 
-/* ── 弹窗 ─────────────────────────────────────────────────────────────── */
+/* ── 内联编辑器的操作栏 ───────────────────────────────────────────────── */
+/*
+   这一组原本叫 .xreq-modal-actions —— 跨项目需求页曾有两个弹窗（新建、
+   拆分确认）。两者都换成了页面内的面板，弹窗外壳（.xreq-modal-overlay /
+   .xreq-modal / .xreq-modal-wide / .xreq-modal-title）随之删除，只留下这
+   个被内联编辑器复用的操作栏。名字里的 "modal" 已经不成立了。
+*/
 
-.xreq-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  z-index: 1000;
-}
-
-.xreq-modal {
-  background: var(--color-surface);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-modal);
-  padding: 20px 22px;
-  width: 100%;
-  max-width: 520px;
-  max-height: 86vh;
-  overflow-y: auto;
-}
-
-.xreq-modal-wide {
-  max-width: 720px;
-}
-
-.xreq-modal-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--color-text);
-  margin-bottom: 14px;
-}
-
-.xreq-modal-actions {
+.xreq-panel-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

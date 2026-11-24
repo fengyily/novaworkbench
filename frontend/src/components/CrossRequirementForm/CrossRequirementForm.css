@@ -1,0 +1,155 @@
+/* CrossRequirementForm — 跨项目需求的「新建 / 编辑」内联面板。
+ *
+ * 面板化（而不是弹窗）是这一族的既定做法：普通需求的新建 / 编辑都是页面
+ * 内的面板（CreateRequirementForm / RequirementEditForm），弹窗只留给确认类
+ * 动作。跨项目需求沿用同一条路。
+ *
+ * 视觉刻意对齐 `.create-req-form`（ProjectDetail.css 里的普通需求面板）：
+ * 同样的底色 / 描边 / 3px 主色左边条 / 圆角，两者读起来是一家人。类名用
+ * xreq- 前缀 —— 跨项目需求页的私有样式表有「只允许 xreq- 前缀」的约定
+ * （CrossRequirements.css 文件头）。
+ *
+ * 面板自己的样式不依赖 ProjectDetail.css 被加载：那套 `.create-req-form`
+ * 规则是页面私有的，跨项目需求的页面不引它，所以这里自带一份。
+ */
+
+.xreq-form {
+  margin: 0;
+  padding: 16px 18px;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-left: 3px solid var(--color-primary, #4F46E5);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+}
+
+.xreq-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.xreq-form-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.xreq-form-id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.xreq-form .form-group {
+  margin-bottom: 14px;
+}
+
+.xreq-form .form-group > label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #475569);
+}
+
+.xreq-form-desc-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.xreq-form-desc-meta .form-hint {
+  margin-top: 0;
+}
+
+.xreq-form-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.xreq-form-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 3px solid var(--color-error, #EF4444);
+  background: var(--color-error-bg, #FEF2F2);
+  color: var(--color-error, #EF4444);
+  font-size: 13px;
+}
+
+/* 附件小节：标题 + 一句「AI 也会看到」的提示 + 附件面板。
+   提示语是跨项目口径（整体方案 / 拆分 / 阶段验证），不能复用普通需求那句
+   「三个阶段（分析 / 方案 / 开发）」。 */
+.xreq-form-attachments {
+  margin-top: 4px;
+}
+
+.xreq-form-attachments-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.xreq-form-attachments-head > span:first-child {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #475569);
+}
+
+.xreq-form-attachments-hint {
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* 底栏：描述可能很长，保存按钮要留在视线内。 */
+.xreq-form-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px -18px -16px;
+  padding: 12px 18px;
+  background: var(--color-surface, #fff);
+  border-top: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 0 0 8px 8px;
+}
+
+.xreq-form-actions .xreq-form-shortcut {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* 参与项目勾选列表 —— 沿用跨项目需求页自己的 .xreq-picker / .xreq-option
+   词汇（那一套定义在 CrossRequirements.css 里，页面与面板共用）。 */
+.xreq-form-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xreq-form-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.xreq-form-project-row > span:first-of-type {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
+@media (max-width: 640px) {
+  .xreq-form-id { display: none; }
+  .xreq-form-actions .xreq-form-shortcut { display: none; }
+}

@@ -90,6 +90,10 @@ func (s *spyProjectSvc) SyncDesignBase(ctx context.Context, projectID, baseBranc
 	return service.GitSyncResult{}, nil
 }
 
+func (s *spyProjectSvc) FetchBaseBranch(ctx context.Context, projectID, baseBranch string, timeout time.Duration) (service.FetchBaseResult, error) {
+	return service.FetchBaseResult{Skipped: true, Reason: "spy"}, nil
+}
+
 func (s *spyProjectSvc) OriginURL(projectID string) (string, error) {
 	return "", nil
 }
