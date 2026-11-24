@@ -2050,7 +2050,7 @@ function SubTaskCard({
               would show two empty-state boxes. */}
           {!streaming && logUnavailable && (
             <div className="sub-log-empty">
-              {t('components.subTaskCard.logUnavailable')}
+              {t('components.subTaskPanel.split.logUnavailable')}
             </div>
           )}
 
