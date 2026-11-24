@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
@@ -46,6 +47,44 @@ import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchiv
 import { fmtDateTime } from '../utils/intl';
 import { stripArtifactHeader, stripArtifactCodeFence } from '../utils/subTaskArtifact';
 import './SubTaskPanel.css';
+
+// ── Split-column width ────────────────────────────────────────────────
+// The tree column's width is the ONLY knob the split layout exposes:
+// `.sub-split` publishes `--sub-aside-w` (default 300px) and
+// `.sub-split-aside` consumes it as `flex: 0 0 var(--sub-aside-w)`.
+// This module writes the VARIABLE and never touches that layout rule.
+const ASIDE_W_MIN = 220;
+const ASIDE_W_MAX = 480;
+const ASIDE_W_DEFAULT = 300;
+const ASIDE_W_STORAGE_KEY = 'nova.subtask.asideWidth';
+
+// CSSProperties has no index signature for custom properties, so an
+// inline one needs this explicit intersection before it can be set
+// (same pattern as SubTaskTree.tsx's TreeStyle).
+type SplitStyle = CSSProperties & { '--sub-aside-w': string };
+
+// Read → validate → fall back. A corrupted value and an out-of-range
+// value take the SAME path: neither is a usable width, so neither is
+// honoured. Reading never throws (private mode / disabled storage).
+function readStoredAsideWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(ASIDE_W_STORAGE_KEY);
+    if (raw === null) return ASIDE_W_DEFAULT;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < ASIDE_W_MIN || n > ASIDE_W_MAX) return ASIDE_W_DEFAULT;
+    return n;
+  } catch {
+    return ASIDE_W_DEFAULT;
+  }
+}
+
+function persistAsideWidth(w: number): void {
+  try {
+    window.localStorage.setItem(ASIDE_W_STORAGE_KEY, String(Math.round(w)));
+  } catch {
+    // Storage unavailable: the drag still works, it just is not remembered.
+  }
+}
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
 // sub_tasks fields directly without a usageApi round-trip. The live
