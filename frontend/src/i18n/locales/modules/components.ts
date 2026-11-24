@@ -245,6 +245,9 @@ export const components = {
       emptyDetail: '在左侧选择一个子任务，右侧显示它的实时输出与结果',
       logUnavailable: '该任务的输出记录不可用（后台任务已结束且日志未持久化）',
       historyBadge: '历史输出',
+      detailTitle: '详情',
+      resizeHandle: '拖拽调整左栏宽度',
+      resizeHint: '拖拽调整左栏宽度（220–480px）',
     },
   },
   subTaskCard: {

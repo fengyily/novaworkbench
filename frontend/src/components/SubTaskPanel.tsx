@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
@@ -28,10 +29,12 @@ import { ExecEnvBadge } from './ExecEnvBadge';
 import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentitySelect';
 import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
+import { FullscreenButton } from './FullscreenButton';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { createReplaySkipper } from '../utils/jobStream';
 import { modelContextWindow } from '../utils/modelWindow';
+import { useFullscreen } from '../utils/useFullscreen';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload';
@@ -46,6 +49,44 @@ import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchiv
 import { fmtDateTime } from '../utils/intl';
 import { stripArtifactHeader, stripArtifactCodeFence } from '../utils/subTaskArtifact';
 import './SubTaskPanel.css';
+
+// ── Split-column width ────────────────────────────────────────────────
+// The tree column's width is the ONLY knob the split layout exposes:
+// `.sub-split` publishes `--sub-aside-w` (default 300px) and
+// `.sub-split-aside` consumes it as `flex: 0 0 var(--sub-aside-w)`.
+// This module writes the VARIABLE and never touches that layout rule.
+const ASIDE_W_MIN = 220;
+const ASIDE_W_MAX = 480;
+const ASIDE_W_DEFAULT = 300;
+const ASIDE_W_STORAGE_KEY = 'nova.subtask.asideWidth';
+
+// CSSProperties has no index signature for custom properties, so an
+// inline one needs this explicit intersection before it can be set
+// (same pattern as SubTaskTree.tsx's TreeStyle).
+type SplitStyle = CSSProperties & { '--sub-aside-w': string };
+
+// Read → validate → fall back. A corrupted value and an out-of-range
+// value take the SAME path: neither is a usable width, so neither is
+// honoured. Reading never throws (private mode / disabled storage).
+function readStoredAsideWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(ASIDE_W_STORAGE_KEY);
+    if (raw === null) return ASIDE_W_DEFAULT;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < ASIDE_W_MIN || n > ASIDE_W_MAX) return ASIDE_W_DEFAULT;
+    return n;
+  } catch {
+    return ASIDE_W_DEFAULT;
+  }
+}
+
+function persistAsideWidth(w: number): void {
+  try {
+    window.localStorage.setItem(ASIDE_W_STORAGE_KEY, String(Math.round(w)));
+  } catch {
+    // Storage unavailable: the drag still works, it just is not remembered.
+  }
+}
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
 // sub_tasks fields directly without a usageApi round-trip. The live
@@ -2415,6 +2456,67 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // the project gate runs one child at a time, so "the one that is
   // running" is unambiguous and the user should not have to click first.
   const [followRunning, setFollowRunning] = useState<boolean>(true);
+  // ── Split-column width + drag state ─────────────────────────────────
+  // Lazily initialised so the FIRST frame already carries the restored
+  // width — no flash at 300px before the stored value lands.
+  const [asideWidth, setAsideWidth] = useState<number>(readStoredAsideWidth);
+  const [resizing, setResizing] = useState<boolean>(false);
+  const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
+  // The width as of the LAST pointermove. `pointerup` reads this instead
+  // of `asideWidth`, whose closure would still hold the previous render's
+  // value.
+  const asideWidthRef = useRef<number>(asideWidth);
+  asideWidthRef.current = asideWidth;
+
+  // Fullscreen is a CSS-class toggle only (see useFullscreen) — the card
+  // tree below is never unmounted, so a running SSE stream survives it.
+  const fs = useFullscreen();
+
+  const onResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    // Left button only: a right-click should open a context menu, not
+    // start a resize.
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();                              // no text selection
+    e.currentTarget.setPointerCapture(e.pointerId); // keep getting moves outside the handle
+    resizeRef.current = { startX: e.clientX, startW: asideWidthRef.current };
+    setResizing(true);
+  }, []);
+
+  const onResizeMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const ctx = resizeRef.current;
+    if (!ctx) return;                                // not dragging
+    e.preventDefault();
+    const next = Math.min(ASIDE_W_MAX, Math.max(ASIDE_W_MIN, ctx.startW + (e.clientX - ctx.startX)));
+    asideWidthRef.current = next;
+    setAsideWidth(next);
+  }, []);
+
+  const onResizeEnd = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!resizeRef.current) return;   // idempotent: pointerup AND lostpointercapture both land here
+    resizeRef.current = null;
+    setResizing(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // already released
+    }
+    persistAsideWidth(asideWidthRef.current);
+  }, []);
+
+  const onResizeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft') next = asideWidthRef.current - 16;
+    else if (e.key === 'ArrowRight') next = asideWidthRef.current + 16;
+    else if (e.key === 'Home') next = ASIDE_W_MIN;
+    else if (e.key === 'End') next = ASIDE_W_MAX;
+    if (next === null) return;
+    e.preventDefault();              // don't scroll the page with the arrows
+    const clamped = Math.min(ASIDE_W_MAX, Math.max(ASIDE_W_MIN, next));
+    asideWidthRef.current = clamped;
+    setAsideWidth(clamped);
+    persistAsideWidth(clamped);
+  }, []);
+
   // The newest requirement the panel has been told about. loadList closes
   // over the requirementId it was created for, so a request still in flight
   // when the user switches requirements would otherwise land the PREVIOUS
@@ -2850,6 +2952,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     walk(tree);
     return out;
   }, [tree]);
+  // The detail column's header shows which sub-task is on display.
+  const selectedTitle = useMemo(() => {
+    const hit = flatAll.find((tn) => tn.node.id === selectedId);
+    if (!hit) return '';
+    return hit.node.title || t('components.subTaskCard.noTitle');
+  }, [flatAll, selectedId, t]);
   // Position of every row in `flatAll` (1-based). The tree rows and the
   // cards quote the SAME number, so the panel never shows two counters.
   const posOf = useMemo(() => {
@@ -4235,7 +4343,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           selected one in full on the right. Each column clamps its OWN
           height and scrolls by itself, so a long log can no longer push
           the page apart and the tree stays in view. */}
-      <div className="sub-split">
+      <div
+        className={`sub-split${resizing ? ' is-resizing' : ''}`}
+        style={{ '--sub-aside-w': `${asideWidth}px` } as SplitStyle}
+      >
         <aside className="sub-split-aside" aria-label={t('components.subTaskPanel.split.asideTitle')}>
           <div className="sub-split-head">
             <span className="sub-split-head-title">{t('components.subTaskPanel.split.asideTitle')}</span>
@@ -4274,64 +4385,93 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
               />
             )}
           </div>
+          {/* The drag handle. It straddles the 12px gap that already
+              separates the two columns, so resizing costs zero layout
+              width — the tree column's width comes from --sub-aside-w and
+              the gap it rides on was there to begin with. */}
+          <div
+            className="sub-split-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('components.subTaskPanel.split.resizeHandle')}
+            aria-valuenow={asideWidth}
+            aria-valuemin={ASIDE_W_MIN}
+            aria-valuemax={ASIDE_W_MAX}
+            title={t('components.subTaskPanel.split.resizeHint')}
+            tabIndex={0}
+            onPointerDown={onResizeStart}
+            onPointerMove={onResizeMove}
+            onPointerUp={onResizeEnd}
+            onPointerCancel={onResizeEnd}
+            onLostPointerCapture={onResizeEnd}
+            onKeyDown={onResizeKeyDown}
+          />
         </aside>
-        <div className="sub-split-detail" ref={detailRef}>
-          {/* EVERY card stays mounted — the unselected ones are merely
-              hidden. Unmounting them would drop their SSE connections and
-              clear their log buffers, which is exactly the regression the
-              split panel must not introduce. `flatAll` is collapse-
-              independent for the same reason: folding a subtree must not
-              unload the cards below it. */}
-          {flatAll.map((tn, i) => {
-            const isSelected = tn.node.id === selectedId;
-            return (
-              <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
-                <SubTaskCard
-                  st={tn.node}
-                  index={i}
-                  total={flatAll.length}
-                  requirementId={requirementId}
-                  isLatestReviewRound={isLatestReviewRound(tn.node)}
-                  // The right column is flat: the hierarchy is the tree's
-                  // job now, so no card is indented and no card draws the
-                  // vertical connector line.
-                  depth={0}
-                  childCount={countDescendants(tn)}
-                  isCollapsed={collapsed.has(tn.node.id)}
-                  onToggleCollapse={() => toggleCollapse(tn.node.id)}
-                  onChanged={onItemChanged}
-                  onCreated={loadList}
-                  onRestarted={handleSubTaskRestarted}
-                  onDeleted={handleSubTaskDeleted}
-                  // Per-card: this child's OWN effective environment decides whether
-                  // Stop is offered. `?? agent_server_id` is the same old-backend
-                  // fallback the environment badge above uses.
-                  canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
-                  adjustModel={adjustModel}
-                  // Per-card runs (Redo / Continue / Adjust) reuse the panel's
-                  // picked reasoning-effort tier — they are implementation work,
-                  // same as the composer. The RAW pick is passed (not the
-                  // displayed default): an unpicked run must leave the field off
-                  // so the backend resolves the configured stage default.
-                  effort={composerEffort ?? undefined}
-                  onAdjustModelChange={setAdjustModel}
-                  retryMax={retryMax}
-                  archivedKbId={archives[tn.node.id]}
-                  archiveBusy={!!archiveBusy[tn.node.id]}
-                  onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
-                  onUnarchive={handleUnarchiveReport}
-                  // The selected card is the detail card: its body is
-                  // always open and its header arrow is gone. The others
-                  // render no body at all.
-                  detailMode={isSelected}
-                  bodyHidden={!isSelected}
-                />
-              </div>
-            );
-          })}
-          {!selectedId && (
-            <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
-          )}
+        <div className={`sub-split-detail${fs.isFullscreen ? ' is-fullscreen' : ''}`}>
+          <div className="sub-split-detail-head">
+            <span className="sub-split-detail-title">
+              {selectedTitle || t('components.subTaskPanel.split.detailTitle')}
+            </span>
+            <FullscreenButton isFullscreen={fs.isFullscreen} onClick={fs.toggle} />
+          </div>
+          <div className="sub-split-detail-body" ref={detailRef}>
+            {/* EVERY card stays mounted — the unselected ones are merely
+                hidden. Unmounting them would drop their SSE connections and
+                clear their log buffers, which is exactly the regression the
+                split panel must not introduce. `flatAll` is collapse-
+                independent for the same reason: folding a subtree must not
+                unload the cards below it. */}
+            {flatAll.map((tn, i) => {
+              const isSelected = tn.node.id === selectedId;
+              return (
+                <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
+                  <SubTaskCard
+                    st={tn.node}
+                    index={i}
+                    total={flatAll.length}
+                    requirementId={requirementId}
+                    isLatestReviewRound={isLatestReviewRound(tn.node)}
+                    // The right column is flat: the hierarchy is the tree's
+                    // job now, so no card is indented and no card draws the
+                    // vertical connector line.
+                    depth={0}
+                    childCount={countDescendants(tn)}
+                    isCollapsed={collapsed.has(tn.node.id)}
+                    onToggleCollapse={() => toggleCollapse(tn.node.id)}
+                    onChanged={onItemChanged}
+                    onCreated={loadList}
+                    onRestarted={handleSubTaskRestarted}
+                    onDeleted={handleSubTaskDeleted}
+                    // Per-card: this child's OWN effective environment decides whether
+                    // Stop is offered. `?? agent_server_id` is the same old-backend
+                    // fallback the environment badge above uses.
+                    canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
+                    adjustModel={adjustModel}
+                    // Per-card runs (Redo / Continue / Adjust) reuse the panel's
+                    // picked reasoning-effort tier — they are implementation work,
+                    // same as the composer. The RAW pick is passed (not the
+                    // displayed default): an unpicked run must leave the field off
+                    // so the backend resolves the configured stage default.
+                    effort={composerEffort ?? undefined}
+                    onAdjustModelChange={setAdjustModel}
+                    retryMax={retryMax}
+                    archivedKbId={archives[tn.node.id]}
+                    archiveBusy={!!archiveBusy[tn.node.id]}
+                    onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
+                    onUnarchive={handleUnarchiveReport}
+                    // The selected card is the detail card: its body is
+                    // always open and its header arrow is gone. The others
+                    // render no body at all.
+                    detailMode={isSelected}
+                    bodyHidden={!isSelected}
+                  />
+                </div>
+              );
+            })}
+            {!selectedId && (
+              <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
+            )}
+          </div>
         </div>
       </div>
     </section>
