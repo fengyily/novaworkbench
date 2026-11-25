@@ -2644,6 +2644,14 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			planMarkdown = strings.TrimSpace(out.finalResult)
 		}
 		switch {
+		case out.staleSession:
+			// The plan phase forks the parent's session, so a missing
+			// session file fails it the same way it fails any other
+			// sub-task. Report the precise cause instead of the generic
+			// "no plan produced" message.
+			finalStatus = model.SubTaskStatusError
+			artifactBody = "❌ 源会话已失效（session 文件不存在），无法产出方案。请重新发起 coding 后再试。"
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
 		case out.errMsg != "":
 			finalStatus = model.SubTaskStatusError
 			artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
