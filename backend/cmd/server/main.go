@@ -1218,6 +1218,13 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks", wizardH.ListSubTasks)
 	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}", wizardH.GetSubTask)
 	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}/thinking", wizardH.GetSubTaskThinking)
+	// The implementation plan produced by a plan-mode sub-task. Fetched
+	// lazily (never part of the list payload); 200 + {content:""} when the
+	// row has no plan.
+	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}/plan", wizardH.GetSubTaskPlan)
+	// Convert a finished plan-mode sub-task into the implementation phase,
+	// in place. 409 when the row is not a finished plan-mode sub-task.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/start-dev", wizardH.StartSubTaskDev)
 	// Append a follow-up instruction to an existing sub-task (resumes the
 	// parent's claude session via --fork-session). Same scope as
 	// AdjustCoding — reuses the spawn helper in wizard.go.

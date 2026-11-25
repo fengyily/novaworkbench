@@ -578,7 +578,7 @@ func (h *RequirementReviewHandler) createFixTasks(
 			rowSourceSID = ""
 		}
 		st, job, newSID, cerr := h.runner.NewPendingSubTask(req.ID, title, fixPrompt, rv.Model,
-			rowSourceSID, fixAgentServerID, rowSessionMode, parentID, model.SubTaskReportModeAuto)
+			rowSourceSID, fixAgentServerID, rowSessionMode, parentID, model.SubTaskReportModeAuto, "")
 		if cerr != nil {
 			return created, fmt.Errorf("为 %s 建修复子任务失败: %w", it.ref, cerr)
 		}

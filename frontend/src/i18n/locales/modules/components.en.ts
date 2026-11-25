@@ -217,6 +217,18 @@ export const components = {
       full: 'Full',
       fullHint: 'Force the "Understanding / Implementation / Summary" three-section report',
     },
+    // Execution mode (the two-phase sub-task) — "Auto develop / Plan first".
+    // "Plan first" splits the sub-task in two: phase 1 explores read-only
+    // and produces an implementation plan; the user reviews it and clicks
+    // "Start development" to enter phase 2. Mirrors the sessionMode /
+    // reportMode controls above (same .sub-session-mode-* class family).
+    execMode: {
+      label: 'Execution mode',
+      auto: 'Auto develop',
+      autoHint: 'Implement directly and write the code to disk',
+      plan: 'Plan first',
+      planHint: 'Read-only exploration producing an implementation plan; implement after you confirm it',
+    },
     // Report archive (主 Agent 汇总报告 + 子任务报告 → knowledge).
     archiveBtn: 'Archive to knowledge base',
     // Shorter visible label for the pill button when the entry has been
@@ -384,6 +396,25 @@ export const components = {
     // resultExpandCollapse mirror the long-content collapse pattern.
     reportModeBrief: '🪶 Brief',
     reportModeBriefTitle: 'This sub-task did not generate a three-section report; only a one-paragraph result is shown',
+    // Plan mode (the two-phase sub-task) — card badge + implementation-plan
+    // section + the "start development" action.
+    //
+    // Naming note: planEyebrow / planExpandShow / planExpandCollapse are
+    // already taken by the "self-authored plan" block (which renders
+    // st.prompt, not a generated plan), so these use the implPlan* prefix.
+    planModeBadge: '📐 Plan mode',
+    planModeBadgeTitle: 'This sub-task is in plan mode: it produces an implementation plan first, and implements after you confirm it',
+    implPlanTitle: 'Implementation plan',
+    implPlanMetaLabel: 'Requirement',
+    implPlanExportSuffix: 'plan',
+    implPlanExport: 'Export Markdown',
+    implPlanEmpty: 'No implementation plan was recorded',
+    implPlanLoading: 'Loading…',
+    implPlanLoadFailed: 'Failed to load the implementation plan',
+    startDev: '▶ Start development',
+    startDevBusy: 'Starting…',
+    startDevHint: 'Implement this sub-task according to the plan',
+    errStartDev: 'Failed to start development',
     resultEyebrow: 'Result',
     resultErrorEyebrow: 'Error',
     resultExpandShow: 'Show result',

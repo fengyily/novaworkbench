@@ -119,6 +119,10 @@ export interface DesignExportMarkdownInput {
   // Filename component inserted between the (sanitized) filename and `.md` —
   // defaults to requirements.exportDesign.markdownSuffix ("技术方案" / "design").
   markdownSuffix?: string;
+  // Label for the meta line ("- 项目: xxx"). Defaults to the requirement's
+  // design-export label; a sub-task plan passes its own ("需求") so an
+  // exported plan does not claim to be a project.
+  metaLabel?: string;
 }
 
 function sanitizeFilename(name: string, fallback: string): string {
@@ -131,7 +135,8 @@ export function buildDesignMarkdown(input: DesignExportMarkdownInput): string {
   const { title, meta, markdown } = input;
   const lines: string[] = [`# ${title}`, ''];
   const metaLines: string[] = [];
-  if (meta) metaLines.push(`- ${i18next.t('requirements.exportDesign.projectLabel')}: ${meta}`);
+  const metaLabel = input.metaLabel ?? i18next.t('requirements.exportDesign.projectLabel');
+  if (meta) metaLines.push(`- ${metaLabel}: ${meta}`);
   metaLines.push(`- ${i18next.t('requirements.exportDesign.generatedAt')}: ${new Date().toISOString()}`);
   lines.push(metaLines.join('\n'));
   lines.push('');

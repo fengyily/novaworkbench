@@ -69,6 +69,26 @@ const DefaultModelLabel = "默认模型"
 // the system prompt with this role or it re-decomposes instead of coding.
 const executorRoleKey = "executor"
 
+// planRoleKey is the roles-table key for the plan-phase persona of a
+// plan-mode sub-task.
+//
+// The architect persona already instructs the model to write the plan to
+// ~/.claude/plans/<slug>.md (its rule 8) and carries no commit/push section —
+// the executor persona's commit rule would contradict a read-only plan run.
+//
+// Only the PERSONA changes for the plan phase. The claude-config resolution
+// chain deliberately stays bound to the executor role (see SubTaskRunner.run)
+// so the architect role's gateway binding cannot hijack the gateway the
+// composer picked.
+//
+// ALTERNATIVE (a one-line switch, verified to exist): roles.key='planner'
+// (role_defaults.go) is a ready-made read-only plan persona whose output
+// contract is a numbered implementation-step list — closer to a single
+// sub-task's granularity than the architect's requirement-level contract
+// (UI element list + ASCII layout). Swap this constant if the architect
+// persona visibly over-produces on sub-tasks.
+const planRoleKey = "architect"
+
 // effectiveModelFromValues resolves the effective model from its two sources:
 // the role's explicit per-role override (roleModel) and the active claude
 // config's default model (configDefaultModel). Precedence: role override >

@@ -82,6 +82,15 @@ type remoteCodingInput struct {
 	// authorized for this requirement. The paths resolve on the AGENT HOST.
 	// See remoteRunInput.AddDirs for the full semantics.
 	AddDirs []string
+	// PermissionMode is forwarded to the worker's claude invocation.
+	// Empty = --dangerously-skip-permissions (the dev default);
+	// "plan" = --permission-mode plan (the read-only plan phase of a
+	// plan-mode sub-task).
+	//
+	// The worker already understands both values (agent-worker/server.mjs and
+	// its in-tree copy both map permissionMode === 'plan' to
+	// --permission-mode plan), so no worker change is needed.
+	PermissionMode string
 	// worktreeRoot is the resolved per-server work root (see
 	// agentWorktreeRootFor) — set once the server row is loaded and used for
 	// every scratch-clone / worktree / bundle path in this run.
@@ -666,17 +675,22 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		fork = false
 	}
 	opts := llm.StreamOpts{
-		Prompt:                 remotePrompt,
-		WorkDir:                wtPath,
-		SystemPrompt:           "",
-		Model:                  cliModelArg(in.model),
-		Effort:                 in.Effort,
-		ClaudeConfigID:         in.claudeConfigID,
-		SessionID:              in.sessionArg,
-		Resume:                 resume,
-		Fork:                   fork,
-		ForkSessionID:          in.forkSessionID,
-		PermissionMode:         "",
+		Prompt:         remotePrompt,
+		WorkDir:        wtPath,
+		SystemPrompt:   "",
+		Model:          cliModelArg(in.model),
+		Effort:         in.Effort,
+		ClaudeConfigID: in.claudeConfigID,
+		SessionID:      in.sessionArg,
+		Resume:         resume,
+		Fork:           fork,
+		ForkSessionID:  in.forkSessionID,
+		// Forwarded from the caller: "plan" for the read-only plan phase of a
+		// plan-mode sub-task, "" for an ordinary implementation run. Hardcoding
+		// "" here would make 「方案先行」 silently become an implementation run
+		// on an Agent Server — the most dangerous silent failure in this
+		// feature.
+		PermissionMode:         in.PermissionMode,
 		AddDirs:                in.AddDirs,
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
 	}
