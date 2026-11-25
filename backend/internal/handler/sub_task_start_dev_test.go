@@ -221,3 +221,53 @@ func TestStartSubTaskDev(t *testing.T) {
 		t.Errorf("plan-less row status = %d, want 409", rec.Code)
 	}
 }
+
+// TestStartSubTaskDev_FreshSessionNeedsNoSourceSession pins the session
+// rule: only a FORK-mode implementation phase needs a parent session to
+// fork from.
+//
+// The with_context / bare modes start a fresh session instead (the runner
+// clears the source session for those), so they must not be refused just
+// because the requirement has no coding session. A plan-mode row created
+// with 「带上下文」 has exactly that shape — refusing it would leave the
+// user with a plan they can never act on.
+func TestStartSubTaskDev_FreshSessionNeedsNoSourceSession(t *testing.T) {
+	h, d, svc, reqID := newPlanModeTestHandler(t)
+
+	// A plan-mode row whose session mode is with_context, on a requirement
+	// that has NO coding session at all.
+	row := seedPlanSubTask(t, d, svc, reqID, model.SubTaskModePlan, model.SubTaskStatusDone, "## 目标\n做一件事")
+	if _, err := d.Exec(`UPDATE sub_tasks SET session_mode=? WHERE id=?`,
+		model.SubTaskSessionModeWithContext, row.ID); err != nil {
+		t.Fatalf("seed session_mode: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
+	req.SetPathValue("id", reqID)
+	req.SetPathValue("sid", row.ID)
+	rec := httptest.NewRecorder()
+	h.StartSubTaskDev(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("StartSubTaskDev status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	got, err := svc.Get(row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != model.SubTaskStatusPending || got.Mode != model.SubTaskModeAuto {
+		t.Errorf("row = status %q mode %q, want pending/auto", got.Status, got.Mode)
+	}
+	// A fresh-session row carries no source session id (the audit trail
+	// mirrors StartSubTask).
+	if got.SourceSessionID != "" {
+		t.Errorf("source_session_id = %q, want empty for a fresh-session row", got.SourceSessionID)
+	}
+	// The plan must survive the conversion.
+	plan, err := svc.GetPlan(row.ID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if plan != "## 目标\n做一件事" {
+		t.Errorf("plan = %q, want it preserved", plan)
+	}
+}

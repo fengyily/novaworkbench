@@ -971,11 +971,39 @@ func (h *WizardHandler) StartSubTaskDev(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Inherit the row's session mode: fork → fork the requirement's main
+	// session; with_context → fresh session with the context block; bare →
+	// fresh session, CLI defaults only.
+	//
+	// The `fork` flag stays TRUE in every case, exactly like StartSubTask
+	// passes it: the runner overrides it for the fresh / bare paths (it
+	// clears the source session and drops --resume / --fork-session), and
+	// the prompt header switch keys off it — fork=false would render the
+	// implementation phase as 「继续执行」 instead of 「子任务」.
+	//
+	// Only a FORK-mode implementation phase needs a parent session to fork
+	// from. The with_context / bare modes start a fresh session instead, so
+	// they must not be blocked by a missing one — the plan phase itself may
+	// well have run without a parent session (e.g. the row was created with
+	// 「带上下文」).
+	freshSession, bare := false, false
+	switch parent.SessionMode {
+	case model.SubTaskSessionModeWithContext:
+		freshSession = true
+	case model.SubTaskSessionModeBare:
+		bare = true
+	}
 	sourceSID := subTaskSourceSID(req, parent.SourceSessionID)
-	if sourceSID == "" {
-		writeError(w, http.StatusConflict, "NO_SESSION",
-			"无法解析可复用的源会话，请重新发起 coding 后再试")
-		return
+	if !freshSession && !bare {
+		if sourceSID == "" {
+			writeError(w, http.StatusConflict, "NO_SESSION",
+				"无法解析可复用的源会话，请重新发起 coding 后再试")
+			return
+		}
+	} else {
+		// The audit trail mirrors StartSubTask: a fresh-session row carries
+		// no source session id.
+		sourceSID = ""
 	}
 
 	// Re-arm the SAME row (status + mode flip together, atomically).
@@ -1002,17 +1030,7 @@ func (h *WizardHandler) StartSubTaskDev(w http.ResponseWriter, r *http.Request) 
 		"sub_task_id": sid,
 	})
 
-	// Inherit the row's session mode: fork → fork the requirement's main
-	// session; with_context → fresh session with the context block; bare →
-	// fresh session, CLI defaults only.
-	fork, freshSession, bare := true, false, false
-	switch st.SessionMode {
-	case model.SubTaskSessionModeWithContext:
-		fork, freshSession, bare = false, true, false
-	case model.SubTaskSessionModeBare:
-		fork, freshSession, bare = false, false, true
-	}
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, fork, freshSession, bare, st.SourceSessionID, "")
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, freshSession, bare, st.SourceSessionID, "")
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
