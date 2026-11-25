@@ -525,6 +525,17 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		// Effort is the reasoning-effort tier (claude CLI --effort) the user
 		// picked for this child. Empty = the 「开发实现」 stage default.
 		Effort string `json:"effort"`
+		// Mode picks the execution mode of this child:
+		//   "auto" (default): implement the sub-task and write the code to
+		//                     disk — every pre-existing behaviour.
+		//   "plan":           read-only exploration that produces a Markdown
+		//                     implementation plan; the user converts the row
+		//                     to auto mode afterwards to run the
+		//                     implementation phase.
+		// Unknown values fall through to "auto" so a typo or a future
+		// client version never blocks a dispatch (same defensive
+		// normalization as report_mode).
+		Mode string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -547,6 +558,20 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		// already the default
 	default:
 		reportMode = model.SubTaskReportModeAuto
+	}
+	// Whitelist the user-supplied execution mode; an unknown value is treated
+	// as "auto" so a typo or a future client version's new mode never blocks a
+	// dispatch. The service normalizes the empty string the same way.
+	execMode := strings.TrimSpace(body.Mode)
+	switch execMode {
+	case model.SubTaskModePlan:
+		// explicit choice — pass through
+	case "":
+		// empty string → fall through; SubTaskService.Create defaults to auto
+	case model.SubTaskModeAuto:
+		// already the default
+	default:
+		execMode = model.SubTaskModeAuto
 	}
 	id := r.PathValue("id")
 	req, err := h.reqSvc.Get(id)
@@ -595,7 +620,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	// (inheritance) when the field is omitted, honor an explicit value
 	// (including "" for 本地) otherwise.
 	agentServerID := resolveSubTaskAgentServer(body.AgentServerID, req.AgentServerID)
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode, "", reportMode)
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode, "", reportMode, execMode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -862,6 +887,132 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// ORIGINAL prompt (st.Prompt) so the same task re-executes from a clean
 	// fork off the requirement's main-agent session.
 	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false, parent.SourceSessionID, "")
+}
+
+// StartSubTaskDev handles POST /api/requirements/{id}/sub-tasks/{sid}/start-dev.
+//
+// Body: { "model"?: "...", "effort"?: "..." }
+//
+// Converts a FINISHED plan-mode sub-task into the implementation phase,
+// IN PLACE: SubTaskService.ConvertPlanToDev flips the very row the user
+// clicked back to 'pending' with mode='auto', so one sub-task stays one row
+// and one card — the plan section stays visible above the implementation
+// report, which is what makes the two-phase shape legible.
+//
+// The status+mode guard lives in the UPDATE's WHERE clause, so a second
+// concurrent click loses the race and gets a 409 instead of a second
+// goroutine on the same work item.
+//
+// Session strategy: the second phase starts a FRESH session. It never resumes
+// the plan phase's read-only session — resuming a read-only session and then
+// flipping it to --dangerously-skip-permissions is not predictable. The plan
+// itself is injected into the prompt by the runner, which reads it from the
+// row (sub_task_plans), so the orphan reaper re-dispatching this row carries
+// the plan too.
+//
+// The session MODE is inherited from the row (fork / with_context / bare), so
+// the user's original choice still applies to the implementation run.
+func (h *WizardHandler) StartSubTaskDev(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+		// Effort is the reasoning-effort tier (claude CLI --effort) for the
+		// implementation run. Empty = the 「开发实现」 stage default.
+		Effort string `json:"effort"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	// Pre-flight guards. The authoritative check is the guarded UPDATE inside
+	// ConvertPlanToDev; these only turn a hopeless request into a clearer
+	// message before we touch the row.
+	if parent.TaskKind == model.SubTaskKindReview {
+		writeError(w, http.StatusConflict, "NOT_CONVERTIBLE",
+			"这是 Review 轮次子任务，不支持方案先行模式")
+		return
+	}
+	if parent.Mode != model.SubTaskModePlan {
+		writeError(w, http.StatusConflict, "NOT_CONVERTIBLE",
+			"该子任务不是方案模式，无需开始开发")
+		return
+	}
+	if parent.Status != model.SubTaskStatusDone {
+		writeError(w, http.StatusConflict, "NOT_CONVERTIBLE",
+			"方案尚未生成完成，无法开始开发")
+		return
+	}
+	plan, err := h.subTaskSvc.GetPlan(sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	if strings.TrimSpace(plan) == "" {
+		writeError(w, http.StatusConflict, "NOT_CONVERTIBLE",
+			"没有可执行的方案，无法开始开发")
+		return
+	}
+
+	sourceSID := subTaskSourceSID(req, parent.SourceSessionID)
+	if sourceSID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"无法解析可复用的源会话，请重新发起 coding 后再试")
+		return
+	}
+
+	// Re-arm the SAME row (status + mode flip together, atomically).
+	st, err := h.subTaskSvc.ConvertPlanToDev(sid)
+	if err != nil {
+		if errors.Is(err, service.ErrAlreadyConverting) {
+			writeError(w, http.StatusConflict, "ALREADY_CONVERTING", "该子任务已开始开发，请勿重复提交")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(sid, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task start-dev] failed to persist session for %s: %v", sid, perr)
+	}
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(sid, job.ID); perr != nil {
+		log.Printf("[sub-task start-dev] failed to persist job_id for %s: %v", sid, perr)
+	}
+	stampSubTaskEffort(h.llm, h.subTaskSvc, st, body.Effort, llm.StageCoding)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": sid,
+	})
+
+	// Inherit the row's session mode: fork → fork the requirement's main
+	// session; with_context → fresh session with the context block; bare →
+	// fresh session, CLI defaults only.
+	fork, freshSession, bare := true, false, false
+	switch st.SessionMode {
+	case model.SubTaskSessionModeWithContext:
+		fork, freshSession, bare = false, true, false
+	case model.SubTaskSessionModeBare:
+		fork, freshSession, bare = false, false, true
+	}
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, fork, freshSession, bare, st.SourceSessionID, "")
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
@@ -1576,6 +1727,32 @@ func (h *WizardHandler) GetSubTaskThinking(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	content, err := h.subTaskSvc.GetThinking(sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"content": content})
+}
+
+// GetSubTaskPlan handles GET /api/requirements/{id}/sub-tasks/{sid}/plan.
+//
+// Returns {content}; an empty string (not 404) when nothing was recorded —
+// the row either never ran in plan mode or its plan phase produced no output.
+//
+// The plan lives in its own table (sub_task_plans) rather than on the row:
+// it can reach tens of KB and must never bloat the List / SSE payloads.
+func (h *WizardHandler) GetSubTaskPlan(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	st, err := h.subTaskSvc.Get(sid)
+	if err != nil || st.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	content, err := h.subTaskSvc.GetPlan(sid)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return

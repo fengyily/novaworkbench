@@ -81,6 +81,11 @@ var copyOrder = []string{
 	"project_stars",
 	"sessions",
 	"sub_tasks",
+	// 子任务的思考文本与实施方案正文 —— sub_tasks 的子表，随它一起搬。
+	// sub_task_thinking 此前漏登记，跨库迁移会静默丢掉所有子任务的思考文本
+	// （与 coding_chats 当年的同类 bug 同型，见本文件 59-64 行注释），一并补上。
+	"sub_task_thinking",
+	"sub_task_plans",
 	"scheduled_tasks",
 }
 

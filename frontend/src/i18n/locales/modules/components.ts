@@ -222,6 +222,17 @@ export const components = {
       full: '详细',
       fullHint: '强制输出「理解 / 实施 / 小结」三段式报告',
     },
+    // 执行模式（子任务两段式）——「自动开发 / 方案先行」。「方案先行」把子
+    // 任务拆成两段：第 1 段只读探索产出实施方案，用户审阅后点「开始开发」
+    // 才进入第 2 段实现。视觉与文案镜像上面的 sessionMode / reportMode
+    // 控件（同一组 .sub-session-mode-* 类），只改 key。
+    execMode: {
+      label: '执行模式',
+      auto: '自动开发',
+      autoHint: '直接实现并落盘代码改动',
+      plan: '方案先行',
+      planHint: '只读探索并产出实施方案，确认后再实现',
+    },
     // Report-archive (主 Agent 汇总报告 + 子任务报告 → knowledge). The
     // button sits in both the dev-summary card header and each done sub-task
     // card header; same icon / label pair keeps the affordance consistent.
@@ -392,6 +403,24 @@ export const components = {
     // sessionMode='fork' 同理，避免噪音）。
     reportModeBrief: '🪶 简洁',
     reportModeBriefTitle: '本子任务未生成三段式报告，只回一句话结果',
+    // 方案模式（两段式子任务）——卡头徽标 + 实施方案折叠区 + 「开始开发」。
+    //
+    // 命名注意：planEyebrow / planExpandShow / planExpandCollapse 已被
+    // 「自拟方案」块占用（渲染的是 st.prompt，不是生成的方案），所以这里
+    // 一律用 implPlan* 前缀，不要复用。
+    planModeBadge: '📐 方案模式',
+    planModeBadgeTitle: '本子任务处于方案模式：先产出实施方案，确认后进入实现阶段',
+    implPlanTitle: '实施方案',
+    implPlanMetaLabel: '需求',
+    implPlanExportSuffix: '实施方案',
+    implPlanExport: '导出 Markdown',
+    implPlanEmpty: '未记录到实施方案',
+    implPlanLoading: '加载中…',
+    implPlanLoadFailed: '实施方案加载失败',
+    startDev: '▶ 开始开发',
+    startDevBusy: '启动中…',
+    startDevHint: '按方案实现这个子任务',
+    errStartDev: '开始开发失败',
     // v0.5.x: 简洁模式结果块。resultEyebrow 是卡片里「✅ 结果」小标题；
     // resultExpandShow / resultExpandCollapse 镜像自拟方案块的长内容折叠。
     resultEyebrow: '结果',

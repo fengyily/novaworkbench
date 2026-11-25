@@ -792,6 +792,21 @@ CREATE TABLE IF NOT EXISTS sub_task_thinking (
 	updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- The implementation plan produced by a plan-mode sub-task. Kept in its own
+-- table (not a sub_tasks column) for the same reason as sub_task_thinking:
+-- a plan can reach tens of KB, and putting it on sub_tasks would bloat the
+-- List / SSE payloads. The card fetches it lazily on expand. No FK: SQLite
+-- never enables foreign_keys, so SubTaskService.DeleteByIDs cleans it up.
+--
+-- The row survives the plan → auto conversion on purpose: the implementation
+-- phase injects this text into the prompt as the spec it must follow.
+CREATE TABLE IF NOT EXISTS sub_task_plans (
+	sub_task_id TEXT PRIMARY KEY,
+	content     TEXT NOT NULL DEFAULT '',
+	created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Orchestration batch: a coordinator row for one auto-orchestrated dispatch
 -- run. tryAutoOrchestrate INSERTs N sub_tasks + 1 orchestration_batches in a
 -- single Tx, then OrchestrationQueue's tick loop walks the batch by batch_seq
@@ -2154,6 +2169,14 @@ var alterColumns = []string{
 	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_rounds INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_state TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE code_reviews ADD COLUMN auto_iterate_note TEXT NOT NULL DEFAULT ''`,
+	// 子任务执行模式：'auto'（默认，直接落盘实现）/ 'plan'（只读探索，
+	// 只产出 Markdown 实施方案，不写代码）。人工确认后可转成 auto 进入
+	// 第 2 段实现。
+	//
+	// 与 session_mode / report_mode / task_kind 语义正交（那三列分别是
+	// 会话线程策略 / 报告详略 / 任务类型），故新增独立列。
+	// DEFAULT 'auto' 让所有存量行行为逐字不变。
+	`ALTER TABLE sub_tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto'`,
 }
 
 var (

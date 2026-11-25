@@ -67,6 +67,50 @@ const phaseTrackerSummaryGuardMinBytes = 200
 // the JobStore ring buffer from bloating on verbose `npm install` output.
 const defaultSubTaskToolResultMaxBytes = 4096
 
+// ── 子任务 Plan Mode（方案先行 → 自动开发）────────────────────────────────
+//
+// 三条纯函数把「这一轮是方案段还是实现段」的判定从 run() 里抽出来，
+// 这样它们可以被单测钉住 —— run() 本身太大，没法直接测。
+
+// subTaskPlanMode reports whether this row's run is the READ-ONLY plan
+// phase.
+//
+// The mode is read FROM THE ROW, never from the caller: every dispatcher
+// (manual handler / orchestration queue / orphan reaper) then obeys the
+// same semantics. A legacy row with an empty mode behaves as 'auto' —
+// only the exact value 'plan' switches the run into the plan phase.
+func subTaskPlanMode(st *model.SubTask) bool {
+	if st == nil {
+		return false
+	}
+	return strings.TrimSpace(st.Mode) == model.SubTaskModePlan
+}
+
+// subTaskPlanPermissionMode is the CLI permission mode for this run:
+// "plan" for the read-only plan phase, "" (→ --dangerously-skip-permissions)
+// for an ordinary implementation run.
+//
+// llm.Gateway.streamArgs turns "plan" into `--permission-mode plan` and
+// delivers the persona via --append-system-prompt, so the CLI's own plan-mode
+// instructions (explore read-only, write the plan to ~/.claude/plans/, call
+// ExitPlanMode) survive alongside the role persona.
+func subTaskPlanPermissionMode(st *model.SubTask) string {
+	if subTaskPlanMode(st) {
+		return "plan"
+	}
+	return ""
+}
+
+// subTaskPlanPrompt builds the user prompt for the plan phase.
+//
+// It deliberately does NOT carry the executor header ("你是执行者：请直接
+// 动手实现…") or the three-section phase instruction: both contradict a run
+// that must not touch the code at all.
+func subTaskPlanPrompt(body string) string {
+	return "## 方案（plan 模式）\n\n" + body + "\n" +
+		"\n" + promptpkg.SubTaskPlanInstructionsBlock + "\n"
+}
+
 // phaseInstructionsBlock is the per-prompt block that asks Claude to emit the
 // three sentinels in order. Inserted between the `## 子任务 / ## 继续执行 /
 // ## 追加调整` header and the "你是执行者…" line so the order of prompts
@@ -749,8 +793,16 @@ func (r *SubTaskRunner) SetRequirementDirSvc(svc *service.RequirementDirService)
 // resolves it into brief|full at dispatch time and writes the resolved value
 // back so the card chip and the finished-render branch agree on what ran.
 // Pass "" to let SubTaskService.Create default to "auto".
-func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID, reportMode string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode, parentSubtaskID, "", reportMode)
+//
+// mode persists the row's execution mode (see model.SubTaskMode*). "plan"
+// makes the first run read-only: it produces an implementation plan instead
+// of touching code, and the user converts the row to "auto" afterwards to run
+// the implementation phase. Pass "" to let SubTaskService.Create default to
+// "auto" — every dispatch path other than the manual "方案先行" entry point
+// does exactly that, so orchestrated / push_pr / Review children are
+// unaffected.
+func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID, reportMode, mode string) (*model.SubTask, *store.Job, string, error) {
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode, parentSubtaskID, "", reportMode, mode)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -1131,6 +1183,12 @@ func (r *SubTaskRunner) run(
 	spec subTaskRunSpec,
 ) {
 	isReview := spec.taskKind == model.SubTaskKindReview
+	// The plan phase is keyed off the ROW (see subTaskPlanMode). A Review row
+	// is never a plan row: CreateReviewTask does not write the column, and
+	// the two execution models (review contract vs implementation contract)
+	// are mutually exclusive.
+	planMode := !isReview && subTaskPlanMode(st)
+	planPermissionMode := subTaskPlanPermissionMode(st)
 	body := spec.body
 	modelOverride := spec.modelOverride
 	configIDOverride := spec.configIDOverride
@@ -1554,12 +1612,15 @@ func (r *SubTaskRunner) run(
 	}
 	st.ReportMode = resolvedReportMode
 
-	phaseEnabled := phaseEnabledForRun(st.TaskKind, st.Source) && resolvedReportMode != model.SubTaskReportModeBrief
+	// 方案先行（plan mode）不跑三段式围栏：它的产出是一份 Markdown 实施方案，
+	// 落进 sub_task_plans 而不是 artifact，phase_* 列保持空、phase_emitted=0，
+	// 卡片因此走普通 artifact 分支（方案区单独渲染在其上方）。
+	phaseEnabled := !planMode && phaseEnabledForRun(st.TaskKind, st.Source) && resolvedReportMode != model.SubTaskReportModeBrief
 	var phaseTrack *phaseTracker
 	if phaseEnabled {
 		phaseTrack = &phaseTracker{}
 	}
-	log.Printf("[sub-task] phaseEnabled=%v kind=%q source=%q reportMode=%q resolved=%q id=%s", phaseEnabled, st.TaskKind, st.Source, reportMode, resolvedReportMode, st.ID)
+	log.Printf("[sub-task] phaseEnabled=%v kind=%q source=%q reportMode=%q resolved=%q mode=%q planMode=%v id=%s", phaseEnabled, st.TaskKind, st.Source, reportMode, resolvedReportMode, st.Mode, planMode, st.ID)
 
 	// Brief 模式给用户一个可见的提示：解释为什么这条子任务不会出三段报告。
 	// 仅手动路径且为 brief 时输出；auto / push_pr 行 phase 本来就不渲染，
@@ -1584,6 +1645,20 @@ func (r *SubTaskRunner) run(
 		body = rewriteAttachmentMarkers(r.attachSvc, req.ID, attachDir, body)
 	}
 
+	// 方案先行（plan mode）的第 2 段：把上一阶段产出的实施方案当规格注入。
+	//
+	// 方案存在**行上**（sub_task_plans），不靠调用方传参 —— 这样 orphan
+	// reaper 重新派发这一行时同样带得上方案，而不只是手动「开始开发」那条路。
+	// plan 段自己不带方案（它是在产方案，不是消费方案）。
+	planBlock := ""
+	if !planMode && !isReview {
+		if saved, perr := r.subTaskSvc.GetPlan(st.ID); perr != nil {
+			log.Printf("[sub-task] failed to load plan for %s: %v", st.ID, perr)
+		} else {
+			planBlock = promptpkg.SubTaskPlanDevBlock(saved)
+		}
+	}
+
 	var prompt string
 	if isReview {
 		// A Review brings its OWN prompt: the review contract (checklist,
@@ -1593,16 +1668,28 @@ func (r *SubTaskRunner) run(
 		// to implement anything, and the report must NOT carry a
 		// "## 子任务" header.
 		prompt = spec.promptOverride
+	} else if planMode {
+		// The plan phase gets its OWN prompt: a read-only exploration brief.
+		// The executor header ("你是执行者：请直接动手实现…") and the
+		// three-section phase instructions both contradict it — this run
+		// must not touch the code at all.
+		prompt = subTaskPlanPrompt(body)
 	} else {
+		// 方案先行子任务的实现段：方案块放在头部与子任务正文之间，让模型
+		// 先看到「按这份方案做」，再看到「具体要做什么」。
+		promptBody := body
+		if planBlock != "" {
+			promptBody = planBlock + "\n" + body
+		}
 		switch {
 		case continueFork || !fork:
 			// 「继续执行」 — whether it resumes in place or forks into a
 			// fresh session, the header says the same thing.
-			prompt = "## 继续执行\n\n" + body + "\n"
+			prompt = "## 继续执行\n\n" + promptBody + "\n"
 		case adjust:
-			prompt = "## 追加调整\n\n" + body + "\n"
+			prompt = "## 追加调整\n\n" + promptBody + "\n"
 		default:
-			prompt = "## 子任务\n\n" + body + "\n"
+			prompt = "## 子任务\n\n" + promptBody + "\n"
 		}
 		switch {
 		case phaseEnabled:
@@ -1625,7 +1712,11 @@ func (r *SubTaskRunner) run(
 	// commit, and a reviewer has nothing to commit. The project context it
 	// also carries is nice-to-have, not worth the "commit your work" framing
 	// in a read-only run.
-	if !isReview {
+	//
+	// The plan phase skips it for the same reason — there is nothing to
+	// commit in a read-only run, and telling the model how to commit would
+	// only pull it toward writing code.
+	if !isReview && !planMode {
 		prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
 	}
 	// 项目级 CLAUDE.md —— 项目的权威开发约定。子任务（含需求级 Review）都要
@@ -1719,6 +1810,20 @@ func (r *SubTaskRunner) run(
 		roleKey = strings.TrimSpace(spec.roleKey)
 	}
 	execSystemPrompt, _, roleConfigID := r.roleConfig(roleKey)
+	if planMode {
+		// The plan phase runs as the ARCHITECT persona: its rule 8 already
+		// requires writing the plan to ~/.claude/plans/<slug>.md, and it has
+		// no "commit / push" section (the executor persona's commit rule
+		// would contradict a read-only plan run).
+		//
+		// Only the PERSONA changes. roleConfigID deliberately stays bound to
+		// the executor role so the claude-config resolution chain below
+		// (pickConfigForModel) is unchanged — otherwise the architect role's
+		// gateway binding would hijack the gateway the composer picked.
+		if sp, _, _ := r.roleConfig(planRoleKey); sp != "" {
+			execSystemPrompt = sp
+		}
+	}
 	if strings.TrimSpace(spec.systemPromptOverride) != "" {
 		execSystemPrompt = spec.systemPromptOverride
 	}
@@ -1816,6 +1921,11 @@ func (r *SubTaskRunner) run(
 			FreshSession:   freshSession,
 			Bare:           bare,
 			AddDirs:        addDirs,
+			// 方案先行段在远端也必须是 plan 模式：worker 已经支持
+			// permissionMode === 'plan' → --permission-mode plan（agent-worker
+			// 与其内嵌副本两份都支持，无需改动）。漏传会让「方案先行」在远端
+			// 悄悄变成实现段 —— 最危险的静默失败。
+			PermissionMode: planPermissionMode,
 		})
 		// v0.5.x: 远端 Agent 服务器路径暂未接入 phase tracker；保持单一 artifact 落库。
 		// Persist the session id the CLI actually reported. The local path
@@ -1911,7 +2021,7 @@ func (r *SubTaskRunner) run(
 		out = r.runLocalSubTaskAttempt(
 			st, job, prompt, systemPromptForRun, modelName,
 			sourceSID, newSID,
-			adjust /*adjustFlag*/, true /*forkFlag*/,
+			adjust /*adjustFlag*/, true, /*forkFlag*/
 			freshSession, bare,
 			workDir, subUsage, finalConfigID, credEnv, phaseTrack, hardTimeout,
 			addDirs, spec.disallowedTools, claudeDoc,
@@ -2196,6 +2306,9 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
+	// The plan phase runs the CLI in plan mode: read-only tools + the
+	// plan-file Write (see subTaskPlanPermissionMode).
+	planPermissionMode := subTaskPlanPermissionMode(st)
 	// sessionIDForCLI is the value the CLI sees for --session-id / --resume.
 	// On the fork / continue paths it's the parent's sourceSID. On the
 	// freshSession / bare paths sourceSID has already been cleared (to avoid
@@ -2243,6 +2356,13 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		ExtraEnv:        credEnv,              // HTTPS git creds + committer identity
 		IdleTimeout:     subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
 		AddDirs:         addDirs,
+		// The plan phase runs the CLI in plan mode: read-only tools + the
+		// plan-file Write. llm.Gateway.streamArgs turns PermissionMode="plan"
+		// into `--permission-mode plan` (instead of
+		// --dangerously-skip-permissions) and delivers the persona via
+		// --append-system-prompt so the CLI's own plan-mode instructions
+		// survive.
+		PermissionMode: planPermissionMode,
 	}
 	// The managed project CLAUDE.md travels through the CLI's own project
 	// memory channel (a materialized copy granted via --add-dir), not
@@ -2507,84 +2627,118 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 
 	finalStatus := model.SubTaskStatusDone
 	var artifactBody string
-	switch {
-	case out.staleSession:
-		finalStatus = model.SubTaskStatusError
-		// Three-way diagnostic split for "源会话已失效". The legacy
-		// generic wording stays the default fallback (and keeps the
-		// literal substring "session 文件不存在" that existing log-grep
-		// alerts key off). The three side-specific messages are
-		// strictly additions — a downstream monitor that only greps
-		// for the substring still matches.
-		switch out.SessionFileMissingSide {
-		case "remote":
-			artifactBody = "❌ 远端 Agent 服务器上找不到源会话文件（上行失败 / 文件被清理）。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」；3) 到「设置 → Agent 服务器 → 安装依赖」复检。"
-		case "local":
-			artifactBody = "❌ 本地 Claude 会话目录中找不到源会话文件。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」。"
-		case "sync-failed":
-			artifactBody = "❌ 会话文件 SFTP 同步失败。建议：1) 重试；2) 检查 Agent 服务器磁盘与 ~/.claude/projects/ 写权限；3) 勾选「新会话（含需求上下文）」。"
+	// The plan phase writes its output to sub_task_plans, not to the artifact.
+	// The plan-file Write tool_use fires BEFORE the model's final API call, so
+	// a failed trailing call can still leave a usable plan — same precedence
+	// as the architect stage: planContent (plan-file Write / ExitPlanMode)
+	// first, finalResult as the fallback for gateways that don't emit
+	// tool_use blocks.
+	//
+	// This branch sits BEFORE the generic switch because in plan mode
+	// finalResult may legitimately be empty while planContent is not (the
+	// plan is the whole product of this run).
+	planMode := subTaskPlanMode(st)
+	if planMode {
+		planMarkdown := strings.TrimSpace(out.planContent)
+		if planMarkdown == "" {
+			planMarkdown = strings.TrimSpace(out.finalResult)
+		}
+		switch {
+		case out.errMsg != "":
+			finalStatus = model.SubTaskStatusError
+			artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+		case planMarkdown == "":
+			finalStatus = model.SubTaskStatusError
+			artifactBody = "❌ Claude 未产出实施方案，请重试"
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
 		default:
-			artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
-		}
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	case out.errMsg != "":
-		finalStatus = model.SubTaskStatusError
-		// The guard messages already carry their own "❌" marker; prefixing
-		// another one produced "❌ ❌ 已阻止破坏性命令…".
-		artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-		if out.IdleTimeoutHit {
-			// v0.5.x: rolling idle ctx fired (streamEventCount > 0, then SIGKILL).
-			// Distinct from "stalled" so the UI / batch retries can choose
-			// between resuming (idle) and investigating the proxy (stalled).
-			job.SetErrorKind("idle-timeout")
-		} else if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
-			job.SetErrorKind("stalled")
-		} else if out.killReason == killReasonTeardown || out.killReason == killReasonHardTimeout {
-			// We stopped the CLI ourselves before it produced a result.
-			// Distinct from the two above: nothing is wrong with the proxy
-			// or the stream — the run simply never got anywhere.
-			job.SetErrorKind("terminated")
-		}
-	case out.finalResult == "":
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ Claude 未返回结果，请重试"
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	default:
-		// The CLI's "result" event repeats the assistant's final text, which
-		// was already streamed as "message" lines. Emitting it again showed
-		// the user the same conclusion twice — a big part of the "the agent
-		// keeps answering the same thing" impression. Skip the duplicate.
-		if !out.resultRepeatsLastMessage {
-			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		}
-		artifactBody = out.finalResult
-		// A Review rewrites the raw model output into the artifact body
-		// BEFORE the artifact is built: the trailing JSON contract block is
-		// machine payload, not report prose, and the card would render it as
-		// a stray code fence. The rewrite is exactly the project-level
-		// Review's `result_md`口径 (contract stripped), so both surfaces
-		// show the same thing.
-		if hooks.transformReport != nil {
-			if transformed := hooks.transformReport(out.finalResult); transformed != "" {
-				artifactBody = transformed
+			if err := r.subTaskSvc.SavePlan(st.ID, planMarkdown); err != nil {
+				log.Printf("[sub-task] failed to persist plan for %s: %v", st.ID, err)
 			}
+			artifactBody = "📐 方案已生成。审阅后可转 auto 模式进入实现阶段。"
+			job.Append(store.LogLine{Type: "done", Content: "✅ 子任务方案已生成！"})
 		}
-		// push_pr 子任务的 prompt 只覆盖 git push + gh/glab/tea pr create,
-		// Claude 的 finalResult 里基本只有 PR/MR 链接是 http(s) URL。emit 一个
-		// 独立的 pr_link 事件让前端的 applyMergeSignals 能识别,同时把 URL
-		// 追加到 artifact body 末尾(appendPRLineToBody 在 URL 已被 Claude 粘贴
-		// 时跳过,避免重复),让 SubTaskPanel 的 MarkdownRender 正文里始终可见。
-		if st.Source == model.SubTaskSourcePushPR {
-			if u := extractPRURL(out.finalResult); u != "" {
-				job.Append(store.LogLine{Type: "pr_link", Content: u})
-				artifactBody = appendPRLineToBody(artifactBody, u)
+	} else {
+		switch {
+		case out.staleSession:
+			finalStatus = model.SubTaskStatusError
+			// Three-way diagnostic split for "源会话已失效". The legacy
+			// generic wording stays the default fallback (and keeps the
+			// literal substring "session 文件不存在" that existing log-grep
+			// alerts key off). The three side-specific messages are
+			// strictly additions — a downstream monitor that only greps
+			// for the substring still matches.
+			switch out.SessionFileMissingSide {
+			case "remote":
+				artifactBody = "❌ 远端 Agent 服务器上找不到源会话文件（上行失败 / 文件被清理）。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」；3) 到「设置 → Agent 服务器 → 安装依赖」复检。"
+			case "local":
+				artifactBody = "❌ 本地 Claude 会话目录中找不到源会话文件。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」。"
+			case "sync-failed":
+				artifactBody = "❌ 会话文件 SFTP 同步失败。建议：1) 重试；2) 检查 Agent 服务器磁盘与 ~/.claude/projects/ 写权限；3) 勾选「新会话（含需求上下文）」。"
+			default:
+				artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
 			}
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+		case out.errMsg != "":
+			finalStatus = model.SubTaskStatusError
+			// The guard messages already carry their own "❌" marker; prefixing
+			// another one produced "❌ ❌ 已阻止破坏性命令…".
+			artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+			if out.IdleTimeoutHit {
+				// v0.5.x: rolling idle ctx fired (streamEventCount > 0, then SIGKILL).
+				// Distinct from "stalled" so the UI / batch retries can choose
+				// between resuming (idle) and investigating the proxy (stalled).
+				job.SetErrorKind("idle-timeout")
+			} else if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+				job.SetErrorKind("stalled")
+			} else if out.killReason == killReasonTeardown || out.killReason == killReasonHardTimeout {
+				// We stopped the CLI ourselves before it produced a result.
+				// Distinct from the two above: nothing is wrong with the proxy
+				// or the stream — the run simply never got anywhere.
+				job.SetErrorKind("terminated")
+			}
+		case out.finalResult == "":
+			finalStatus = model.SubTaskStatusError
+			artifactBody = "❌ Claude 未返回结果，请重试"
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+		default:
+			// The CLI's "result" event repeats the assistant's final text, which
+			// was already streamed as "message" lines. Emitting it again showed
+			// the user the same conclusion twice — a big part of the "the agent
+			// keeps answering the same thing" impression. Skip the duplicate.
+			if !out.resultRepeatsLastMessage {
+				job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+			}
+			artifactBody = out.finalResult
+			// A Review rewrites the raw model output into the artifact body
+			// BEFORE the artifact is built: the trailing JSON contract block is
+			// machine payload, not report prose, and the card would render it as
+			// a stray code fence. The rewrite is exactly the project-level
+			// Review's `result_md`口径 (contract stripped), so both surfaces
+			// show the same thing.
+			if hooks.transformReport != nil {
+				if transformed := hooks.transformReport(out.finalResult); transformed != "" {
+					artifactBody = transformed
+				}
+			}
+			// push_pr 子任务的 prompt 只覆盖 git push + gh/glab/tea pr create,
+			// Claude 的 finalResult 里基本只有 PR/MR 链接是 http(s) URL。emit 一个
+			// 独立的 pr_link 事件让前端的 applyMergeSignals 能识别,同时把 URL
+			// 追加到 artifact body 末尾(appendPRLineToBody 在 URL 已被 Claude 粘贴
+			// 时跳过,避免重复),让 SubTaskPanel 的 MarkdownRender 正文里始终可见。
+			if st.Source == model.SubTaskSourcePushPR {
+				if u := extractPRURL(out.finalResult); u != "" {
+					job.Append(store.LogLine{Type: "pr_link", Content: u})
+					artifactBody = appendPRLineToBody(artifactBody, u)
+				}
+			}
+			// "✅ 子任务完成！" only on the success path. It used to be appended
+			// unconditionally, so a failed run persisted a log that said "error"
+			// AND "完成" at the same time.
+			job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 		}
-		// "✅ 子任务完成！" only on the success path. It used to be appended
-		// unconditionally, so a failed run persisted a log that said "error"
-		// AND "完成" at the same time.
-		job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 	}
 
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())

@@ -733,6 +733,20 @@ export interface SubTask {
   // re-check). Fix sub-tasks stay at 0, so the round chain is made of Review
   // nodes only.
   review_round?: number;
+  // Execution mode of this sub-task:
+  //   'auto' (default, and what every pre-existing row carries): implement
+  //   the sub-task and write the code to disk.
+  //   'plan': read-only exploration that produced a Markdown implementation
+  //   plan (fetched lazily from GET .../plan). The user converts the row to
+  //   'auto' to run the implementation phase.
+  // undefined on older backends — treat it as 'auto'.
+  mode?: 'auto' | 'plan';
+  // Whether this row carries a saved implementation plan (the plan-mode
+  // phase produced one). The plan section stays visible above the
+  // implementation report — the row's `mode` flips to 'auto' once the user
+  // approves the plan, so this flag is what says "there is a plan to show".
+  // undefined on older backends → falsy → the card renders as before.
+  has_plan?: boolean;
 }
 
 // 需求级 Review 的一轮。GET /api/requirements/{id}/reviews 的元素类型。
@@ -792,7 +806,7 @@ export const subTasksApi = {
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full'; effort?: string },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full'; effort?: string; mode?: 'auto' | 'plan' },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
@@ -813,6 +827,18 @@ export const subTasksApi = {
   // of list/get); content is '' when nothing was recorded.
   getThinking: (requirementId: string, subTaskId: string) =>
     api.get<{ content: string }>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}/thinking`),
+  // The implementation plan produced by a plan-mode sub-task. Fetched
+  // lazily (never part of list/get); content is '' when nothing was recorded.
+  getPlan: (requirementId: string, subTaskId: string) =>
+    api.get<{ content: string }>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}/plan`),
+  // Convert a finished plan-mode sub-task into the implementation phase
+  // (in place — same sub_task_id) and start it. 409 when the row is not a
+  // finished plan-mode sub-task.
+  startDev: (requirementId: string, subTaskId: string, data: { model?: string; effort?: string } = {}) =>
+    api.post<{ job_id: string; sub_task_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/start-dev`,
+      data,
+    ),
   // Append a follow-up instruction to an existing sub-task. Resumes the
   // parent's claude session via --fork-session so the child inherits the
   // parent's prior edits + transcript. Returns a new job_id/sub_task_id

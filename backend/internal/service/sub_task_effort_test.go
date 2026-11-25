@@ -40,6 +40,7 @@ func TestSubTaskEffortRoundTrip(t *testing.T) {
 		"req_1", "child", "do the thing", "model-x", "sid-src",
 		"", 0, "", model.SubTaskSessionModeFork, "", model.SubTaskSourceManual,
 		model.SubTaskReportModeAuto,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -102,6 +103,7 @@ func TestSubTaskEffortRejectsInvalidTier(t *testing.T) {
 		"req_1", "child", "do the thing", "model-x", "sid-src",
 		"", 0, "", model.SubTaskSessionModeFork, "", model.SubTaskSourceManual,
 		model.SubTaskReportModeAuto,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)

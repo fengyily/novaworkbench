@@ -43,6 +43,12 @@ import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
+import { downloadDesignMarkdown } from '../utils/designExport';
+// The shared Markdown typography. MarkdownRender emits bare <h2>/<table>/
+// <pre> with no classes of its own, so the HOST has to provide the styling —
+// every surface that renders Markdown wraps it in `.md-prose` and imports
+// this stylesheet (see CLAUDE.md → 「Markdown 排版单一来源」).
+import '../styles/markdown-prose.css';
 import { stripArtifactHeader, stripArtifactCodeFence } from '../utils/subTaskArtifact';
 import './SubTaskPanel.css';
 
@@ -532,6 +538,100 @@ function ThinkingSection({ requirementId, subTaskId }: { requirementId: string; 
   );
 }
 
+// PlanSection shows the implementation plan produced by a plan-mode run.
+//
+// Collapsed by default; the plan is fetched on first expand only (it can be
+// tens of KB, so it is never part of the list payload) and cached for later
+// toggles — same lazy-fetch skeleton as ThinkingSection.
+//
+// Rendered as Markdown, not plain text: the plan is a document the user
+// reviews (and exports), not a log. The .md-prose wrapper is what gives it
+// the project's shared Markdown typography — MarkdownRender emits bare
+// <h2>/<table>/<pre> with no classes of its own, so the host has to supply
+// the styling.
+//
+// The export button reuses the requirement-level design export pipeline
+// (utils/designExport.ts) so a sub-task plan downloads with the same shape as
+// a design doc — only the meta label differs ("需求" instead of "项目").
+function PlanSection({
+  requirementId,
+  subTaskId,
+  title,
+}: {
+  requirementId: string;
+  subTaskId: string;
+  title: string;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [failed, setFailed] = useState<boolean>(false);
+  const [content, setContent] = useState<string | null>(null);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && content === null && !loading) {
+      setLoading(true);
+      setFailed(false);
+      subTasksApi
+        .getPlan(requirementId, subTaskId)
+        .then((r) => setContent(r?.content ?? ''))
+        .catch(() => setFailed(true))
+        .finally(() => setLoading(false));
+    }
+  };
+
+  const exportPlan = () => {
+    if (!content) return;
+    downloadDesignMarkdown({
+      title: t('components.subTaskCard.implPlanTitle'),
+      meta: title,
+      metaLabel: t('components.subTaskCard.implPlanMetaLabel'),
+      markdown: content,
+      filename: title,
+      markdownSuffix: t('components.subTaskCard.implPlanExportSuffix'),
+    });
+  };
+
+  return (
+    <div className="sub-phase-panel sub-impl-plan">
+      <button
+        type="button"
+        className={`sub-phase-step sub-impl-plan-toggle${open ? ' is-open' : ''}`}
+        onClick={toggle}
+        aria-expanded={open}
+      >
+        <span className="sub-phase-dot" aria-hidden="true" />
+        <span className="sub-phase-title">{t('components.subTaskCard.implPlanTitle')}</span>
+        <span className="sub-phase-arrow">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="sub-phase-panel-body">
+          {loading ? (
+            <span className="sub-thinking-hint">⏳ {t('components.subTaskCard.implPlanLoading')}</span>
+          ) : failed ? (
+            <span className="sub-thinking-hint">{t('components.subTaskCard.implPlanLoadFailed')}</span>
+          ) : content ? (
+            <>
+              <div className="sub-impl-plan-body md-prose">
+                <MarkdownRender content={content} />
+              </div>
+              <div className="sub-impl-plan-actions">
+                <button type="button" className="sub-impl-plan-export" onClick={exportPlan}>
+                  {t('components.subTaskCard.implPlanExport')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <span className="sub-thinking-hint">{t('components.subTaskCard.implPlanEmpty')}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ToolResultRow renders a tool_result SSE event (Read / Bash / Grep
 // output) inside SubTaskLogView. Default-collapsed to a 200-char preview
 // so a long `npm install` or grep sweep doesn't push the live stream off
@@ -779,7 +879,7 @@ function useRestartSubTask(args: {
   setLines: (l: LogLine[]) => void;
 }) {
   const { st, requirementId, effort, onChanged, onRestarted, setStreaming, setLines } = args;
-  return useCallback(async (kind: 'redo' | 'continue', model?: string) => {
+  return useCallback(async (kind: 'redo' | 'continue' | 'start-dev', model?: string) => {
     // Snapshot for rollback on error.
     const snapshot = { ...st };
     // Optimistic: card flips to running UI + parent gets a synthetic
@@ -798,7 +898,11 @@ function useRestartSubTask(args: {
       };
       const resp = kind === 'redo'
         ? await subTasksApi.redo(requirementId, st.id, body)
-        : await subTasksApi.continue(requirementId, st.id, body);
+        : kind === 'continue'
+          ? await subTasksApi.continue(requirementId, st.id, body)
+          // 「▶ 开始开发」: convert the finished plan-mode row to auto mode
+          // IN PLACE (same sub_task_id) and run the implementation phase.
+          : await subTasksApi.startDev(requirementId, st.id, body);
       // Hand off to the parent: it stamps job_id on the row and
       // subscribes the SSE stream for the new job.
       onRestarted?.(st.id, resp.job_id);
@@ -1011,6 +1115,11 @@ function SubTaskCard({
   // --resume call is in flight. Mirror of stopping/redoing; kept
   // separate so the drawer-style `adjusting` state isn't affected.
   const [continueBusy, setContinueBusy] = useState(false);
+  // 「▶ 开始开发」busy state — disabled on the button while the conversion
+  // call is in flight. On success the card flips to running and the SSE
+  // stream takes over (same handoff as redo / continue).
+  const [startDevBusy, setStartDevBusy] = useState(false);
+  const [startDevError, setStartDevError] = useState<string | null>(null);
   // Delete busy state — disabled on the button while the DELETE call is in
   // flight. On success the panel prunes the row (and its subtree) from the
   // list, so this card unmounts; on error we clear the flag and alert.
@@ -1310,6 +1419,28 @@ function SubTaskCard({
     }
   }, [continueBusy, st.status, restartSubTask, t]);
 
+  // 「▶ 开始开发」: turn a finished plan-mode sub-task into its
+  // implementation phase. The backend converts the SAME row (status=pending,
+  // mode=auto) and returns the new job id — so the card keeps its identity
+  // and the plan section stays visible above the implementation report.
+  //
+  // The mode check is strict: an old backend that does not return `mode`
+  // leaves it undefined, and this button must never appear for such a row.
+  const submitStartDev = useCallback(async () => {
+    if (startDevBusy) return;
+    if (st.mode !== 'plan' || st.status !== 'done') return;
+    setStartDevBusy(true);
+    setStartDevError(null);
+    try {
+      await restartSubTask('start-dev');
+    } catch (e: any) {
+      // The hook already rolled the card back; surface a localized message.
+      setStartDevError(e?.message || t('components.subTaskCard.errStartDev'));
+    } finally {
+      setStartDevBusy(false);
+    }
+  }, [startDevBusy, st.mode, st.status, restartSubTask, t]);
+
   // Stop (⏹ 停止): interrupt a running sub-task via the backend's
   // /stop endpoint. The endpoint cancels the underlying JobStore job
   // (SIGTERM → 5s → SIGKILL) and flips the row to 'stopped' with a
@@ -1444,6 +1575,10 @@ function SubTaskCard({
     // Per-button visibility, mirroring the original block.
     const showContinue = st.status === 'error' || st.status === 'stopped';
     const showErrorOnly = st.status === 'error';
+    // 「▶ 开始开发」only for a FINISHED plan-mode row. Whether the plan
+    // actually has content is the backend's call (it answers 409 when the
+    // plan is empty) — the card doesn't need a second round-trip for that.
+    const showStartDev = st.mode === 'plan' && st.status === 'done';
     // Header variant: disable the row while a pane is open and highlight
     // the active one. Continue stays enabled so the user can still switch
     // to "just keep going" from inside the Adjust drawer.
@@ -1516,6 +1651,24 @@ function SubTaskCard({
             {continueBusy
               ? t('components.subTaskCard.continueBusy')
               : t('components.subTaskCard.continueToggle')}
+          </button>
+        )}
+        {showStartDev && (
+          <button
+            {...buttonBaseProps}
+            data-action="start-dev"
+            disabled={startDevBusy}
+            title={t('components.subTaskCard.startDevHint')}
+            onClick={(e) => {
+              stopHeaderPropagation(e);
+              setExpanded(true);
+              pendingScrollRef.current = { target: 'log', source: variant };
+              void submitStartDev();
+            }}
+          >
+            {startDevBusy
+              ? t('components.subTaskCard.startDevBusy')
+              : t('components.subTaskCard.startDev')}
           </button>
         )}
         {showErrorOnly && (
@@ -1620,6 +1773,22 @@ function SubTaskCard({
     (st.status === 'done' || st.status === 'error' || st.status === 'stopped') ? (
       <ThinkingSection requirementId={st.requirement_id} subTaskId={st.id} />
     ) : null;
+  // 方案模式（两段式子任务）：mode === 'plan' 严格相等。老后端不返回该
+  // 字段（undefined）⇒ 卡片渲染与改动前逐字一致。
+  const isPlanMode = st.mode === 'plan';
+  // 实施方案区：方案在上、实现报告在下，两段式的形状一眼可见。
+  //
+  // 判据是「这一行有没有方案」（has_plan），不是「这一行是不是 plan 模式」
+  // —— 用户点「开始开发」后行的 mode 会翻成 'auto'，但方案必须继续留在
+  // 上方：那正是「两段式」的证据。老后端不返回 has_plan ⇒ falsy ⇒ 普通
+  // 子任务卡片与改动前逐字一致。
+  const planNode = st.has_plan ? (
+    <PlanSection
+      requirementId={st.requirement_id}
+      subTaskId={st.id}
+      title={st.title || t('components.subTaskCard.noTitle')}
+    />
+  ) : null;
 
   return (
     <article
@@ -1722,6 +1891,15 @@ function SubTaskCard({
               title={t('components.subTaskCard.reportModeBriefTitle')}
             >
               {t('components.subTaskCard.reportModeBrief')}
+            </span>
+          )}
+          {/* 方案模式徽标 —— 该子任务先只产出实施方案，确认后才实现。 */}
+          {isPlanMode && (
+            <span
+              className="sub-card-mode-chip sub-card-mode-plan"
+              title={t('components.subTaskCard.planModeBadgeTitle')}
+            >
+              {t('components.subTaskCard.planModeBadge')}
             </span>
           )}
           {/* Execution environment: 💻 本地 or 🛰️ Agent Server「name」. Shows
@@ -1844,6 +2022,12 @@ function SubTaskCard({
 
       {expanded && (
         <div className="sub-card-body">
+          {/* 方案先行的实施方案区 —— 位于 Live log 与实现报告之上：
+              「先看方案 → 再看代码」的顺序正是两段式子任务想传达的形状。 */}
+          {planNode}
+          {/* 「▶ 开始开发」失败（409：该行已是 auto / 尚未完成 / 无方案）。
+              卡片保持 done 态，方案仍可导出，用户可重试。 */}
+          {startDevError && <div className="sub-adjust-err">{startDevError}</div>}
           {/* v0.5.x: 三段（理解 / 实施 / 小结）折叠区，仅手动触发路径
               （phase_emitted=true）渲染。位于 Live log 之上、Artifact 之下。
               每段默认展开（用户首次看到的是完整三段而不是折叠）；活动阶段
@@ -2889,6 +3073,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // 'full' 强制三段。无 touch 标志——后端的启发式已经对短提示词判得很准，
   // 用户在大多数情况下不需要主动干预。
   const [reportMode, setReportMode] = useState<'auto' | 'brief' | 'full'>('auto');
+  // 执行模式（两段式子任务）——'plan' = 方案先行：第 1 段只读探索产出实施
+  // 方案，用户审阅后点「▶ 开始开发」才进入第 2 段实现。默认 'auto'，
+  // 与改动前逐字一致。
+  const [execMode, setExecMode] = useState<'auto' | 'plan'>('auto');
   // Track whether the user has touched the session-mode radio. The
   // stale-artifact auto-promote below MUST NOT stomp a deliberate user
   // pick: a fresh poll re-creates `latestArtifactStale` on every render
@@ -2983,6 +3171,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         agent_server_id: createAgentServerId,
         // 报告详略：'auto' 也照实发送——后端再做规范化，0 成本、可观测。
         report_mode: reportMode,
+        // 执行模式：'auto' 也照实发送——后端再做规范化，0 成本、可观测。
+        // 'plan' 让第 1 段只读探索产出实施方案，用户审阅后再转 auto 实现。
+        mode: execMode,
         // Reasoning-effort tier (claude CLI --effort). Sub-tasks are
         // implementation work → the 'coding' stage default. Sent ONLY when
         // the user actually picked one: an unpicked run leaves the field off
@@ -3001,13 +3192,16 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       // stale-session auto-promote may have been the user's last deliberate
       // pick, and we don't want to nuke it.
       setReportMode('auto');
+      // Same for the execution-mode radio: a fresh sub-task starts on
+      // 「自动开发」 unless the user picks 「方案先行」 again.
+      setExecMode('auto');
       await loadList();
     } catch (e: any) {
       setError(e?.message || t('components.subTaskPanel.errCreate'));
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, composerEffortValue, reviewEffort, reviewAutoIterate, reviewAutoRounds, requirementId, loadList, t, reset]);
+  }, [prompt, reviewGoal, submitting, composerMode, reviewRoleKey, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, execMode, composerEffortValue, reviewEffort, reviewAutoIterate, reviewAutoRounds, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -3242,6 +3436,22 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     },
   ];
   const activeReportMode = reportModeOptions.find((o) => o.key === reportMode) ?? reportModeOptions[0];
+
+  // 执行模式分段控件内容。「方案先行」把一个子任务拆成两段：第 1 段只读
+  // 探索产出实施方案，用户审阅后点「▶ 开始开发」才进入第 2 段实现。
+  const execModeOptions: Array<{ key: 'auto' | 'plan'; label: string; desc: string }> = [
+    {
+      key: 'auto',
+      label: t('components.subTaskPanel.execMode.auto'),
+      desc: t('components.subTaskPanel.execMode.autoHint'),
+    },
+    {
+      key: 'plan',
+      label: t('components.subTaskPanel.execMode.plan'),
+      desc: t('components.subTaskPanel.execMode.planHint'),
+    },
+  ];
+  const activeExecMode = execModeOptions.find((o) => o.key === execMode) ?? execModeOptions[0];
 
   return (
     <section className="sub-panel" aria-labelledby="sub-panel-title">
@@ -3667,6 +3877,40 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             })}
           </div>
           <span className="sub-session-mode-desc" role="note">{activeReportMode.desc}</span>
+        </div>
+        )}
+        {/* 执行模式分段控件——视觉与文案镜像上面的两个控件（同一组
+            .sub-session-mode-* 类），只改 key。「方案先行」把子任务拆成
+            两段：第 1 段只读探索产出实施方案，用户审阅后点「▶ 开始开发」
+            才进入第 2 段实现。Review 模式不适用（它有自己的契约）。 */}
+        {composerMode === 'code' && (
+        <div className="sub-session-mode">
+          <span className="sub-session-mode-label" id="sub-exec-mode-label">
+            {t('components.subTaskPanel.execMode.label')}
+          </span>
+          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-exec-mode-label">
+            {execModeOptions.map((opt) => {
+              const active = execMode === opt.key;
+              return (
+                <label
+                  key={opt.key}
+                  className={`sub-session-mode-option${active ? ' is-active' : ''}`}
+                  title={opt.desc}
+                >
+                  <input
+                    type="radio"
+                    name="execMode"
+                    value={opt.key}
+                    checked={active}
+                    onChange={() => setExecMode(opt.key)}
+                    disabled={submitting || reSplitBusy}
+                  />
+                  <span className="sub-session-mode-option-text">{opt.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          <span className="sub-session-mode-desc" role="note">{activeExecMode.desc}</span>
         </div>
         )}
         {/* Reasoning-effort picker — how deep the CLI thinks on this run.

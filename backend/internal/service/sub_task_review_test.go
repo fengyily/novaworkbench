@@ -120,7 +120,7 @@ func TestCreate_LegacyRowsAreCodeKind(t *testing.T) {
 		t.Skipf("seed requirement: %v", err)
 	}
 	st, err := svc.Create(reqID, "普通子任务", "做点事", "sonnet", "", "", 0, "",
-		model.SubTaskSessionModeFork, "", model.SubTaskSourceManual, model.SubTaskReportModeAuto)
+		model.SubTaskSessionModeFork, "", model.SubTaskSourceManual, model.SubTaskReportModeAuto, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

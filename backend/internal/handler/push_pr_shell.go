@@ -105,7 +105,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 		title = "推送并创建 PR"
 		shortDesc = "本地 shell 推送并创建 PR: " + dev
 	}
-	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "")
+	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
@@ -152,7 +152,7 @@ func (h *WizardHandler) runCommitOnlyShellJob(reqRow *model.Requirement, dev, ba
 		log.Printf("[commit-shell] %s: no local workdir, skip", reqRow.ID)
 		return "", "", nil
 	}
-	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "本地 shell 提交", "本地 shell 提交 (仅 commit, 不推送): "+dev, "", "", "", "", "", "")
+	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "本地 shell 提交", "本地 shell 提交 (仅 commit, 不推送): "+dev, "", "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
