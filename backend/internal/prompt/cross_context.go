@@ -39,6 +39,26 @@ type CrossProjectRef struct {
 // 各仓库就会各自设计、各自实现，联调时才暴露不一致（风险表里的中风险项）。
 const crossContractHeading = "## 跨项目接口契约"
 
+// CrossToolNote — 告知模型：跨项目作业里 Bash 可以用，但只用来「查」。
+//
+// 为什么必须写进提示词：跨项目作业过去在协议层把 Write / Edit / Bash /
+// NotebookEdit 全禁了，模型从来不知道自己**能**跑命令，所以即使后来放开了
+// Bash，它也不会主动去用 —— 「看不到历史 / blame / 跨仓库 diff」的方案问题
+// 原样保留。放开能力的同时把边界讲清楚，模型才会真的去查。
+//
+// 为什么强调只读：跨项目作业读到的目录不全是安全的 —— 参与仓库锁定不了基线
+// 时读的是用户的**共享检出**，阶段验证还要读子需求开发者**未提交的实现
+// worktree**。这两处的未提交改动一旦被改写就找不回来了。协议层已经禁用
+// Write / Edit / NotebookEdit，Bash 是这条保证上唯一的缺口，所以提示词要把
+// 「不改仓库」写死。
+const CrossToolNote = "## 可用工具\n" +
+	"Read / Glob / Grep 可用；**Bash 也可用**，用来查证代码 —— `git log` / `git show` / " +
+	"`git diff` / `git blame` / `grep` / `rg` / `ls` 这类**只读**命令都可以跑，" +
+	"需要指定仓库时用 `git -C <仓库路径> <只读子命令>`。\n\n" +
+	"但**只能读、不能改**：不要执行任何会改动仓库的命令（`git checkout` / `git switch` / " +
+	"`git reset` / `git clean` / `git commit` / `git push` / `rm` / `mv` 等），" +
+	"也不要用重定向、`tee`、`>` 往仓库里写文件。Write / Edit / NotebookEdit 在协议层已被禁用。"
+
 // crossContractMaxRunes — 契约章节注入到子需求正文时的 rune 上限。
 //
 // 子需求正文要进 prompt，全量注入整体方案会挤爆上下文预算。契约章节是

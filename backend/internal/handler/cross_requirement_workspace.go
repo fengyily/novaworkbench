@@ -27,7 +27,8 @@ import (
 //     提交、还停在别人 WIP 分支上的工作副本写的。
 //  2. **不动用户的检出**：worktree 是 detached HEAD，从 origin/<base> 建，
 //     不建任何分支、不快进共享检出、也不受共享检出脏工作区的影响。跨项目
-//     作业本身是只读的（Write / Edit / Bash 全禁），绝不能污染任何仓库。
+//     作业**不改代码**（Write / Edit / NotebookEdit 禁用），Bash 只用来读，
+//     破坏性命令由守卫挡住 —— 绝不能污染任何仓库。
 //  3. **对称**：N 个仓库各一份，没有「主仓库」。这正是原来用临时目录的理由
 //     （见 crossWorkDir 的历史注释）—— 现在把「对称」和「读到最新基线」兼得，
 //     而不是二选一。
@@ -262,8 +263,8 @@ func (h *CrossRequirementHandler) buildCrossWorkspace(ctx context.Context, xreqI
 // the overall design was written against. Here the SHA is the contract.
 //
 // The worktree is detached: no branch is created in the user's repository,
-// locally or remotely. The cross jobs are read-only, so a branch would have
-// no purpose.
+// locally or remotely. The cross jobs never author changes, so a branch would
+// have no purpose.
 //
 // It returns the worktree path AND the commit the worktree actually sits on.
 // The two are usually the same, but not always: an existing worktree that

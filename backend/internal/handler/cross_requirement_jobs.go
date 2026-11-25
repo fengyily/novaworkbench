@@ -25,7 +25,7 @@ import (
 // 三个作业共享同一套骨架：
 //
 //	启动 → 建 job → 抢并发闸门 → 登记 run → 返回 job_id
-//	（后台）→ 备 prompt → claude CLI（只读）→ 解析 → 落库 → 结束 job
+//	（后台）→ 备 prompt → claude CLI（可读可查，不可改）→ 解析 → 落库 → 结束 job
 //
 // 与 wizard_architect.go 的关系：**不复用**。那个文件与 *model.Requirement 的
 // 状态机深度耦合（状态迁移 / design_docs / session / revision / 附件 / QA），
@@ -109,10 +109,184 @@ func (h *CrossRequirementHandler) crossStreamOpts(spec crossJobSpec) llm.StreamO
 		// the **workspace read paths** — detached worktrees pinned to the
 		// locked baseline commit, not the shared checkouts.
 		AddDirs: mergeCrossDirs(crossWorkspaceDirs(spec.Workspace), spec.ExtraDirs),
-		// Read-only: producing a design / a split / a verification report
-		// must not touch any repository.
-		DisallowedTools: []string{"Write", "Edit", "Bash", "NotebookEdit"},
+		// The job may READ the repositories but must not AUTHOR changes to
+		// them: producing a design / a split / a verification report must not
+		// touch any repository.
+		//
+		// Bash is deliberately NOT denied: a design that cannot run
+		// `git log` / `git show` / `git diff` / `git blame` is a design
+		// written against a code snapshot the model cannot reason about
+		// (no history, no blame, no cross-repo diff). It mirrors the
+		// project-level design / development stages, which both run Bash.
+		//
+		// Write / Edit / NotebookEdit stay denied — that is the user's
+		// explicit choice for the cross stage ("don't let it change the
+		// code; the child requirements do the development"), and it keeps
+		// the baseline ledger truthful (the design really was written
+		// against the SHA it claims).
+		//
+		// The shell is the one hole in that guarantee, so it is closed by two
+		// layers:
+		//
+		//   - the CLI denylist (crossDisallowedTools) refuses the mutating
+		//     git commands outright — **gracefully**: the model gets a
+		//     "command denied" tool error, adapts to a read-only spelling
+		//     (`git show <sha>:<path>`), and the run finishes. Deny rules
+		//     are evaluated BEFORE the permission mode, so they still apply
+		//     under --dangerously-skip-permissions (see the Claude Code
+		//     permission-evaluation order: deny → mode → allow).
+		//   - the destructive guard (crossJobSink) vetoes the commands that
+		//     would delete or reset one of the granted directories — the
+		//     filesystem class (`rm -rf` / `mv` / `find -delete`), which the
+		//     CLI denylist does not cover and which the guard matches by
+		//     binary basename, so `/bin/rm` is caught too.
+		//
+		// Residual (documented, not a bug): the CLI's pattern matching is
+		// literal, so a git command spelled with an absolute binary path
+		// (`/usr/bin/git checkout …`) is not matched by the denylist. The
+		// prompt tells the model not to run mutating git commands at all,
+		// and the guard still catches the destructive filesystem ones.
+		DisallowedTools: crossDisallowedTools(),
 	}
+}
+
+// crossForbiddenBashPatterns — 跨项目作业禁止执行的 shell 命令前缀。
+//
+// 跨项目阶段的产出是方案 / 拆分 / 验证报告，不是代码 —— 代码由拆出来的子需求
+// 负责。所以任何会**改动仓库**的命令一律拒掉。
+//
+// 拒在 CLI 层（--disallowedTools 的 Bash(...) 模式）而不是只写进提示词，
+// 有两个理由：
+//
+//   - 提示词是软保证：模型可能顺手跑一条 `git checkout` 去看某个历史版本；
+//   - CLI 层的拒绝是**非致命**的：模型拿到一条「命令被拒绝」的工具错误，
+//     会改用只读的写法（`git show <sha>:<path>` 而不是
+//     `git checkout <sha> -- <path>`），作业照常跑完 —— 这正是兜底守卫
+//     （crossJobSink）做不到的：守卫一旦命中就中止整个作业。
+//
+// 拒规则在权限模式**之前**求值，所以 --dangerously-skip-permissions 也不会
+// 绕过它（Claude Code 的求值顺序：deny → 权限模式 → allow）。
+//
+// 只读命令不在列表里：log / show / diff / blame / status / ls-files /
+// rev-parse / describe / shortlog / tag / branch --list / remote -v /
+// worktree list …
+//
+// `git worktree` 只列出会改动的子命令 —— `git worktree list` 是只读的，
+// 挡掉它只会制造一个「明明能查却查不了」的洞。
+var crossForbiddenBashPatterns = []string{
+	"git checkout *", "git switch *", "git restore *", "git stash *",
+	"git commit *", "git push *", "git pull *", "git reset *", "git clean *",
+	"git rebase *", "git merge *", "git cherry-pick *", "git revert *",
+	"git apply *", "git am *", "git update-ref *", "git symbolic-ref *",
+	"git worktree add *", "git worktree remove *", "git worktree move *",
+	"git worktree prune *", "git gc *", "git prune *", "git repack *",
+	"git filter-branch *", "git bisect *",
+}
+
+// crossDisallowedTools — 跨项目作业的 CLI 工具黑名单。
+//
+// 协议层禁掉「写工具」（Write / Edit / NotebookEdit）—— 跨项目阶段不产出代码。
+// 外加 Bash 里那批会改动仓库的命令 —— 协议层管不了 shell，这是同一条保证的
+// 另一半。
+//
+// 形态说明：CLI 的 --disallowedTools 收一个逗号或空格分隔的列表，里面可以
+// 混写工具名（Write）与带参模式（Bash(git checkout *)）。带参模式里的空格
+// 属于模式本身 —— 实测 `--disallowedTools "Write Bash(echo *)"` 里 Write 仍
+// 被禁用（CLI 回「Write is disabled for this session」），模式也照常生效。
+//
+// 每个模式都有两条形态：直接调用（`git checkout …`）与 `-C <路径>` 调用
+// （`git -C /repo checkout …`）。作业的工作目录不是仓库，模型要指定仓库
+// 就得用 `-C`，或者先 `cd` 过去（CLI 的 shell 保留 cwd，之后的调用就是
+// 直接调用形态）。
+func crossDisallowedTools() []string {
+	out := []string{"Write", "Edit", "NotebookEdit"}
+	for _, p := range crossForbiddenBashPatterns {
+		out = append(out, "Bash("+p+")")
+		out = append(out, "Bash(git -C * "+strings.TrimPrefix(p, "git ")+")")
+	}
+	return out
+}
+
+// crossJobSink is the stream sink for the cross-requirement jobs.
+//
+// It extends jobSink with the two hooks runClaudeStream looks for (the
+// optional streamGuard interface — see wizard_stream.go).
+//
+// WHY A GUARD, NOW THAT BASH IS OPEN
+//
+// Cross jobs used to be strictly read-only (Write / Edit / Bash all denied),
+// so there was nothing to guard — the CLI could not touch a repository at
+// all. They now run Bash so the model can actually inspect the code it is
+// designing against.
+//
+// The read paths of a cross job are NOT scratch space:
+//
+//   - the participating repositories are read through **detached worktrees**
+//     pinned to the locked baseline — except when a repository cannot be
+//     pinned, in which case the read path degrades to the user's **shared
+//     checkout**, uncommitted work and all;
+//   - phase verification additionally reads each member requirement's
+//     **implementation worktree** — the developer's actual, uncommitted work.
+//
+// So "Bash is open" must not become "the AI may wipe a repository". The
+// guard vetoes the commands that would destroy one of the granted
+// directories (rm -rf / git reset --hard / git clean -fdx / git worktree
+// remove / find -delete); everything else runs untouched.
+//
+// The protected set is exactly opts.AddDirs — the directories the CLI was
+// granted read access to. Granting a directory and protecting it are the
+// same decision, so both come from the same list.
+type crossJobSink struct {
+	jobSink
+	// workDir — the job's own scratch directory (where the CLI runs). It is
+	// not a repository, but a health check still applies to it.
+	workDir string
+	// protected — the directories the job reads from and must not destroy.
+	protected []string
+}
+
+// CheckStreamHealth implements streamGuard.
+//
+// Fires when the job's scratch directory disappears mid-run: continuing
+// would run the CLI in a deleted cwd, and the read paths it depends on may
+// be going with it.
+func (s crossJobSink) CheckStreamHealth() string {
+	if s.workDir == "" {
+		return ""
+	}
+	if _, err := os.Stat(s.workDir); err != nil {
+		if os.IsNotExist(err) {
+			return "❌ 工作目录已被删除（" + s.workDir + "），已中止作业。"
+		}
+		return "❌ 工作目录不可读（" + s.workDir + "）：" + err.Error() + "，已中止作业。"
+	}
+	return ""
+}
+
+// GuardToolUse implements streamGuard.
+//
+// Vetoes a Bash command that would delete / reset / move one of the granted
+// directories. The verdict comes from destructiveCommandReason, which
+// decides on the path the destructive operation really points at — so
+// ordinary cleanup (`rm -rf build/`) and reads of a scratch directory
+// elsewhere stay possible.
+func (s crossJobSink) GuardToolUse(toolName string, input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+	cmd, _ := input["command"].(string)
+	if cmd == "" {
+		return ""
+	}
+	for _, root := range s.protected {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		if reason := destructiveCommandReason(toolName, cmd, root); reason != "" {
+			return "❌ 已阻止破坏性命令（会删除/重置只读目录 " + root + "）：" + truncateStr(cmd, 300) + "。" + reason
+		}
+	}
+	return ""
 }
 
 // mergeCrossDirs merges two directory lists, dropping duplicates and paths
@@ -393,7 +567,8 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧭 正在生成跨项目整体方案…"})
 
-	out := runClaudeStream(jobSink{job}, h.llm.StreamCmd(context.Background(), opts), "cross-design",
+	out := runClaudeStream(crossJobSink{jobSink: jobSink{job}, workDir: workDir, protected: opts.AddDirs},
+		h.llm.StreamCmd(context.Background(), opts), "cross-design",
 		h.crossUsageCtx("cross_design", xreq.ID, job.ID, modelName, configID), nil, nil, 0,
 		withStallTimeout(crossJobStallTimeout))
 
@@ -402,7 +577,7 @@ func (h *CrossRequirementHandler) runDesign(job *store.Job, xreq *model.CrossReq
 		markdown = strings.TrimSpace(out.planContent)
 	}
 	if markdown == "" {
-		h.finishCrossError(job, crossRunDesign, xreq.ID, "", "未产出整体方案，请重试")
+		h.finishCrossError(job, crossRunDesign, xreq.ID, "", crossEmptyOutputMessage(out, "未产出整体方案，请重试"))
 		return
 	}
 	if !prompt.HasCrossContractSection(markdown) {
@@ -575,7 +750,8 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在按项目拆分整体方案…"})
 
-	out := runClaudeStream(jobSink{job}, h.llm.StreamCmd(context.Background(), opts), "cross-split",
+	out := runClaudeStream(crossJobSink{jobSink: jobSink{job}, workDir: workDir, protected: opts.AddDirs},
+		h.llm.StreamCmd(context.Background(), opts), "cross-split",
 		h.crossUsageCtx("cross_split", xreq.ID, job.ID, modelName, configID), nil, nil, 0,
 		withStallTimeout(crossJobStallTimeout))
 
@@ -585,7 +761,8 @@ func (h *CrossRequirementHandler) runSplit(job *store.Job, xreq *model.CrossRequ
 	}
 	candidates := prompt.NormalizeCrossSplitCandidates(jsonPart, projects)
 	if len(candidates) == 0 {
-		h.finishCrossError(job, crossRunSplit, xreq.ID, "", "未能从整体方案中解析出候选子需求，请完善方案后重试")
+		h.finishCrossError(job, crossRunSplit, xreq.ID, "",
+			crossEmptyOutputMessage(out, "未能从整体方案中解析出候选子需求，请完善方案后重试"))
 		return
 	}
 
@@ -817,7 +994,8 @@ func (h *CrossRequirementHandler) runVerify(job *store.Job, xreqID, phaseID stri
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 正在做阶段验证…"})
 
-	out := runClaudeStream(jobSink{job}, h.llm.StreamCmd(context.Background(), opts), "cross-verify",
+	out := runClaudeStream(crossJobSink{jobSink: jobSink{job}, workDir: workDir, protected: opts.AddDirs},
+		h.llm.StreamCmd(context.Background(), opts), "cross-verify",
 		h.crossUsageCtx("cross_verify", xreqID, job.ID, modelName, configID), nil, nil, 0,
 		withStallTimeout(crossJobStallTimeout))
 
@@ -826,7 +1004,7 @@ func (h *CrossRequirementHandler) runVerify(job *store.Job, xreqID, phaseID stri
 		report = strings.TrimSpace(out.planContent)
 	}
 	if report == "" {
-		h.finishCrossError(job, crossRunVerify, xreqID, phaseID, "未产出阶段验证报告，请重试")
+		h.finishCrossError(job, crossRunVerify, xreqID, phaseID, crossEmptyOutputMessage(out, "未产出阶段验证报告，请重试"))
 		return
 	}
 
@@ -1017,6 +1195,23 @@ func crossDoneFrame(job *store.Job, status store.JobStatus, exitCode int, errMsg
 }
 
 // ── 辅助 ───────────────────────────────────────────────────────────────────
+
+// crossEmptyOutputMessage builds the failure message for a cross job that
+// produced no usable output.
+//
+// The run may have been stopped by the destructive-command guard (the model
+// tried to delete one of the participating repositories) rather than by an
+// empty answer. In that case out.errMsg carries the real reason — and
+// reporting "no output, please retry" would hide it: the user would retry the
+// same run and hit the same wall, with nothing in the log explaining why.
+//
+// So the recorded reason wins over the generic message.
+func crossEmptyOutputMessage(out claudeStreamOutcome, fallback string) string {
+	if msg := strings.TrimSpace(out.errMsg); msg != "" {
+		return msg
+	}
+	return fallback
+}
 
 // finishCrossError reports a failed job on the stream.
 //

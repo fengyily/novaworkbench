@@ -135,6 +135,10 @@ func BuildCrossPhasePrompt(phaseName, phaseDescription string, members []CrossPh
 		b.WriteString("\n\n")
 	}
 
+	// 可用工具 —— Bash 已放开（只读），模型得知道才能真的去查实现目录。
+	b.WriteString(CrossToolNote)
+	b.WriteString("\n\n")
+
 	// 本阶段涉及仓库的项目级 CLAUDE.md —— 验证结论必须按各仓库自己的约定判。
 	if section := BuildCrossProjectConventionSection(conventions); section != "" {
 		b.WriteString(section)

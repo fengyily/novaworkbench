@@ -55,9 +55,10 @@ import (
 // ── 没有 fork 守卫 ────────────────────────────────────────────────────────
 //
 // 单项目的阶段答疑有一道 fork 守卫（requireAnchoredFork）：源会话若是在共享
-// 检出里跑的，fork 之后模型会拿着共享检出的绝对路径去改文件。跨项目作业**恒为
-// 只读**（Write / Edit / Bash / NotebookEdit 全禁），而且它的"隔离"本来就体现
-// 在每个仓库各有一份 detached worktree 上 —— 不存在改错检出目录的风险。所以
+// 检出里跑的，fork 之后模型会拿着共享检出的绝对路径去改文件。跨项目作业**不能
+// 改代码**（Write / Edit / NotebookEdit 在协议层被禁用），而且它的"隔离"本来就
+// 体现在每个仓库各有一份 detached worktree 上 —— 不存在改错检出目录的风险。
+// Bash 虽已放开（只读探查用），但破坏性命令由 crossJobSink 的守卫挡住。所以
 // 这道守卫在这里不适用，照抄一段只会制造一条永远不触发的分支。
 
 // crossRunAdjust — 调整对话在作业登记处里的闸门键。
@@ -503,7 +504,8 @@ func (h *CrossRequirementHandler) runAdjust(job *store.Job, xreq *model.CrossReq
 	job.Append(store.LogLine{Type: "phase", Content: "🧭 正在就整体方案与你讨论…"})
 
 	attemptStart := time.Now()
-	out := runClaudeStream(jobSink{job}, h.llm.StreamCmd(context.Background(), opts), "cross-design-adjust",
+	out := runClaudeStream(crossJobSink{jobSink: jobSink{job}, workDir: workDir, protected: opts.AddDirs},
+		h.llm.StreamCmd(context.Background(), opts), "cross-design-adjust",
 		h.crossUsageCtx("cross_design_adjust", xreq.ID, job.ID, modelName, configID), nil, nil, 0,
 		withStallTimeout(crossJobStallTimeout))
 
@@ -531,7 +533,8 @@ func (h *CrossRequirementHandler) runAdjust(job *store.Job, xreq *model.CrossReq
 				Workspace:      ws,
 				SessionID:      fresh.NewSessionID,
 			})
-			out = runClaudeStream(jobSink{job}, h.llm.StreamCmd(context.Background(), retryOpts), "cross-design-adjust",
+			out = runClaudeStream(crossJobSink{jobSink: jobSink{job}, workDir: workDir, protected: retryOpts.AddDirs},
+				h.llm.StreamCmd(context.Background(), retryOpts), "cross-design-adjust",
 				h.crossUsageCtx("cross_design_adjust", xreq.ID, job.ID, modelName, configID), nil, nil, 0,
 				withStallTimeout(crossJobStallTimeout))
 			answer = strings.TrimSpace(out.finalResult)

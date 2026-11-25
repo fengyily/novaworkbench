@@ -126,11 +126,17 @@ func TestCrossJobPromptCarriesProjectConventions(t *testing.T) {
 	if !strings.Contains(opts.Prompt, "所有组件必须写单测") {
 		t.Fatalf("opts.Prompt lost the convention:\n%s", opts.Prompt)
 	}
-	// 作业是只读的，并且拿到了参与仓库的读权限。
-	for _, tool := range []string{"Write", "Edit", "Bash"} {
+	// 作业可以改代码吗？不可以：Write / Edit / NotebookEdit 在协议层被禁用。
+	// 但 Bash 是放开的 —— 模型要能查 git log / git show / git diff / git blame，
+	// 否则只能对着代码快照凭空设计。
+	for _, tool := range []string{"Write", "Edit", "NotebookEdit"} {
 		if !crossHasString(opts.DisallowedTools, tool) {
 			t.Fatalf("opts.DisallowedTools = %v, want %s", opts.DisallowedTools, tool)
 		}
+	}
+	if crossHasString(opts.DisallowedTools, "Bash") {
+		t.Fatalf("opts.DisallowedTools = %v, must not deny Bash (git inspection is the point)",
+			opts.DisallowedTools)
 	}
 	if !crossHasString(opts.AddDirs, repoPath) {
 		t.Fatalf("opts.AddDirs = %v, want the repository %s", opts.AddDirs, repoPath)

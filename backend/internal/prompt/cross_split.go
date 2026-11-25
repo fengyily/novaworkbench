@@ -130,6 +130,10 @@ func BuildCrossSplitPrompt(title string, designDocs string, projects []CrossProj
 		b.WriteString("（暂无整体方案正文 —— 请根据需求描述拆分。）\n\n")
 	}
 
+	// 可用工具 —— Bash 已放开（只读），模型得知道才能真的去查代码历史。
+	b.WriteString(CrossToolNote)
+	b.WriteString("\n\n")
+
 	// 各参与仓库的项目级 CLAUDE.md —— 子需求必须按目标仓库的约定划分。
 	if section := BuildCrossProjectConventionSection(conventions); section != "" {
 		b.WriteString(section)

@@ -184,6 +184,10 @@ func BuildCrossDesignPrompt(title, description string, acceptance []string, proj
 		b.WriteString("\n\n")
 	}
 
+	// 可用工具 —— Bash 已放开（只读），模型得知道才能真的去查代码历史。
+	b.WriteString(CrossToolNote)
+	b.WriteString("\n\n")
+
 	// 调整讨论记录 —— 用户与 AI 谈拢的结论。空线程不写一个字节。
 	if block := BuildCrossDiscussionBlock(discussion); block != "" {
 		b.WriteString(block)
