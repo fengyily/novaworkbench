@@ -42,6 +42,13 @@ export interface RequirementChildrenPanelProps {
   /** The child's count is reported back so the parent can show the
    *  「开发已下放给 N 个子需求」 banner. */
   onChildCountChange?: (n: number) => void;
+  /** The children themselves are reported back so the parent can hand them
+   *  to the 「验收核对」 panel (which needs to know whether every child is
+   *  done before it nudges the user to run a check).
+   *
+   *  Optional and additive: a caller that does not need the rows ignores
+   *  it, and the panel keeps working with the count alone. */
+  onChildrenChange?: (children: Requirement[]) => void;
 }
 
 interface ChildData {
@@ -54,6 +61,7 @@ export function RequirementChildrenPanel({
   onRequestSplit,
   reloadToken,
   onChildCountChange,
+  onChildrenChange,
 }: RequirementChildrenPanelProps) {
   const { t } = useTranslation();
   const [data, setData] = useState<ChildData | null>(null);
@@ -79,6 +87,10 @@ export function RequirementChildrenPanel({
   useEffect(() => {
     if (onChildCountChange) onChildCountChange(data?.children.length ?? 0);
   }, [data, onChildCountChange]);
+
+  useEffect(() => {
+    if (onChildrenChange) onChildrenChange(data?.children ?? []);
+  }, [data, onChildrenChange]);
 
   // Ordinal (1-based) → child row, so the markers can point at "②" the way
   // the split preview numbered them.

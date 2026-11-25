@@ -906,6 +906,31 @@ export const requirements = {
     importDesignFailContentTooLarge: 'Content exceeds the 500 KB limit',
     importDesignFailEmpty: 'Please paste content or choose a file',
     importDesignPreviewLabel: 'Preview',
+    // 验收核对 (acceptance check) — the attainment check of a master
+    // requirement whose development was delegated to its split children.
+    acceptance: {
+      title: 'Acceptance check',
+      hint: 'Check whether the split sub-requirements delivered what the master asked for: judge every acceptance point, list what is missing, and advise whether to split further. The check is read-only — it never changes any code.',
+      modelLabel: 'Check model',
+      btnStart: 'Start check',
+      btnAgain: 'Re-check',
+      running: 'Checking…',
+      readyHint: 'All sub-requirements are done — an acceptance check is worth running now.',
+      badge: {
+        none: 'Not checked',
+        running: 'Checking',
+        yes: 'Achieved',
+        partial: 'Partially achieved',
+        no: 'Not achieved',
+        failed: 'Check failed',
+      },
+      verdict: {
+        none: 'No verdict given',
+        yes: 'Achieved',
+        partial: 'Partially achieved',
+        no: 'Not achieved',
+      },
+    },
   },
   attachment: {
     sectionTitle: '📎 Attachments',

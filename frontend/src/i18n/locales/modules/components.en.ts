@@ -615,6 +615,36 @@ export const components = {
     upload_done: 'Uploaded',
     upload_error: 'Upload failed',
   },
+
+  // RequirementAcceptancePanel — the 「验收核对」 block on a master
+  // requirement whose development was delegated to its split children.
+  acceptanceCheck: {
+    checksTitle: 'Acceptance points',
+    gapsTitle: 'Not implemented',
+    proposalsTitle: 'Suggested further sub-requirements',
+    gapFlag: 'Missing',
+    evidenceTag: 'Evidence',
+    childTag: 'Owner',
+    goalTag: 'Goal',
+    acceptanceTag: 'Acceptance',
+    dependsOnTag: 'Depends on',
+    reportTitle: 'Full check report',
+    historyTitle: 'Past checks ({{count}})',
+    ratio: 'Attainment {{pct}}%',
+    countYes: 'Passed {{n}}',
+    countPartial: 'Partial {{n}}',
+    countNo: 'Not met {{n}}',
+    countUnknown: 'Unverifiable {{n}}',
+    logWaiting: '⏳ Waiting for the check to produce output…',
+    errNoJob: 'The check could not be started — please retry',
+    errFailed: 'The acceptance check failed — please retry',
+    status: {
+      yes: 'Passed',
+      partial: 'Partially passed',
+      no: 'Not passed',
+      unknown: 'Unverifiable',
+    },
+  },
 } as const;
 
 export default components;

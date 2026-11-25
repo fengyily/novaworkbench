@@ -621,6 +621,36 @@ export const components = {
     upload_done: '上传完成',
     upload_error: '上传失败',
   },
+
+  // RequirementAcceptancePanel — the 「验收核对」 block on a master
+  // requirement whose development was delegated to its split children.
+  acceptanceCheck: {
+    checksTitle: '逐条验收判定',
+    gapsTitle: '未实现清单',
+    proposalsTitle: '建议再拆的子需求',
+    gapFlag: '缺失',
+    evidenceTag: '依据',
+    childTag: '归属',
+    goalTag: '目标',
+    acceptanceTag: '验收标准',
+    dependsOnTag: '建议前置',
+    reportTitle: '核对报告原文',
+    historyTitle: '历史核对（{{count}} 次）',
+    ratio: '达成度 {{pct}}%',
+    countYes: '通过 {{n}}',
+    countPartial: '部分 {{n}}',
+    countNo: '未达成 {{n}}',
+    countUnknown: '无法验证 {{n}}',
+    logWaiting: '⏳ 等待核对作业输出…',
+    errNoJob: '核对作业未能启动，请重试',
+    errFailed: '验收核对失败，请重试',
+    status: {
+      yes: '通过',
+      partial: '部分通过',
+      no: '未通过',
+      unknown: '无法验证',
+    },
+  },
 } as const;
 
 export default components;

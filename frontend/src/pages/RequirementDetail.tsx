@@ -28,6 +28,7 @@ import { DesignPreflightFields } from '../components/DesignPreflightFields';
 import ImportDesignDialog from '../components/ImportDesignDialog';
 import RequirementSplitModal from '../components/RequirementSplitModal';
 import RequirementChildrenPanel from '../components/RequirementChildrenPanel';
+import RequirementAcceptancePanel from '../components/RequirementAcceptancePanel';
 import RequirementDependencyPanel from '../components/RequirementDependencyPanel';
 import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
@@ -1478,6 +1479,11 @@ export default function RequirementDetail() {
   //   same cases).
   const [splitOpen, setSplitOpen] = useState(false);
   const [childCount, setChildCount] = useState(0);
+  // splitChildren — the child rows themselves. The 「验收核对」 panel needs
+  //   them to know when every child is done (that is when a check becomes
+  //   actionable), so they come from the SAME fetch the children list uses
+  //   rather than a second request that could disagree with it.
+  const [splitChildren, setSplitChildren] = useState<Requirement[]>([]);
   const [unmetDeps, setUnmetDeps] = useState<string[]>([]);
   // childrenReloadToken — bumped when the children list may have changed (a
   //   split was just confirmed). RequirementChildrenPanel watches it and
@@ -6110,6 +6116,20 @@ export default function RequirementDetail() {
           onRequestSplit={() => setSplitOpen(true)}
           reloadToken={childrenReloadToken}
           onChildCountChange={setChildCount}
+          onChildrenChange={setSplitChildren}
+        />
+      )}
+
+      {/* ── 验收核对 (acceptance check) ── */}
+      {/* Only for a master whose development was HANDED DOWN to its split
+          children: that is the one case where the master has no code of its
+          own, and the only way to know whether the children delivered the
+          contract is to check them against it. A requirement that develops
+          itself has nothing to check here. */}
+      {req.dev_delegated && (
+        <RequirementAcceptancePanel
+          requirementId={req.id}
+          childRequirements={splitChildren}
         />
       )}
 

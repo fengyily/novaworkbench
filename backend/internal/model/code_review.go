@@ -24,7 +24,41 @@ const (
 	// requirement page renders it, and 追问 / 重新生成 / 版本 / 导出 all reuse
 	// the existing code_reviews read paths unchanged.
 	ReviewTypeRequirement = "requirement"
+	// ReviewTypeAcceptance is an 「验收核对」 session: a READ-ONLY AI check of
+	// whether the sub-requirements a master requirement was split into
+	// actually deliver what the master asked for.
+	//
+	// It is a different thing from ReviewTypeRequirement: a requirement-level
+	// Review grades CODE (findings, P0/P1/P3, fix sub-tasks), while an
+	// acceptance check grades the master's CONTRACT (did the children reach
+	// the goal, what is still missing, should we split further). It produces
+	// no findings and no fixes — it produces a verdict plus a list of gaps.
+	//
+	// The rows live in the same table so one query lists the whole history,
+	// but every read path that serves the requirement's Review round chain
+	// filters them out (see CodeReviewService.ListByRequirement).
+	ReviewTypeAcceptance = "acceptance"
 )
+
+// Acceptance verdicts — the overall conclusion of an acceptance check.
+//
+// They reuse the yes / partial / no vocabulary of the Review contract
+// (prompt.GoalMet*) so the UI can colour them with the same tokens.
+const (
+	AcceptanceVerdictYes     = "yes"
+	AcceptanceVerdictPartial = "partial"
+	AcceptanceVerdictNo      = "no"
+)
+
+// AcceptanceCheckUnknown is the per-criterion verdict for a point that could
+// NOT be checked — e.g. the sub-requirement it belongs to never entered
+// development, so there is no implementation to read.
+//
+// It is deliberately distinct from AcceptanceVerdictNo ("not implemented"):
+// claiming a gap that was never verifiable would blame a sub-requirement for
+// something the acceptance check could not see.
+const AcceptanceCheckUnknown = "unknown"
+
 
 // CodeReview is one persisted Review session: the owner of its attachments,
 // the carrier of the user-written description (the "改动目标" the reviewer
@@ -65,6 +99,18 @@ type CodeReview struct {
 	// yes/partial/no verdict. Empty when the model skipped it — the verdict
 	// alone still renders, so this never gates anything.
 	GoalChecksJSON string `json:"goal_checks_json"`
+	// AcceptanceJSON is the structured result of an 「验收核对」 session
+	// (review_type='acceptance'): an AcceptanceSummary marshalled as JSON.
+	//
+	// It is EMPTY on every other review row, and also empty when the model
+	// broke the contract (the parser then keeps the Markdown report alone
+	// and the UI degrades to plain-Markdown rendering).
+	//
+	// It is a separate column rather than a reuse of GoalChecksJSON because
+	// the shape is different: the acceptance result answers "did the children
+	// reach the master's goal, what is missing, should we split further",
+	// which the {criterion,status,evidence} triple cannot express.
+	AcceptanceJSON string `json:"acceptance_json"`
 	// RevisionNo is which version of the report code_reviews currently holds.
 	// It starts at 1 and climbs by one per finished run (a re-review or a
 	// 「基于对话重新生成」), matching the rev_no of the newest
@@ -181,6 +227,87 @@ type GoalCheck struct {
 const (
 	GoalCheckUnknown = "unknown"
 )
+
+// ── 验收核对 (acceptance check) ───────────────────────────────────────────
+//
+// The structured result of one acceptance check on a master requirement whose
+// development was delegated to its split children.
+//
+// It answers four questions: did the children reach the master's goal, how
+// far did each acceptance point get, what is still missing, and should the
+// master be split further.
+//
+// The four sections are SEPARATE on purpose: the verdict alone is not
+// actionable, the per-point verdicts are the evidence behind it, the gaps
+// are the "not implemented" list, and the proposals are the "split again"
+// advice. Collapsing them would lose exactly the detail the user needs to
+// decide what to do next.
+
+// AcceptanceSummary is the whole structured result of one acceptance check.
+//
+// It is persisted as JSON in code_reviews.acceptance_json. Every field is
+// optional in practice: a model that only answers the verdict still produces
+// a usable row (the UI shows the verdict and the Markdown report).
+type AcceptanceSummary struct {
+	// Verdict is the overall conclusion: AcceptanceVerdictYes / Partial / No.
+	// Empty when the model said something outside that vocabulary.
+	Verdict string `json:"verdict"`
+	// Summary is the one-sentence headline of the verdict.
+	Summary string `json:"summary"`
+	// Checks is the per-criterion evidence table.
+	Checks []AcceptanceCheck `json:"checks"`
+	// Gaps is the "not implemented" list.
+	Gaps []AcceptanceGap `json:"gaps"`
+	// Proposals is the "split further" advice.
+	Proposals []AcceptanceProposal `json:"proposals"`
+}
+
+// AcceptanceCheck is one acceptance point of the master requirement and the
+// verdict the acceptance check reached for it.
+type AcceptanceCheck struct {
+	// Criterion is the acceptance point being judged.
+	Criterion string `json:"criterion"`
+	// Status is yes | partial | no | unknown.
+	Status string `json:"status"`
+	// Evidence is the traceable basis for the verdict (a file:line, a
+	// function name, a test name). Free text — the parser only checks that
+	// it is not one of the hollow phrases ("已确认" and friends).
+	Evidence string `json:"evidence"`
+	// ChildID / ChildTitle say WHICH sub-requirement the point belongs to.
+	// ChildID is empty when the point is not attributable to a single child
+	// (or when the model named a child that does not exist).
+	ChildID    string `json:"child_id"`
+	ChildTitle string `json:"child_title"`
+}
+
+// AcceptanceGap is one thing the children did NOT implement.
+type AcceptanceGap struct {
+	// Title is a one-line headline of the gap.
+	Title string `json:"title"`
+	// Detail explains what is missing and what it should look like.
+	Detail string `json:"detail"`
+	// ChildID / ChildTitle name the sub-requirement that should have
+	// delivered it (empty when the gap belongs to no single child).
+	ChildID    string `json:"child_id"`
+	ChildTitle string `json:"child_title"`
+}
+
+// AcceptanceProposal is a suggested additional sub-requirement.
+//
+// It is ADVICE ONLY: the acceptance check never creates rows. Changing the
+// requirement tree is the user's call (and the split flow is the tool for
+// it), so the check just names what is missing.
+type AcceptanceProposal struct {
+	// Title is the proposed sub-requirement's title.
+	Title string `json:"title"`
+	// Goal is what it is supposed to achieve.
+	Goal string `json:"goal"`
+	// Acceptance is the list of acceptance points it would carry.
+	Acceptance []string `json:"acceptance"`
+	// DependsOn names the sub-requirements it would depend on (titles or
+	// ids, whatever the model wrote — the UI shows them verbatim).
+	DependsOn []string `json:"depends_on"`
+}
 
 // Revision triggers: what produced this version of the report.
 const (

@@ -920,6 +920,15 @@ func (h *RequirementReviewHandler) startNextRoundLocked(
 // resolveReviewIdentity resolves the persona + effective model + gateway for
 // a Review round.
 //
+// It delegates to resolveRoleIdentity — the shared implementation, so the
+// acceptance check resolves its persona exactly the way a Review does.
+func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, pickedConfig string) (persona, modelName, configID string, err error) {
+	return resolveRoleIdentity(h.roleSvc, h.claudeCfg, roleKey, pickedModel, pickedConfig)
+}
+
+// resolveRoleIdentity resolves the persona + effective model + gateway for
+// any AI run that is bound to a roles.row.
+//
 // The model precedence mirrors the project-level Review (handler/review.go):
 //
 //	explicit pick → the config that owns that model → the persona's own
@@ -927,11 +936,20 @@ func (h *RequirementReviewHandler) startNextRoundLocked(
 //
 // The "默认模型" literal is the UI's way of saying "no specific model" and
 // must never be sent to the CLI as a model id.
-func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, pickedConfig string) (persona, modelName, configID string, err error) {
-	if h.roleSvc == nil {
+//
+// It is a package-level function (not a method) so the Review handler and the
+// acceptance handler share ONE implementation: two copies of this chain would
+// drift, and a drift would show up as "the acceptance check ran on a
+// different gateway than the Review".
+func resolveRoleIdentity(
+	roleSvc *service.RoleService,
+	claudeCfg *service.ClaudeConfigService,
+	roleKey, pickedModel, pickedConfig string,
+) (persona, modelName, configID string, err error) {
+	if roleSvc == nil {
 		return "", DefaultModelLabel, "", fmt.Errorf("角色服务不可用")
 	}
-	role, rerr := h.roleSvc.GetByKey(roleKey)
+	role, rerr := roleSvc.GetByKey(roleKey)
 	if rerr != nil {
 		return "", "", "", fmt.Errorf("Review 身份 %q 不存在: %v", roleKey, rerr)
 	}
@@ -939,8 +957,8 @@ func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, p
 
 	roleCfgID := ""
 	cfgDefaultModel := ""
-	if h.claudeCfg != nil {
-		if cfg, cerr := h.claudeCfg.ResolveRoleConfig(role); cerr == nil && cfg != nil {
+	if claudeCfg != nil {
+		if cfg, cerr := claudeCfg.ResolveRoleConfig(role); cerr == nil && cfg != nil {
 			roleCfgID = cfg.ID
 			cfgDefaultModel = cfg.DefaultModel
 		}
@@ -952,8 +970,8 @@ func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, p
 
 	configID = strings.TrimSpace(pickedConfig)
 	if configID == "" {
-		if modelName != "" && modelName != DefaultModelLabel && h.claudeCfg != nil {
-			if cid, cerr := h.claudeCfg.ResolveConfigForModel(modelName); cerr == nil && cid != "" {
+		if modelName != "" && modelName != DefaultModelLabel && claudeCfg != nil {
+			if cid, cerr := claudeCfg.ResolveConfigForModel(modelName); cerr == nil && cid != "" {
 				configID = cid
 			}
 		}
@@ -961,8 +979,8 @@ func (h *RequirementReviewHandler) resolveReviewIdentity(roleKey, pickedModel, p
 	if configID == "" {
 		configID = roleCfgID
 	}
-	if configID == "" && h.claudeCfg != nil {
-		if cfg, cerr := h.claudeCfg.ActiveConfig(); cerr == nil && cfg != nil {
+	if configID == "" && claudeCfg != nil {
+		if cfg, cerr := claudeCfg.ActiveConfig(); cerr == nil && cfg != nil {
 			configID = cfg.ID
 		}
 	}
