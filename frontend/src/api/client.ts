@@ -2669,6 +2669,29 @@ export type AcceptanceVerdict = 'yes' | 'partial' | 'no' | '';
  */
 export type AcceptanceCheckStatus = 'yes' | 'partial' | 'no' | 'unknown';
 
+/**
+ * The development state of a sub-requirement at check time.
+ *
+ * It is what keeps "not written yet" and "not implemented" apart: a check
+ * runs mid-flight all the time, and a point owned by a child that is still
+ * being developed is pending, not failed.
+ */
+export type AcceptanceChildStage =
+  | 'done'          // finished — its delivery is final
+  | 'in_progress'   // still being developed — the directory is a partial snapshot
+  | 'not_started'   // never entered development — nothing to read
+  | 'unavailable'   // being developed elsewhere — nothing to read here
+  | '';             // unknown (not attributable to a child)
+
+/** One sub-requirement as the acceptance check saw it. */
+export interface AcceptanceChild {
+  child_id: string;
+  child_title: string;
+  /** The sub-requirement's raw status ("developing", "draft", …). */
+  status: string;
+  stage: AcceptanceChildStage;
+}
+
 export interface AcceptanceCheck {
   /** The acceptance point being judged. */
   criterion: string;
@@ -2678,6 +2701,8 @@ export interface AcceptanceCheck {
   /** Which sub-requirement owns the point ('' when unattributable). */
   child_id: string;
   child_title: string;
+  /** The owner's development stage at check time ('' when unattributable). */
+  child_state: AcceptanceChildStage;
 }
 
 export interface AcceptanceGap {
@@ -2686,6 +2711,11 @@ export interface AcceptanceGap {
   detail: string;
   child_id: string;
   child_title: string;
+  /**
+   * The owner's development stage at check time. A gap owned by a child that
+   * is still being developed is "not delivered YET", not "not implemented".
+   */
+  child_state: AcceptanceChildStage;
 }
 
 export interface AcceptanceProposal {
@@ -2701,6 +2731,13 @@ export interface AcceptanceSummary {
   checks: AcceptanceCheck[];
   gaps: AcceptanceGap[];
   proposals: AcceptanceProposal[];
+  /** The children that had NOT delivered when the check ran. */
+  pending: AcceptanceChild[];
+  /**
+   * True when the verdict is a snapshot of the current progress rather than
+   * a sign-off — i.e. at least one child was still unfinished.
+   */
+  provisional: boolean;
 }
 
 /**
@@ -2726,6 +2763,10 @@ export function parseAcceptanceSummary(review: Pick<CodeReview, 'acceptance_json
     checks: asArray(parsed.checks) as AcceptanceCheck[],
     gaps: asArray(parsed.gaps) as AcceptanceGap[],
     proposals: asArray(parsed.proposals) as AcceptanceProposal[],
+    // A legacy row (or a row whose model broke the contract) carries neither
+    // field: it was a finished check, so nothing is pending.
+    pending: asArray(parsed.pending) as AcceptanceChild[],
+    provisional: parsed.provisional === true,
   };
 }
 

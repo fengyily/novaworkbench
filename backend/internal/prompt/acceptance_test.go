@@ -3,6 +3,8 @@ package prompt
 import (
 	"strings"
 	"testing"
+
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // TestBuildAcceptancePrompt_ContainsContractAndMembers pins the prompt's
@@ -117,9 +119,108 @@ func TestBuildAcceptancePrompt_TruncatesLongInput(t *testing.T) {
 
 // TestAcceptanceSummaryText pins the job summary line.
 func TestAcceptanceSummaryText(t *testing.T) {
-	got := AcceptanceSummaryText(3)
+	got := AcceptanceSummaryText(3, 0)
 	if !strings.Contains(got, "3") {
 		t.Fatalf("summary %q does not mention the member count", got)
+	}
+	// A check that ran while children were unfinished says so: the verdict
+	// is a snapshot, not a sign-off.
+	pending := AcceptanceSummaryText(3, 2)
+	if !strings.Contains(pending, "阶段性结论") {
+		t.Fatalf("summary %q does not mark the result as provisional", pending)
+	}
+}
+
+// TestBuildAcceptancePrompt_InProgressChildIsNotAFailure covers the case
+// the whole partial-state feature exists for: a check that runs while a
+// child is still being developed.
+//
+// The prompt must tell the model that the directory holds a PARTIAL
+// snapshot, because without that the model reads "the code is not there" as
+// "the child never implemented it" — and reports work in flight as a gap.
+func TestBuildAcceptancePrompt_InProgressChildIsNotAFailure(t *testing.T) {
+	out := BuildAcceptancePrompt(
+		AcceptanceContractInput{Title: "主需求"},
+		[]AcceptanceMember{{
+			RequirementID: "req_c1",
+			Title:         "还在开发的子需求",
+			Status:        "developing",
+			Stage:         model.AcceptanceStageInProgress,
+			WorktreePath:  "/tmp/child1-wt",
+		}},
+		"",
+	)
+	mustContain(t, out, "开发中")
+	mustContain(t, out, "阶段性")
+	mustContain(t, out, "不要**写进「未实现清单」")
+	// The snapshot framing: the verdict may not certify an unfinished split.
+	mustContain(t, out, "## 本次核对的时点")
+	mustContain(t, out, "部分达成")
+}
+
+// TestBuildAcceptancePrompt_SnapshotSectionOnlyWhenPending pins the
+// "when" section: it is rendered only while something is still in flight.
+// With every child delivered it would be noise.
+func TestBuildAcceptancePrompt_SnapshotSectionOnlyWhenPending(t *testing.T) {
+	allDone := BuildAcceptancePrompt(
+		AcceptanceContractInput{Title: "主需求"},
+		[]AcceptanceMember{{
+			RequirementID: "req_c1", Title: "子需求", Status: "done",
+			Stage: model.AcceptanceStageDone, WorktreePath: "/tmp/c1",
+		}},
+		"",
+	)
+	if strings.Contains(allDone, "## 本次核对的时点") {
+		t.Fatalf("a fully delivered split must not render the snapshot section")
+	}
+
+	pending := BuildAcceptancePrompt(
+		AcceptanceContractInput{Title: "主需求"},
+		[]AcceptanceMember{{
+			RequirementID: "req_c1", Title: "子需求", Status: "developing",
+			Stage: model.AcceptanceStageInProgress, WorktreePath: "/tmp/c1",
+		}},
+		"",
+	)
+	mustContain(t, pending, "## 本次核对的时点")
+	mustContain(t, pending, "还没写」不等于「未实现")
+}
+
+// TestBuildAcceptancePrompt_NotStartedChildStaysUnverifiable keeps the
+// pre-existing discipline intact: a child that never started has nothing to
+// read, so its points are unverifiable — never a failure.
+func TestBuildAcceptancePrompt_NotStartedChildStaysUnverifiable(t *testing.T) {
+	out := BuildAcceptancePrompt(
+		AcceptanceContractInput{Title: "主需求"},
+		[]AcceptanceMember{{
+			RequirementID: "req_c1", Title: "还没开工的子需求", Status: "draft",
+			Stage: model.AcceptanceStageNotStarted,
+		}},
+		"",
+	)
+	mustContain(t, out, "尚未进入开发")
+	mustContain(t, out, "无法验证")
+	if strings.Contains(out, "核对以这个目录里的代码为准") {
+		t.Fatalf("a child without a worktree must not be given an implementation directory")
+	}
+}
+
+// TestBuildAcceptancePrompt_DevelopingWithoutDirectoryIsDistinct covers the
+// fourth state: the child IS being developed, but its code is not on this
+// machine. Saying "尚未进入开发" there would be a lie.
+func TestBuildAcceptancePrompt_DevelopingWithoutDirectoryIsDistinct(t *testing.T) {
+	out := BuildAcceptancePrompt(
+		AcceptanceContractInput{Title: "主需求"},
+		[]AcceptanceMember{{
+			RequirementID: "req_c1", Title: "在别的机器上开发的子需求", Status: "developing",
+			Stage: model.AcceptanceStageUnavailable,
+		}},
+		"",
+	)
+	mustContain(t, out, "仍在开发中")
+	mustContain(t, out, "无法验证")
+	if strings.Contains(out, "尚未进入开发") {
+		t.Fatalf("a developing child must not be reported as not started")
 	}
 }
 

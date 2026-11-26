@@ -49,6 +49,14 @@ import (
 // the children's local worktrees, so the check would read no implementation
 // at all — the same reason the cross-requirement phase verification is
 // local-only.
+//
+// WHEN it may run: at ANY moment. The user does not wait for every child to
+// finish before asking where the work stands — a check on a half-built split
+// is a legitimate thing to want, and they ask again once the children are
+// done. So the result is a SNAPSHOT of the current progress: the verdict is
+// capped at 「部分达成」 while any child is unfinished, the children still in
+// flight are listed with the result, and work that is merely unfinished is
+// never reported as "not implemented" (see requirement_acceptance_progress.go).
 
 // acceptanceStallTimeout — the silence watchdog of one acceptance run.
 //
@@ -189,6 +197,12 @@ type AcceptanceStartReq struct {
 //	no child entered dev       → 409 ACCEPTANCE_NO_IMPLEMENTATION
 //	an acceptance run is live   → 409 ACCEPTANCE_IN_PROGRESS
 //
+// Note what is NOT a precondition: **every child must be finished**. A check
+// on a half-built split is a legitimate thing to want — the user asks for it
+// to see where the work stands, and asks again when the children are done.
+// The result is then a snapshot: applyAcceptanceProgress caps the verdict at
+// 「部分达成」 and keeps work in flight out of the "not implemented" list.
+//
 // The run itself is READ-ONLY: Write / Edit / NotebookEdit are denied at the
 // CLI level, and the mutating git commands are denied too (see
 // crossDisallowedTools), because a check must never change the code it is
@@ -307,18 +321,26 @@ type acceptanceSpec struct {
 	effort string
 }
 
-// anyChildImplemented reports whether at least one child entered development.
+// anyChildImplemented reports whether at least one child has an
+// implementation to read.
 //
-// "Entered development" means it has a worktree (its code lives somewhere) OR
-// it is already done (it may have been developed and its worktree cleaned
-// up). A child with neither has nothing to verify — checking it would only
-// produce "unverifiable" for everything it covers.
+// "Something to read" means it has a worktree (its code lives somewhere, even
+// if it is a partial snapshot) OR it is already done (it may have been
+// developed and its worktree cleaned up). A child with neither has nothing to
+// verify — checking it would only produce "unverifiable" for everything it
+// covers.
+//
+// Note what this gate does NOT require: every child to be finished. A check
+// on a half-built split is exactly what the user wants while the work is
+// still going on — the result is then a snapshot of the current progress
+// (see applyAcceptanceProgress).
 func anyChildImplemented(children []*model.Requirement) bool {
 	for _, c := range children {
 		if c == nil {
 			continue
 		}
-		if strings.TrimSpace(c.WorktreePath) != "" || c.Status == "done" {
+		switch prompt.AcceptanceStage(c.Status, c.WorktreePath) {
+		case model.AcceptanceStageDone, model.AcceptanceStageInProgress:
 			return true
 		}
 	}
@@ -423,9 +445,14 @@ func (h *AcceptanceHandler) runAcceptanceCheck(job *store.Job, reviewID, reqID s
 		job.Append(store.LogLine{Type: "message", Content: "⚠️ 结构化结论解析失败，已保留核对报告正文。"})
 	}
 
+	// Reconcile the report with the children's real progress: a check may
+	// run while the children are still being developed, and the verdict must
+	// then be a snapshot, not a sign-off (and must not blame work in flight).
+	summary = applyAcceptanceProgress(summary, members)
+
 	acceptanceJSON := ""
 	if len(summary.Checks) > 0 || len(summary.Gaps) > 0 || len(summary.Proposals) > 0 ||
-		summary.Verdict != "" || summary.Summary != "" {
+		summary.Verdict != "" || summary.Summary != "" || len(summary.Pending) > 0 {
 		if raw, mErr := json.Marshal(summary); mErr == nil {
 			acceptanceJSON = string(raw)
 		} else {
@@ -443,7 +470,7 @@ func (h *AcceptanceHandler) runAcceptanceCheck(job *store.Job, reviewID, reqID s
 		return
 	}
 
-	job.Append(store.LogLine{Type: "message", Content: prompt.AcceptanceSummaryText(len(members))})
+	job.Append(store.LogLine{Type: "message", Content: prompt.AcceptanceSummaryText(len(members), len(summary.Pending))})
 	job.Finish(0, store.JobDone)
 }
 
@@ -471,6 +498,10 @@ func (h *AcceptanceHandler) acceptanceMembers(children []*model.Requirement) ([]
 			Description:        c.Description,
 			AcceptanceCriteria: decodeStringArray(c.AcceptanceCriteria),
 			WorktreePath:       strings.TrimSpace(c.WorktreePath),
+			// The development stage is what keeps "not written yet" and
+			// "not implemented" apart in the report — the prompt tells the
+			// model which state each child is in.
+			Stage: prompt.AcceptanceStage(c.Status, c.WorktreePath),
 		}
 		if h.reqSvc != nil {
 			pre, _, dErr := h.reqSvc.ListDependencies(c.ID)

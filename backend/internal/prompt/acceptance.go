@@ -3,6 +3,8 @@ package prompt
 import (
 	"fmt"
 	"strings"
+
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // 「验收核对」的提示词。
@@ -34,6 +36,8 @@ const AcceptanceContract = `你在为一个**主需求**做验收核对。主需
 ## 总体结论
 一句话说明核对结果，并给出总体结论：**已达成 / 部分达成 / 未达成**。
 再用一两句说明依据。
+若仍有子需求没完成（见「本次核对的时点」），总体结论最高只能是「部分达成」，
+并在结论里点明还有几个子需求在开发中。
 
 ## 逐条验收判定
 把主需求的验收标准**逐条**列出，每条包含：
@@ -47,6 +51,8 @@ const AcceptanceContract = `你在为一个**主需求**做验收核对。主需
 本该由哪个子需求承担。
 「无法验证」（子需求没有实现目录、代码不在本地）**不算**未实现，请把它放在
 判定表的「无法验证」里，不要混进本节。
+仍在开发中的子需求**也不算**未实现 —— 它只是「还没写完」，请把它放在判定表的
+「部分通过」或「无法验证」里，并在「遗留风险」里点名是哪个子需求还没写完。
 
 ## 建议再拆的子需求
 针对上面确实缺失、且**值得独立成一个子需求**的部分，给出建议。每条包含：
@@ -72,7 +78,10 @@ const AcceptanceContract = `你在为一个**主需求**做验收核对。主需
    自己的开发流程处理。
 5. **区分「未实现」与「无法验证」**：前者是代码里确实没有，后者是你看不到。
    两者混为一谈会冤枉子需求。
-6. 正文用中文。`
+6. **区分「未实现」与「还没写完」**：仍在开发中的子需求，缺的部分是「还没写完」，
+   不是「未实现」 —— 判「部分通过」或「无法验证」，别写进「未实现清单」。
+   「未实现清单」只放**已完成却没做**的部分。
+7. 正文用中文。`
 
 // acceptanceContractTail is the sentence that closes the prompt, after the
 // contract. It comes last so the model reads the output format right before
@@ -109,7 +118,8 @@ JSON 块的约束：
 - ` + "`summary`" + ` 是结论的一句话概括。
 - ` + "`checks`" + ` 与正文的「逐条验收判定」一一对应，顺序一致。
   - ` + "`status`" + ` 只能是 ` + "`yes`" + ` / ` + "`partial`" + ` / ` + "`no`" + ` / ` + "`unknown`" + `；
-    ` + "`unknown`" + ` 表示该验收点无法验证（子需求没有实现目录、或代码不在本地），
+    ` + "`unknown`" + ` 表示该验收点无法验证（子需求没有实现目录、代码不在本地，
+    或该子需求仍在开发中、这一条还没写到），
     不要用它来回避判断。
   - ` + "`evidence`" + ` 必须是可核对的出处： ` + "`文件:行号`" + ` / 函数名 / 测试名，
     不要写「已确认」这类空话。
@@ -144,6 +154,19 @@ type AcceptanceMember struct {
 	AcceptanceCriteria []string
 	// WorktreePath is the sub-requirement's implementation directory.
 	WorktreePath string
+	// Stage is the child's development state at check time
+	// (model.AcceptanceStage*): done / in_progress / not_started /
+	// unavailable.
+	//
+	// It is what keeps the three states apart in the report:
+	//
+	//	done        — the delivery is final; what is missing is really missing;
+	//	in_progress — the directory holds a PARTIAL snapshot, so "not written
+	//	              yet" is NOT "not implemented";
+	//	not_started — nothing was written at all;
+	//	unavailable — it is being developed but its code is not on this
+	//	              machine.
+	Stage string
 	// DependsOn are the titles of the sub-requirements this one depends on.
 	DependsOn []string
 	// DependsOnUnmet reports that at least one of those predecessors is not
@@ -225,17 +248,25 @@ func BuildAcceptancePrompt(master AcceptanceContractInput, members []AcceptanceM
 		if title == "" {
 			title = "(无标题)"
 		}
+		// The caller may leave the stage empty; deriving it here keeps the
+		// prompt honest no matter who builds the member list.
+		stage := m.Stage
+		if stage == "" {
+			stage = AcceptanceStage(m.Status, m.WorktreePath)
+		}
 		b.WriteString(fmt.Sprintf("### %d. %s\n", i+1, title))
 		b.WriteString("- 子需求 id：" + m.RequirementID + "\n")
-		b.WriteString("- 状态：" + strings.TrimSpace(m.Status) + "\n")
+		b.WriteString("- 状态：" + strings.TrimSpace(m.Status) + acceptanceStageNote(stage) + "\n")
 		if wt := strings.TrimSpace(m.WorktreePath); wt != "" {
 			// The implementation directory — the ONLY place this child's code
 			// exists. The model must verify against this tree.
-			b.WriteString("- 实现目录：" + wt + "（**核对以这个目录里的代码为准**）\n")
+			b.WriteString("- 实现目录：" + wt + "（**核对以这个目录里的代码为准**" +
+				acceptanceImplDirNote(stage) + "）\n")
 		} else {
-			// No implementation yet. Say so loudly: a silent omission would
-			// let the model grade the base branch and report it as verified.
-			b.WriteString("- 实现目录：（无 —— 该子需求尚未进入开发，没有可核对的实现；" +
+			// No implementation to read. Say so loudly: a silent omission
+			// would let the model grade the base branch and report it as
+			// verified.
+			b.WriteString("- 实现目录：（无 —— " + acceptanceNoImplReason(stage) + "；" +
 				"与它相关的验收点请判定为「无法验证」，**不要**写进「未实现清单」）\n")
 		}
 		if len(m.AcceptanceCriteria) > 0 {
@@ -269,6 +300,14 @@ func BuildAcceptancePrompt(master AcceptanceContractInput, members []AcceptanceM
 			"（例如子需求新增的接口在基线上是否已被调用）。\n\n")
 	}
 
+	// ── 2b. 核对的时点 ───────────────────────────────────────────────────
+	// The snapshot section. It is only rendered when something is still in
+	// flight — with every child delivered, "the verdict is a snapshot" is
+	// noise.
+	if s := acceptanceSnapshotSection(members); s != "" {
+		b.WriteString(s)
+	}
+
 	// 可用工具 —— 模型得知道它能真的去读实现目录。
 	b.WriteString(AcceptanceToolNote)
 	b.WriteString("\n\n")
@@ -286,6 +325,124 @@ func BuildAcceptancePrompt(master AcceptanceContractInput, members []AcceptanceM
 	return b.String()
 }
 
+// AcceptanceStage maps a child's status + implementation directory onto the
+// development stage the acceptance check sees.
+//
+// The stage is about what can be READ, not about what the workflow believes:
+// a child that is still being developed holds a partial implementation, and
+// a child whose implementation is not on this machine holds none at all.
+//
+// It lives here (next to the prompt that renders it) because the prompt is
+// what turns the stage into an instruction; the handler reuses it to decide
+// whether a check has anything to read at all.
+func AcceptanceStage(status, worktree string) string {
+	st := strings.TrimSpace(status)
+	hasDir := strings.TrimSpace(worktree) != ""
+	switch st {
+	case "done", "archived":
+		// Archived is a finished requirement that was moved to the knowledge
+		// base: its delivery is final either way.
+		return model.AcceptanceStageDone
+	case "developing":
+		if hasDir {
+			return model.AcceptanceStageInProgress
+		}
+		return model.AcceptanceStageUnavailable
+	}
+	if hasDir {
+		return model.AcceptanceStageInProgress
+	}
+	return model.AcceptanceStageNotStarted
+}
+
+// acceptanceStageNote renders the development state of one member next to its
+// raw status.
+//
+// It is the sentence that keeps "not written yet" and "not implemented"
+// apart: a child that is still being developed has NOT failed to deliver
+// anything, it simply has not finished.
+func acceptanceStageNote(stage string) string {
+	switch stage {
+	case model.AcceptanceStageDone:
+		return "（已完成 —— 目录里的代码就是它的最终交付）"
+	case model.AcceptanceStageInProgress:
+		return "（**开发中** —— 还没交付，本次核对只是一次阶段性快照）"
+	case model.AcceptanceStageUnavailable:
+		return "（开发中，但本地看不到它的实现）"
+	case model.AcceptanceStageNotStarted:
+		return "（尚未进入开发）"
+	}
+	return ""
+}
+
+// acceptanceImplDirNote renders the caveat that belongs to an implementation
+// directory.
+//
+// Only the in-progress stage needs one: the directory holds a PARTIAL
+// snapshot, and without the caveat the model reads "the code is not there"
+// as "the child never implemented it".
+func acceptanceImplDirNote(stage string) string {
+	if stage == model.AcceptanceStageInProgress {
+		return "；该子需求仍在开发中，这里是**阶段性**快照 —— 还没写的部分请判「部分通过」或「无法验证」，**不要**写进「未实现清单」"
+	}
+	return ""
+}
+
+// acceptanceNoImplReason explains why a member has no implementation to read.
+//
+// The wording follows the stage: a child that never started and a child that
+// is being developed on another machine are different situations, and the
+// model should not tell the user they are the same.
+func acceptanceNoImplReason(stage string) string {
+	switch stage {
+	case model.AcceptanceStageUnavailable:
+		return "该子需求仍在开发中，但本地没有它的实现目录，没有可核对的实现"
+	case model.AcceptanceStageDone:
+		return "该子需求已完成，但本地没有它的实现目录，没有可核对的实现"
+	case model.AcceptanceStageNotStarted:
+		return "该子需求尚未进入开发，没有可核对的实现"
+	}
+	return "本地没有它的实现目录，没有可核对的实现"
+}
+
+// acceptanceSnapshotSection renders the "when" of the check.
+//
+// It exists because an acceptance check is runnable at ANY moment — the
+// user asks for one while the children are still being developed, because
+// they want to know where the work stands. The verdict is then a snapshot
+// of the current progress, not a sign-off, and the report has to say so.
+func acceptanceSnapshotSection(members []AcceptanceMember) string {
+	var done, inProgress, pending int
+	for _, m := range members {
+		stage := m.Stage
+		if stage == "" {
+			stage = AcceptanceStage(m.Status, m.WorktreePath)
+		}
+		switch stage {
+		case model.AcceptanceStageDone:
+			done++
+		case model.AcceptanceStageInProgress:
+			inProgress++
+			pending++
+		default:
+			pending++
+		}
+	}
+	if pending == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## 本次核对的时点\n\n")
+	b.WriteString("本次核对反映的是**当前进度**的一次快照。子需求的开发还在推进时也可以发起核对，"+
+		"但结论只对当下成立：\n\n")
+	b.WriteString("- 已完成：" + fmt.Sprintf("%d", done) + " 个（它们的交付是最终交付，缺什么就是真缺）\n")
+	b.WriteString("- 开发中：" + fmt.Sprintf("%d", inProgress) + " 个（目录里是阶段性快照，「还没写」不等于「未实现」）\n")
+	b.WriteString("- 未完成或实现不在本地：" + fmt.Sprintf("%d", pending-inProgress) + " 个（没有可核对的实现，相关验收点判「无法验证」）\n\n")
+	b.WriteString("只要还有子需求没完成，总体结论最高只能是「部分达成」，并且要在结论里点明"+
+		"仍有子需求在开发中。\n\n")
+	return b.String()
+}
+
 // AcceptanceToolNote tells the model which tools it may use.
 //
 // Read / Grep / Glob / Bash stay available — an acceptance check that
@@ -299,6 +456,15 @@ const AcceptanceToolNote = `## 可用工具
 Write / Edit 已被禁用 —— 本次核对**只读**，不要尝试改动任何文件。`
 
 // AcceptanceSummaryText renders the one-line job summary of an acceptance run.
-func AcceptanceSummaryText(memberCount int) string {
+//
+// pendingCount is how many children had not delivered when the check ran. A
+// non-zero count makes the summary say so: the verdict is then a snapshot
+// of the current progress, not a sign-off, and the live stream is where the
+// user reads that first.
+func AcceptanceSummaryText(memberCount, pendingCount int) string {
+	if pendingCount > 0 {
+		return fmt.Sprintf("已生成验收核对报告（覆盖 %d 个子需求，其中 %d 个尚未完成 —— 阶段性结论）",
+			memberCount, pendingCount)
+	}
 	return fmt.Sprintf("已生成验收核对报告（覆盖 %d 个子需求）", memberCount)
 }

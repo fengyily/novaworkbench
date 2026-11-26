@@ -644,6 +644,19 @@ export const components = {
     logWaiting: '⏳ 等待核对作业输出…',
     errNoJob: '核对作业未能启动，请重试',
     errFailed: '验收核对失败，请重试',
+    // 核对可以在子需求没做完时发起 —— 这条提示告诉用户「不用等」。
+    partialHint: '还有 {{n}} 个子需求未完成 —— 现在也可以发起核对，结论是当前进度的一次快照（子需求完成后可再核对一次）。',
+    // 阶段性结论：结论只对当下成立，未完成的子需求列在下面。
+    provisionalTitle: '阶段性结论',
+    provisionalHint: '本次核对反映的是当前进度的一次快照，还有 {{n}} 个子需求未完成。子需求完成后可重新核对。',
+    // 子需求在核对时所处的开发状态。
+    stage: {
+      done: '已完成',
+      in_progress: '开发中',
+      not_started: '未开工',
+      unavailable: '实现不可见',
+      unknown: '状态未知',
+    },
     status: {
       yes: '通过',
       partial: '部分通过',

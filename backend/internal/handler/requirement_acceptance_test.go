@@ -142,6 +142,33 @@ func TestAcceptanceStart_Preflight(t *testing.T) {
 	}
 }
 
+// TestAcceptanceStart_PartialSplitIsAllowed pins the answer to the question
+// this feature was asked about: a check can be started while the children
+// are still unfinished.
+//
+// The gate is about whether there is anything to READ, not about whether the
+// split is finished — the user asks for a check mid-flight to see where the
+// work stands, and asks again once the children are done.
+func TestAcceptanceStart_PartialSplitIsAllowed(t *testing.T) {
+	h, d, projectID := newAcceptanceHandlerTest(t)
+
+	seedAcceptanceRequirement(t, d, projectID, "req_partial", "子需求还在开发", true)
+	seedAcceptanceChild(t, d, projectID, "req_partial_c1", "req_partial", "已完成", "done", "")
+	seedAcceptanceChild(t, d, projectID, "req_partial_c2", "req_partial", "开发中", "developing",
+		filepath.Join(t.TempDir(), "child2"))
+
+	code, env := callAcceptance(t, h.StartCheck, http.MethodPost,
+		"/api/requirements/req_partial/acceptance-check", "req_partial")
+	// The run then fails on the missing role service (the test harness has
+	// none) — but it must NOT fail on the "nothing to check" gate.
+	if errorCode(t, env) == "ACCEPTANCE_NO_IMPLEMENTATION" {
+		t.Fatalf("a check on a half-built split must be allowed: %d %v", code, env)
+	}
+	if code == http.StatusConflict {
+		t.Fatalf("a check on a half-built split must not be refused: %d %v", code, env)
+	}
+}
+
 // TestAcceptanceStart_InProgress covers the concurrency gate: one
 // acceptance run per master requirement at a time.
 func TestAcceptanceStart_InProgress(t *testing.T) {

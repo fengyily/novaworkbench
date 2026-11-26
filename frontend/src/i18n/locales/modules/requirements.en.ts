@@ -910,7 +910,7 @@ export const requirements = {
     // requirement whose development was delegated to its split children.
     acceptance: {
       title: 'Acceptance check',
-      hint: 'Check whether the split sub-requirements delivered what the master asked for: judge every acceptance point, list what is missing, and advise whether to split further. The check is read-only — it never changes any code.',
+      hint: 'Check whether the split sub-requirements delivered what the master asked for: judge every acceptance point, list what is missing, and advise whether to split further. The check is read-only — it never changes any code. You can run it at any time: while the sub-requirements are still unfinished, the result is a provisional snapshot of the current progress.',
       modelLabel: 'Check model',
       btnStart: 'Start check',
       btnAgain: 'Re-check',

@@ -59,6 +59,36 @@ const (
 // something the acceptance check could not see.
 const AcceptanceCheckUnknown = "unknown"
 
+// Acceptance child stages — the development state of a split sub-requirement
+// at the moment an acceptance check ran.
+//
+// The stage describes what the CHECK could see, not what the workflow
+// believes: a child that is still being developed holds a PARTIAL
+// implementation, and a child whose implementation is not on this machine
+// holds none at all. Neither is "not implemented", and the difference
+// matters — the acceptance verdict is read as "the children failed to
+// deliver", and blaming a child for work that is still in flight is exactly
+// the wrong conclusion.
+//
+// The stage is also what makes an acceptance check runnable at ANY moment:
+// the user can ask for a check while the children are still being developed,
+// and the result is then a snapshot of the current progress rather than a
+// sign-off.
+const (
+	// AcceptanceStageDone — the child finished its development. Its code is
+	// the final delivery, and a point it missed is a real gap.
+	AcceptanceStageDone = "done"
+	// AcceptanceStageInProgress — the child is still being developed AND its
+	// implementation directory holds a partial snapshot to read.
+	AcceptanceStageInProgress = "in_progress"
+	// AcceptanceStageNotStarted — the child never entered development: there
+	// is nothing to read, so its points are unverifiable.
+	AcceptanceStageNotStarted = "not_started"
+	// AcceptanceStageUnavailable — the child is being developed but its
+	// implementation is not on this machine (no worktree): there is nothing
+	// to read either.
+	AcceptanceStageUnavailable = "unavailable"
+)
 
 // CodeReview is one persisted Review session: the owner of its attachments,
 // the carrier of the user-written description (the "改动目标" the reviewer
@@ -260,6 +290,32 @@ type AcceptanceSummary struct {
 	Gaps []AcceptanceGap `json:"gaps"`
 	// Proposals is the "split further" advice.
 	Proposals []AcceptanceProposal `json:"proposals"`
+	// Pending lists the children that had NOT delivered when the check ran.
+	//
+	// It is computed from the database, NOT from the model's report: the
+	// model cannot know which children are still in flight, and the user
+	// needs this list to read the verdict correctly — a verdict produced
+	// while two children were still developing is a snapshot, not a
+	// sign-off.
+	Pending []AcceptanceChild `json:"pending"`
+	// Provisional marks the verdict as a snapshot: true when Pending is not
+	// empty, i.e. at least one child had not delivered yet.
+	Provisional bool `json:"provisional"`
+}
+
+// AcceptanceChild is one sub-requirement as the acceptance check saw it.
+//
+// It is the deterministic half of the "when" of a check: the model's report
+// says what it read, this says what state each child was in.
+type AcceptanceChild struct {
+	// ChildID is the sub-requirement id.
+	ChildID string `json:"child_id"`
+	// ChildTitle is the sub-requirement title.
+	ChildTitle string `json:"child_title"`
+	// Status is the sub-requirement's raw status ("developing", "draft", …).
+	Status string `json:"status"`
+	// Stage is the development stage (AcceptanceStage*).
+	Stage string `json:"stage"`
 }
 
 // AcceptanceCheck is one acceptance point of the master requirement and the
@@ -278,6 +334,14 @@ type AcceptanceCheck struct {
 	// (or when the model named a child that does not exist).
 	ChildID    string `json:"child_id"`
 	ChildTitle string `json:"child_title"`
+	// ChildState is the owner's development stage at check time
+	// (AcceptanceStage*): what the check could see of the child that owns
+	// this point. Empty when the point is not attributable to a child.
+	//
+	// It is what lets the UI say "this point is still in development"
+	// instead of "this point failed" — the two look identical in the
+	// model's report.
+	ChildState string `json:"child_state"`
 }
 
 // AcceptanceGap is one thing the children did NOT implement.
@@ -290,6 +354,11 @@ type AcceptanceGap struct {
 	// delivered it (empty when the gap belongs to no single child).
 	ChildID    string `json:"child_id"`
 	ChildTitle string `json:"child_title"`
+	// ChildState is the owner's development stage at check time
+	// (AcceptanceStage*). A gap owned by a child that is still being
+	// developed is "not delivered YET", not "not implemented" — the UI
+	// labels it apart from a real gap.
+	ChildState string `json:"child_state"`
 }
 
 // AcceptanceProposal is a suggested additional sub-requirement.

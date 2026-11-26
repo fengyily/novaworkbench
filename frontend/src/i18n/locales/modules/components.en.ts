@@ -638,6 +638,21 @@ export const components = {
     logWaiting: '⏳ Waiting for the check to produce output…',
     errNoJob: 'The check could not be started — please retry',
     errFailed: 'The acceptance check failed — please retry',
+    // A check can run while the children are unfinished — this line says the
+    // user does not have to wait.
+    partialHint: '{{n}} sub-requirement(s) are still unfinished — you can run a check now; the result is a snapshot of the current progress (run it again once they are done).',
+    // A provisional verdict: it holds for the current progress only, and the
+    // unfinished children are listed below it.
+    provisionalTitle: 'Provisional verdict',
+    provisionalHint: 'This check is a snapshot of the current progress: {{n}} sub-requirement(s) are still unfinished. Run it again once they are done.',
+    // The development state of a sub-requirement at check time.
+    stage: {
+      done: 'Done',
+      in_progress: 'In progress',
+      not_started: 'Not started',
+      unavailable: 'Implementation not visible',
+      unknown: 'Unknown',
+    },
     status: {
       yes: 'Passed',
       partial: 'Partially passed',

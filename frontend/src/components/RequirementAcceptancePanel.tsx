@@ -30,6 +30,7 @@ import { useTranslation } from 'react-i18next';
 import {
   acceptanceCheckApi,
   parseAcceptanceSummary,
+  type AcceptanceChildStage,
   type AcceptanceCheck,
   type AcceptanceSummary,
   type CodeReview,
@@ -107,11 +108,22 @@ export default function RequirementAcceptancePanel({
 
   // The nudge: every child is done, and no check has ever run. After the
   // first check the user knows the feature exists, so the nudge stops.
-  const allChildrenDone = useMemo(() => {
-    if (!childRequirements || childRequirements.length === 0) return false;
-    return childRequirements.every((c) => c.status === 'done');
+  //
+  // The mirror of that nudge is the partial one below: a check is runnable
+  // at ANY moment, so "some children are still being developed" is a
+  // reason to try it, not a reason to wait.
+  const pendingChildren = useMemo(() => {
+    if (!childRequirements) return [];
+    // 'archived' is a finished requirement that was moved to the knowledge
+    // base — the backend counts it as delivered too, so the panel must not
+    // call it unfinished.
+    return childRequirements.filter((c) => c.status !== 'done' && c.status !== 'archived');
   }, [childRequirements]);
+  const allChildrenDone =
+    (childRequirements?.length ?? 0) > 0 && pendingChildren.length === 0;
   const showReadyHint = allChildrenDone && checks.length === 0 && state !== 'running';
+  const showPartialHint =
+    pendingChildren.length > 0 && checks.length === 0 && state !== 'running';
 
   const start = async () => {
     setActionError('');
@@ -230,6 +242,12 @@ export default function RequirementAcceptancePanel({
         </div>
       )}
 
+      {showPartialHint && (
+        <div className="acc-partial">
+          {t('components.acceptanceCheck.partialHint', { n: pendingChildren.length })}
+        </div>
+      )}
+
       {loadError && <div className="acc-error">{loadError}</div>}
       {actionError && <div className="acc-error">{actionError}</div>}
 
@@ -259,6 +277,7 @@ export default function RequirementAcceptancePanel({
       {summary && (
         <>
           <VerdictCard summary={summary} />
+          {summary.provisional && <PendingBanner summary={summary} />}
           <CheckList checks={summary.checks} />
           <GapList gaps={summary.gaps} />
           <ProposalList proposals={summary.proposals} />
@@ -361,6 +380,71 @@ function VerdictCard({ summary }: { summary: AcceptanceSummary }) {
   );
 }
 
+// PendingBanner — the "this verdict is a snapshot" notice.
+//
+// A check can run while the children are still being developed, and then the
+// verdict says where the work STANDS, not that the master failed. Without
+// this notice a 「部分达成」 on a half-built split reads like a defect report,
+// and the user cannot tell the two apart.
+function PendingBanner({ summary }: { summary: AcceptanceSummary }) {
+  const { t } = useTranslation();
+  const pending = summary.pending ?? [];
+  if (pending.length === 0) return null;
+  return (
+    <div className="acc-provisional">
+      <div className="acc-provisional-head">
+        {t('components.acceptanceCheck.provisionalTitle')}
+      </div>
+      <p className="acc-provisional-text">
+        {t('components.acceptanceCheck.provisionalHint', { n: pending.length })}
+      </p>
+      <ul className="acc-pending-list">
+        {pending.map((p) => (
+          <li key={p.child_id || p.child_title}>
+            <span className={`acc-pending-stage acc-stage-${p.stage || 'unknown'}`}>
+              {stageLabel(t, p.stage)}
+            </span>
+            {p.child_id ? (
+              <Link to={`/requirements/${p.child_id}`}>{p.child_title}</Link>
+            ) : (
+              <span>{p.child_title}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// stageLabel renders the development state of a sub-requirement.
+//
+// It is a switch rather than a template key so the lookup is explicit — the
+// stage comes from the database, and an unmapped value must not produce a
+// "components.acceptanceCheck.stage." key that renders as the raw key.
+function stageLabel(t: (key: string) => string, stage: AcceptanceChildStage): string {
+  switch (stage) {
+    case 'done': return t('components.acceptanceCheck.stage.done');
+    case 'in_progress': return t('components.acceptanceCheck.stage.in_progress');
+    case 'not_started': return t('components.acceptanceCheck.stage.not_started');
+    case 'unavailable': return t('components.acceptanceCheck.stage.unavailable');
+    default: return t('components.acceptanceCheck.stage.unknown');
+  }
+}
+
+// ChildStateTag — the owner's development state on a check / gap row.
+//
+// It is what tells "this point is still being developed" apart from "this
+// point failed": without it the two look identical in the report.
+function ChildStateTag({ stage }: { stage: AcceptanceChildStage }) {
+  const { t } = useTranslation();
+  if (!stage || stage === 'done') return null;
+  return (
+    <span className={`acc-child-state acc-stage-${stage}`}>
+      {stageLabel(t, stage)}
+    </span>
+  );
+}
+
 // CheckList — one row per acceptance point of the master requirement.
 function CheckList({ checks }: { checks: AcceptanceCheck[] }) {
   const { t } = useTranslation();
@@ -394,6 +478,7 @@ function CheckList({ checks }: { checks: AcceptanceCheck[] }) {
                   ) : (
                     c.child_title
                   )}
+                  <ChildStateTag stage={c.child_state} />
                 </p>
               )}
             </div>
@@ -428,6 +513,7 @@ function GapList({ gaps }: { gaps: AcceptanceSummary['gaps'] }) {
                   ) : (
                     g.child_title
                   )}
+                  <ChildStateTag stage={g.child_state} />
                 </p>
               )}
             </div>
