@@ -1488,6 +1488,41 @@ export default function RequirementDetail() {
   //   fetch called `onChanged()` → parent refresh → new render → ∞.
   //   See RequirementChildrenPanel's `reloadToken` prop for the full story.
   const [childrenReloadToken, setChildrenReloadToken] = useState(0);
+  // designRegeneratedAt — the timestamp of the last SUCCESSFUL design
+  // regeneration on THIS requirement. Purely local: it only drives a hint
+  // (the plan changed, so the old breakdown may be stale). It is not a
+  // source of truth — the split dialog re-reads the children itself.
+  //
+  // It exists because "the plan changed but the children did not" is
+  // invisible otherwise: the old sub-requirements keep their own design
+  // docs, so nothing on the page looks out of date, yet the breakdown no
+  // longer matches the plan it was cut from.
+  const [designRegeneratedAt, setDesignRegeneratedAt] = useState<number | null>(null);
+  // regeneratePendingRef — "the design run that is in flight right now is a
+  // REGENERATION". A ref, not state: the SSE job_done handler is a
+  // useCallback that must not be re-created (re-creating it would resubscribe
+  // the stream), and a ref is readable from it without changing identities.
+  //
+  // It is consumed by noteDesignRegenerated below, which turns "a
+  // regeneration just landed" into the hint the user sees.
+  //
+  // It MUST be cleared on every terminal path, including the failed ones:
+  // a flag left armed would make the NEXT unrelated successful design run
+  // (a 「继续设计」 resume, say) raise a hint about a regeneration that never
+  // landed.
+  const regeneratePendingRef = useRef(false);
+  const noteDesignRegenerated = useCallback((succeeded: boolean) => {
+    const wasRegeneration = regeneratePendingRef.current;
+    regeneratePendingRef.current = false;
+    if (!succeeded || !wasRegeneration) return;
+    setDesignRegeneratedAt(Date.now());
+  }, []);
+  // Switching requirements clears the hint — it described the PREVIOUS
+  // requirement's children.
+  useEffect(() => {
+    setDesignRegeneratedAt(null);
+    regeneratePendingRef.current = false;
+  }, [id]);
   useEffect(() => {
     setIsLongDesignDoc(isLongDesign(parseDesign(req?.design_docs ?? '').plan_markdown ?? req?.design_docs ?? ''));
     setDesignExpanded(false);
@@ -2062,6 +2097,11 @@ export default function RequirementDetail() {
           // line stays in view instead of collapsing behind the toggle.
           const failed = evt.status === 'error' || (typeof evt.exit_code === 'number' && evt.exit_code !== 0);
           setDesignError(failed);
+          // A SUCCESSFUL regeneration may have invalidated the children that
+          // were cut from the previous plan → raise the "re-split" hint.
+          // A failed run left the plan alone, so it raises nothing (and
+          // disarms the flag either way).
+          noteDesignRegenerated(!failed);
           // Always refresh: the backend clears design_job_id on every terminal
           // path (success and error), so refreshing unblocks the UI even when
           // the job ended in an error status (which a success-only refresh
@@ -2115,6 +2155,9 @@ export default function RequirementDetail() {
       // (and cleared design_job_id) since the last check. Without this refresh
       // a stale req.design_job_id would keep designProcessActive true forever.
       setDesigning(false);
+      // We do not know whether the run landed → raise no hint, but disarm
+      // the flag so a later unrelated run cannot inherit it.
+      noteDesignRegenerated(false);
       refresh();
       return;
     }
@@ -2122,13 +2165,17 @@ export default function RequirementDetail() {
       authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
         .then(r => r.json())
         .then(json => {
-          if (!json.success) { setDesigning(false); refresh(); return; }
+          if (!json.success) { setDesigning(false); noteDesignRegenerated(false); refresh(); return; }
           const { status, exit_code } = json.data as { status: string; exit_code: number };
           if (status === 'running') {
             pollDesignJob(jobId, attempt + 1);
           } else {
             setDesigning(false);
-            setDesignError(status === 'error' || exit_code !== 0);
+            const failed = status === 'error' || exit_code !== 0;
+            setDesignError(failed);
+            // Same rule as the SSE path: a successful regeneration may have
+            // invalidated the children cut from the previous plan.
+            noteDesignRegenerated(!failed);
             refresh();
           }
         })
@@ -2483,10 +2530,17 @@ export default function RequirementDetail() {
       const json = await res.json();
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
+      // A regeneration REPLACES the plan the children were cut from, so it
+      // is the run that can leave them stale. Arm the flag here; it is
+      // consumed only if the run actually succeeds (the job_done handler).
+      regeneratePendingRef.current = regenerate;
       streamDesignJob(jobId);
     } catch (err: any) {
       setDesignLines([{ type: 'error', content: err.message }]);
       setDesigning(false);
+      // The run never started → no plan changed → disarm the flag so a later
+      // unrelated run cannot inherit it.
+      regeneratePendingRef.current = false;
     }
   };
 
@@ -6111,6 +6165,31 @@ export default function RequirementDetail() {
           reloadToken={childrenReloadToken}
           onChildCountChange={setChildCount}
         />
+      )}
+
+      {/* ── 重新拆分的提示 ──
+          The plan was regenerated after the last split, so the children
+          listed above were cut from a plan that no longer exists. Nothing
+          on the page looks out of date — the children keep their own
+          design docs — so without this line the mismatch is invisible
+          until someone opens the split dialog by hand.
+
+          The button opens that dialog, where the authoritative list of the
+          children a re-split would discard is shown. The hint only says
+          "it is time to re-split"; it never claims which ones. */}
+      {designRegeneratedAt !== null && req.dev_delegated && (
+        <div className="req-resplit-hint">
+          <span className="req-resplit-hint-text">
+            {t('requirements.split.resplitHint')}
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setSplitOpen(true)}
+          >
+            {t('requirements.split.resplitHintAction')}
+          </button>
+        </div>
       )}
 
       {/* ── Wiki stage ── (kind=wiki only) ── */}

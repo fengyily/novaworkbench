@@ -1043,6 +1043,17 @@ export const requirements = {
     resplitWarn: 'This requirement already has {{count}} sub-requirements from a previous split. They will be discarded and re-split from the current technical plan.',
     resplitListMore: 'and {{count}} more',
     resplitConfirm: 'Discard the old sub-requirements and create {{count}} new ones',
+    // Shown after the technical plan was regenerated while the requirement
+    // still had sub-requirements. It puts the re-split one click away — the
+    // children drifting out of sync with the new plan is otherwise only
+    // noticed by opening the split dialog by hand.
+    //
+    // No count: the requirement's children mix split products with
+    // hand-attached ones, and a re-split only discards the former. The
+    // split dialog lists exactly which ones; this line only has to say
+    // "it is time to re-split".
+    resplitHint: 'The technical plan was regenerated — the previous sub-requirements may be out of date. You can split again from the new plan.',
+    resplitHintAction: 'Re-split now',
     configTitle: 'Split settings',
     modelLabel: 'Model',
     execEnvLabel: 'Execution environment',
