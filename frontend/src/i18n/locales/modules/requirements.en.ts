@@ -1035,6 +1035,14 @@ export const requirements = {
     confirming: 'Creating… {{sec}}s',
     confirmingHint: 'Creating the master branch, pushing it to the remote and writing the sub-requirements — the first push on a large repository can take a minute or two.',
     confirmTimeout: 'Timed out: pushing the master branch to the remote took too long and was aborted. Check the network and the repository credentials, then retry (already created sub-requirements are not duplicated).',
+    // ── Re-split ───────────────────────────────────────────────────────
+    // Shown when the requirement was already split and its plan has since
+    // been regenerated. The old sub-requirements are discarded on confirm —
+    // so say plainly what is about to go away.
+    resplitTitle: 'Re-split',
+    resplitWarn: 'This requirement already has {{count}} sub-requirements from a previous split. They will be discarded and re-split from the current technical plan.',
+    resplitListMore: 'and {{count}} more',
+    resplitConfirm: 'Discard the old sub-requirements and create {{count}} new ones',
     configTitle: 'Split settings',
     modelLabel: 'Model',
     execEnvLabel: 'Execution environment',
@@ -1062,9 +1070,11 @@ export const requirements = {
     errIsChild: 'A sub-requirement cannot be split again (one level only)',
     errArchived: 'An archived requirement cannot be split',
     errDeveloped: 'This requirement already entered development',
-    errAlreadySplit: 'This requirement is already split — development was handed to its sub-requirements',
+    errAlreadySplit: 'This requirement already has sub-requirements — confirm discarding them to split again',
     errInProgress: 'A split is already running — please wait',
     errCycle: 'The prerequisites form a cycle',
+    errChildrenInProgress: 'A sub-requirement is still being developed — re-splitting is blocked',
+    errConflict: 'The split state changed — please reload and retry',
     errExpired: 'The split result expired — please generate it again',
     errGeneric: 'Split failed: {{msg}}',
     // ── Status strip / stream panel ───────────────────────────────────
