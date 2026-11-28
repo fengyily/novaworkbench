@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
@@ -29,7 +29,7 @@ import ReviewIdentitySelect, { DEFAULT_REVIEW_ROLE_KEY } from './ReviewIdentityS
 import ReviewFocusChips from './ReviewFocusChips';
 import RequirementReviewCard from './RequirementReviewCard';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { createReplaySkipper } from '../utils/jobStream';
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
@@ -38,6 +38,7 @@ import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload
 import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDescriptionEditor/imageIngest';
 import { rewriteNovaLinks } from './RichDescriptionEditor/rewriteNovaLinks';
 import ContextUsageBar from './ContextUsageBar';
+import { SubTaskTree, type SubTaskTreeNode, type SubTaskTreeKind } from './SubTaskTree';
 import EffortBar, { type EffortTier } from './EffortBar';
 import { effortPick } from '../utils/effort';
 import { useEffortDefaults } from '../hooks/useEffortDefaults';
@@ -121,6 +122,17 @@ interface Props {
 // legacy rows pre-dating the column render unchanged as roots.
 type TreeNode = { node: SubTask; depth: number; children: TreeNode[] };
 
+// Newest-first comparator. Lives at module scope so the tree builder and
+// the panel's own "which row is the newest" derivation share ONE rule —
+// two copies of the same comparison would eventually drift apart and the
+// panel would select a row the tree does not consider newest.
+function sortNewest(a: SubTask, b: SubTask): number {
+  const at = new Date(a.created_at).getTime();
+  const bt = new Date(b.created_at).getTime();
+  if (at !== bt) return bt - at;
+  return (b.id ?? '').localeCompare(a.id ?? '');
+}
+
 function buildTree(items: SubTask[]): TreeNode[] {
   const byParent = new Map<string, SubTask[]>();
   for (const it of items) {
@@ -129,12 +141,6 @@ function buildTree(items: SubTask[]): TreeNode[] {
     arr.push(it);
     byParent.set(k, arr);
   }
-  const sortNewest = (a: SubTask, b: SubTask) => {
-    const at = new Date(a.created_at).getTime();
-    const bt = new Date(b.created_at).getTime();
-    if (at !== bt) return bt - at;
-    return (b.id ?? '').localeCompare(a.id ?? '');
-  };
   const build = (key: string, depth: number): TreeNode[] =>
     (byParent.get(key) ?? []).slice().sort(sortNewest).map((n) => ({
       node: n, depth, children: build(n.id, depth + 1),
@@ -294,12 +300,25 @@ async function writeClipboard(text: string): Promise<boolean> {
 // import CodingLines (it lives inside RequirementDetail.tsx as a private
 // component) so this is a stripped-down equivalent that renders the same
 // {type, content} event shape the SSE pipeline emits.
-function SubTaskLogView({ lines }: { lines: LogLine[] }) {
+function SubTaskLogView({
+  lines,
+  visible = true,
+}: {
+  lines: LogLine[];
+  // Whether the host currently presents this log as visible. A
+  // false → true transition re-anchors the view at the bottom: a card
+  // that comes back from display:none has its scrollTop reset to 0 by
+  // the browser while `lines` stayed the same, so the scroll effect
+  // must re-run on the flip. `visible` is a RE-RUN TRIGGER, never a
+  // gate — a false value must not suppress the scroll, otherwise a host
+  // that passes detailMode={false} would silently lose the auto-scroll.
+  visible?: boolean;
+}) {
   const { t } = useTranslation();
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [lines]);
+  }, [lines, visible]);
   if (lines.length === 0) {
     return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
   }
@@ -857,6 +876,18 @@ interface CardProps {
   archiveBusy?: boolean;
   onArchive: () => void;
   onUnarchive: (kbId: string) => void;
+  // ── Controlled display modes ────────────────────────────────────
+  // The card is presented as the RIGHT-HAND DETAIL card of a split
+  // panel: the body is always open, the header's body-expand arrow is
+  // not rendered, and a header click no longer toggles `expanded`
+  // (otherwise the one and only detail in the column could be folded
+  // away). Deliberately distinct from `expanded` (this card's own body
+  // open/close) and from `isCollapsed` (the shared subtree-fold set):
+  // three unrelated fold semantics must not share one vocabulary.
+  detailMode?: boolean;
+  // The card is NOT the selected one: the body is not rendered at all
+  // (no log DOM inside hidden cards), while the header still is.
+  bodyHidden?: boolean;
 }
 
 // useRestartSubTask encapsulates the "原地翻转" semantics shared by the
@@ -1009,6 +1040,8 @@ function SubTaskCard({
   archiveBusy = false,
   onArchive,
   onUnarchive,
+  detailMode,
+  bodyHidden,
 }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
@@ -1026,6 +1059,13 @@ function SubTaskCard({
   const [expanded, setExpanded] = useState<boolean>(
     st.status === 'running' || st.status === 'pending',
   );
+  // The body is open when the host presents this card as the detail card
+  // (detailMode) OR when the user expanded it (expanded). bodyHidden wins
+  // over both: an unselected card renders no body DOM at all (no log DOM
+  // inside hidden cards). detailMode deliberately does NOT rewrite the
+  // `expanded` state — the card keeps its own open/close state and simply
+  // overrides it while it sits in the detail slot.
+  const bodyOpen = (detailMode || expanded) && !bodyHidden;
   const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
   const [lines, setLines] = useState<LogLine[]>([]);
   // v0.5.x: 三阶段（理解 / 实施 / 小结）渲染缓冲。SSE phase / phase_section
@@ -1138,6 +1178,33 @@ function SubTaskCard({
   // showed exactly one line (a bare "exit status 143") and nothing else.
   const [jobDiag, setJobDiag] = useState<RunJob | null>(null);
   const esRef = useRef<EventStream | null>(null);
+  // "This card has already received any SSE frame in this session." Set on
+  // the first line of the SSE onMessage callback (the job_done terminal
+  // frame counts) — it is the first gate keeping "snapshot replay" and
+  // "live output" mutually exclusive.
+  const gotFrameRef = useRef(false);
+  // "This card is on the live path." Flipped the moment the SSE subscription
+  // is established rather than on the first frame: there is a narrow window
+  // (the card flipped from a terminal state back to live — SSE subscribed
+  // but no frame yet) where gotFrameRef is still false and a stale snapshot
+  // landing would be stacked on top of the subsequent SSE replay.
+  const liveRef = useRef(false);
+  // "The job_id this card is currently bound to." The snapshot's .then reads
+  // it to detect "this row was re-dispatched while the request was in
+  // flight" (a redo / continue overwrites job_id in place), so the previous
+  // run's log never lands on the new one.
+  const boundJobIdRef = useRef(st.job_id);
+  useEffect(() => { boundJobIdRef.current = st.job_id; });
+  // "Which job_id we already pulled a snapshot for" — stops the snapshot
+  // effect from re-running into a duplicate request / loop.
+  const hydratedJobRef = useRef('');
+  // Set when the snapshot pull fails (the historical output genuinely does
+  // not exist — e.g. the process was killed mid-run so job_logs was never
+  // written). Renders an explanation instead of a blank panel.
+  const [logUnavailable, setLogUnavailable] = useState(false);
+  // Whether the log area renders: the live path always renders it; the
+  // replay path renders it as soon as it has content.
+  const showLog = streaming || lines.length > 0;
   // Raw SSE frames bookkeeping for the CURRENT job.
   //
   // The backend's job stream REPLAYS the whole history on every
@@ -1156,6 +1223,12 @@ function SubTaskCard({
   //     the NEXT subscription: the replayed prefix that must be dropped.
   //   - `count`: the frames THIS subscription has received so far. It
   //     becomes the next subscription's `skip`.
+  //
+  // This is orthogonal to the snapshot-replay refs above: `gotFrameRef` /
+  // `liveRef` / `hydratedJobRef` decide whether the DURABLE snapshot may
+  // write into lines[] at all, while `rawFramesRef` decides how many of the
+  // frames a (re-)subscription must drop. A redo / continue mints a NEW
+  // job_id, so the per-job reset below keeps the two from interfering.
   const rawFramesRef = useRef<{ jobId: string; skip: number; count: number }>(
     { jobId: '', skip: 0, count: 0 },
   );
@@ -1219,6 +1292,7 @@ function SubTaskCard({
     esRef.current = createEventStream(
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
+        gotFrameRef.current = true;              // any frame counts (incl. job_done)
         if (!evt || typeof evt !== 'object') return;
         const evtType = evt.type as string;
         // job_done is the SSE writer's terminal frame, NOT one of the
@@ -1304,12 +1378,25 @@ function SubTaskCard({
         }));
       },
       () => {
+        // Release the "live path has taken over" flag once the stream
+        // fails, so the snapshot replay can serve as the fallback.
+        //
+        // Why this cannot stack the snapshot on top of the SSE: the
+        // fail() in createEventStream fires only once (the `finished` flag
+        // in api/stream.ts) and the read loop has already exited by then, so
+        // no further frame can arrive and there is no "live output" left to
+        // stack. A stream that did deliver frames is still blocked by
+        // gotFrameRef; the redo / continue race (this row re-dispatched
+        // while the request was in flight) is still blocked by
+        // boundJobIdRef.
+        liveRef.current = false;                 // a failed stream may fall back to the snapshot
         setStreaming(false);
         subTasksApi.get(st.requirement_id, st.id)
           .then((next) => { setArtifact(next.artifact); onChanged(next); })
           .catch(() => {});
       },
     );
+    liveRef.current = true;                    // the live path has taken over
     return () => {
       // The frames this subscription received become the next subscription's
       // skip length: the backend log grew by exactly that much.
@@ -1338,6 +1425,66 @@ function SubTaskCard({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, st.status, st.job_id]);
+
+  // Historical output replay for a finished sub-task.
+  //
+  // Why it exists: the log area used to render only while streaming, so a
+  // card went blank the moment its run ended; and the live SSE history only
+  // lives in the backend's in-memory JobStore (cap 50), so after a page
+  // refresh even "the output at the time" could not be retrieved. The
+  // snapshot endpoint GET /api/wizard/jobs/{id} returns the full log[] on
+  // an in-memory hit and falls back to the job_logs table otherwise (so it
+  // survives a backend restart).
+  //
+  // Three hard constraints:
+  //   1. Mutually exclusive with the SSE — both paths write the same lines
+  //      state, and stacking them means duplicate rows. gotFrameRef (a
+  //      frame arrived) / liveRef (subscribed) / hydratedJobRef (already
+  //      pulled) are each checked once before the request and once again
+  //      inside .then.
+  //   2. The filter matches the live path verbatim — the live callback
+  //      drops the usage / phase / phase_section frames (they feed the
+  //      usage bar and the three-phase panel respectively), and the
+  //      snapshot drops them too. Otherwise the historical view would
+  //      carry noise rows the live view never shows (and the usage JSON
+  //      payload would be rendered as Markdown by .sub-log-md).
+  //   3. No `cancelled` flag — main.tsx wraps the app in StrictMode, and
+  //      React 19 re-runs effects ("mount → cleanup → mount") in dev. A
+  //      cancelled flag would discard the first round's response while
+  //      hydratedJobRef would stop the second round from re-issuing it,
+  //      so the historical output would never load in dev. Validity is
+  //      decided by "only ever grows" refs instead; a setState after
+  //      unmount is a silent no-op in React 18+.
+  useEffect(() => {
+    if (streaming) return;                    // running: the SSE owns the log
+    if (!st.job_id) return;                   // not dispatched yet: no job
+    if (gotFrameRef.current) return;          // already seen live in this session
+    if (liveRef.current) return;              // the live path has taken over
+    if (hydratedJobRef.current === st.job_id) return;  // loop guard
+    hydratedJobRef.current = st.job_id;
+    wizardApi.getJob(st.job_id)
+      .then((job) => {
+        // Second line of defence: while the request was in flight the card
+        // may have flipped back to live (a redo / continue), or this row
+        // may have been re-dispatched onto another job_id.
+        if (gotFrameRef.current) return;
+        if (liveRef.current) return;
+        if (boundJobIdRef.current !== st.job_id) return;
+        const raw = job.log ?? [];
+        // Same as the live path: usage / phase / phase_section never enter lines[]
+        const kept = raw.filter((l) => l.type !== 'usage'
+          && l.type !== 'phase' && l.type !== 'phase_section');
+        setLines(coalesceLogLines(kept));
+        setLogUnavailable(false);
+      })
+      .catch(() => {
+        // The historical output genuinely does not exist (e.g. the process was
+        // killed mid-run so job_logs was never written) — say so instead of
+        // leaving a blank panel.
+        setLogUnavailable(true);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, st.job_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
@@ -1526,8 +1673,10 @@ function SubTaskCard({
       req.target === 'log' ? logAnchorRef.current :
       null;
     // The panel / log may not have mounted yet (collapsed card, drawer
-    // not open, etc.). Bail out without consuming — the next state flip
-    // will re-fire this effect and the target will be in the DOM by then.
+    // not open, body hidden by the host, etc.). Bail out without
+    // consuming — the next state flip will re-fire this effect and the
+    // target will be in the DOM by then. A null element is a normal
+    // outcome here, never an error.
     if (!el) return;
     const reduceMotion =
       typeof window !== 'undefined' &&
@@ -1551,7 +1700,7 @@ function SubTaskCard({
         window.setTimeout(() => ta.focus(), focusDelay);
       }
     }
-  }, [expanded, adjusting, redoing, streaming, st.status]);
+  }, [expanded, adjusting, redoing, streaming, st.status, bodyHidden]);
 
   // Shared renderer for the four action buttons — extracted so the
   // header (compact, always visible) and the body footer (full-size,
@@ -1799,10 +1948,19 @@ function SubTaskCard({
     >
       <header
         className="sub-card-header"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => { if (detailMode) return; setExpanded((v) => !v); }}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          // Detail mode: the body is always open there, so the header
+          // must not fold it away — the column's single detail card
+          // would disappear. Keyboard is disabled together with click
+          // so no hidden fold entry point survives.
+          if (detailMode) return;
+          setExpanded((v) => !v);
+        }}
       >
         {/* Meta line: status chip + source badge + counter + model + time.
             Sits ABOVE the title so a long user-supplied title never
@@ -1972,7 +2130,14 @@ function SubTaskCard({
               The render helper owns click + keydown stopPropagation so the
               buttons don't accidentally toggle expand/collapse. */}
           {renderActionButtons('header')}
-          <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          {/* The body-expand arrow is meaningless in detail mode — the body
+              is always open there, and a second fold affordance would
+              compete with the left tree's expander. Rendered
+              conditionally (not CSS-hidden) so "the header carries no
+              expand arrow" holds at the DOM level. */}
+          {!detailMode && (
+            <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          )}
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
             Wraps freely so long titles stay fully visible. */}
@@ -2022,7 +2187,7 @@ function SubTaskCard({
         />
       </div>
 
-      {expanded && (
+      {bodyOpen && (
         <div className="sub-card-body">
           {/* 方案先行的实施方案区 —— 位于 Live log 与实现报告之上：
               「先看方案 → 再看代码」的顺序正是两段式子任务想传达的形状。 */}
@@ -2125,14 +2290,30 @@ function SubTaskCard({
             </section>
           )}
 
-          {/* Live log (streaming) — full-width terminal scrollback.
+          {/* Live log (streaming) / historical replay — full-width terminal scrollback.
               Wrapped in a div with logAnchorRef so the header's
               继续 → "scroll to log" effect can scrollIntoView the
               container without coupling to SubTaskLogView's internal
-              auto-scroll-to-bottom ref. */}
-          {streaming && (
+              auto-scroll-to-bottom ref.
+              showLog = streaming || lines.length > 0 — once the run has
+              ended the area keeps rendering as long as the replay produced
+              content, instead of going blank the moment it finished. */}
+          {showLog && (
             <div ref={logAnchorRef}>
-              <SubTaskLogView lines={lines} />
+              <SubTaskLogView lines={lines} visible={detailMode} />
+            </div>
+          )}
+
+          {/* The historical output genuinely does not exist (e.g. the process was
+              killed mid-run so job_logs was never written): say so instead
+              of leaving a blank panel. Reuses the .sub-log-empty look, so
+              no new CSS class. Note it must stay a SIBLING of
+              SubTaskLogView: when lines is empty SubTaskLogView renders
+              its own .sub-log-empty (logEmpty), and nesting this inside
+              would show two empty-state boxes. */}
+          {!streaming && logUnavailable && (
+            <div className="sub-log-empty">
+              {t('components.subTaskPanel.split.logUnavailable')}
             </div>
           )}
 
@@ -2409,6 +2590,30 @@ function clampAutoRounds(n: number): number {
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [], allowReview = false }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
+  // ── Split-panel selection ───────────────────────────────────────────────
+  // The panel is a master–detail workbench: the left column lists every
+  // sub-task as a tree, the right column shows ONE of them in full (live
+  // log + result + actions). The selection is held as an ID, never as a
+  // node object — the list is re-fetched every 5s, and a stored object
+  // would be a stale snapshot of a row that has since changed.
+  const [selectedId, setSelectedId] = useState<string>('');
+  // Whether the right column tracks the running sub-task. On by default:
+  // the project gate runs one child at a time, so "the one that is
+  // running" is unambiguous and the user should not have to click first.
+  const [followRunning, setFollowRunning] = useState<boolean>(true);
+  // The newest requirement the panel has been told about. loadList closes
+  // over the requirementId it was created for, so a request still in flight
+  // when the user switches requirements would otherwise land the PREVIOUS
+  // requirement's rows (and its count, and its batch) on the new one.
+  //
+  // The ref is written during render on purpose: an effect would run after
+  // the commit, and a promise resolution queued in between would still see
+  // the old id — exactly the window the guard has to cover.
+  const latestReqIdRef = useRef<string>(requirementId);
+  latestReqIdRef.current = requirementId;
+  // Deadline of the startup poll window (see the effect further down).
+  // Declared here because the requirement-switch reset restarts it.
+  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
   // Configured automatic-redo cap (设置 → 子任务). Read once per mount purely to
   // give the per-card retry badge a denominator; a failure is non-fatal (the
   // badge falls back to a count-only wording), so no error state is kept.
@@ -2793,7 +2998,16 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // indented under their parent. The `collapsed` Set tracks which parent
   // ids have their subtree hidden; when a parent collapses, its entire
   // descendant chain is skipped from `flat` until the user expands again.
-  const tree = useMemo(() => buildTree(items ?? []), [items]);
+  //
+  // Only the CURRENT requirement's rows enter the tree. The list endpoint
+  // is already scoped by requirementId and loadList drops stale in-flight
+  // responses (see the guard there), so this filter is the second line of
+  // defence — it keeps a stray row out of the tree even if it slipped past.
+  const visibleItems = useMemo(
+    () => (items ?? []).filter((i) => i.requirement_id === requirementId),
+    [items, requirementId],
+  );
+  const tree = useMemo(() => buildTree(visibleItems), [visibleItems]);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const flat: TreeNode[] = useMemo(() => {
     const out: TreeNode[] = [];
@@ -2806,11 +3020,193 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     walk(tree);
     return out;
   }, [tree, collapsed]);
+  // Collapse-independent pre-order list. The RIGHT column renders one card
+  // per entry of THIS list: a folded subtree's cards must stay mounted, or
+  // their SSE connections drop and their log buffers are lost — the exact
+  // regression the split panel must not introduce. The left column keeps
+  // using `flat`, which skips folded subtrees.
+  const flatAll: TreeNode[] = useMemo(() => {
+    const out: TreeNode[] = [];
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        out.push(n);
+        walk(n.children);
+      }
+    };
+    walk(tree);
+    return out;
+  }, [tree]);
+  // Position of every row in `flatAll` (1-based). The tree rows and the
+  // cards quote the SAME number, so the panel never shows two counters.
+  const posOf = useMemo(() => {
+    const m = new Map<string, number>();
+    flatAll.forEach((n, i) => m.set(n.node.id, i + 1));
+    return m;
+  }, [flatAll]);
+  // Ancestor index: child id → parent id. Read from the FULL tree, never
+  // from `flat` — `flat` skips the descendants of a folded node, so the
+  // ancestor chain of a hidden row cannot be read back out of it.
+  const parentOf = useMemo(() => {
+    const m = new Map<string, string>();
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        for (const c of n.children) {
+          m.set(c.node.id, n.node.id);
+          walk([c]);
+        }
+      }
+    };
+    walk(tree);
+    return m;
+  }, [tree]);
   // sortedItems alias kept for downstream derivations that still iterate
   // the flat list by .status (polling, latestArtifactStale, summary CTA).
   // It points at the same array as `flat` so those consumers don't need
   // any tree-aware logic — only the renderer walks the tree.
   const sortedItems = flat.map((n) => n.node);
+
+  // ── Split-panel selection wiring ───────────────────────────────────────
+
+  // Requirement switch: the parent switches requirements by changing a
+  // prop; this component is NOT remounted (neither mount site passes a
+  // `key`), so every per-requirement piece of state has to be reset by
+  // hand. Without this the panel keeps showing the previous requirement's
+  // rows — and its batch marker would swallow the new requirement's
+  // freshly dispatched children.
+  useEffect(() => {
+    setSelectedId('');
+    setFollowRunning(true);
+    setItems(null);
+    setActiveBatch(null);
+    // Keep the SAME set when nothing is folded: a fresh empty set would
+    // look like a change to React and cost an extra render on mount.
+    setCollapsed((prev) => (prev.size === 0 ? prev : new Set<string>()));
+    lastReportedCountRef.current = -1;
+    startupDeadlineRef.current = Date.now() + 5 * 60_000;
+  }, [requirementId]);
+
+  // Selection derivation. The selection is held by ID, so the 5s poll
+  // (which replaces the whole array) never makes the right column jump:
+  // the ID still resolves to the same row.
+  useEffect(() => {
+    const list = visibleItems;
+    if (list.length === 0) {
+      setSelectedId('');
+      return;
+    }
+    // Following: pick the running task — the newest one, so the pick is
+    // stable from poll to poll.
+    if (followRunning) {
+      const running = list.filter((i) => i.status === 'running').sort(sortNewest)[0];
+      if (running) {
+        setSelectedId(running.id);
+        return;
+      }
+    }
+    setSelectedId((prev) => {
+      if (prev && list.some((i) => i.id === prev)) return prev;
+      // Fallback: the newest row. NOT the first entry of the flattened
+      // tree — that is the newest ROOT, while an adjustment row is a
+      // CHILD and can be newer than every root.
+      return list.slice().sort(sortNewest)[0].id;
+    });
+  }, [visibleItems, followRunning]);
+
+  // The selected row must be VISIBLE in the tree. The flattened tree skips
+  // the descendants of a folded node, so a selection hidden inside a
+  // folded subtree would leave the tree highlighting a row the user
+  // cannot see. Unfold the ancestors whenever the selection changes.
+  useEffect(() => {
+    if (!selectedId) return;
+    const chain: string[] = [];
+    let cur = parentOf.get(selectedId);
+    while (cur) {
+      chain.push(cur);
+      cur = parentOf.get(cur);
+    }
+    if (chain.length === 0) return;
+    setCollapsed((prev) => {
+      if (!chain.some((id) => prev.has(id))) return prev; // unchanged
+      const next = new Set(prev);
+      for (const id of chain) next.delete(id);
+      return next;
+    });
+  }, [selectedId, parentOf]);
+
+  // A manual pick in the tree closes the follow switch. ANY click does —
+  // including a click on the row that happens to be the running one.
+  // Otherwise the view would jump away the moment the next task starts,
+  // taking the detail the user just opened with it.
+  const handleTreeSelect = useCallback((id: string) => {
+    setSelectedId(id);
+    setFollowRunning(false);
+  }, []);
+
+  // Fold / unfold a subtree. The tree's caret and the card header's
+  // subtree button drive this one handler, so the two never disagree.
+  //
+  // Folding a subtree that CONTAINS the selection would hide the selected
+  // row from the tree, leaving the highlight and the detail card naming
+  // different tasks. Move the selection up to the node being folded.
+  const toggleCollapse = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setSelectedId((prev) => {
+      if (!prev || prev === id) return prev;
+      let cur = parentOf.get(prev);
+      while (cur) {
+        if (cur === id) return id;
+        cur = parentOf.get(cur);
+      }
+      return prev;
+    });
+  }, [parentOf]);
+
+  // The tree rows the left column renders. Everything the tree needs is
+  // derived here — the component itself holds no data and no selection.
+  const treeNodes: SubTaskTreeNode[] = useMemo(() => flat.map((tn) => {
+    const node = tn.node;
+    // Same source rules as the card's own badges, so a row and its card
+    // never disagree about what kind of task this is.
+    const kind: SubTaskTreeKind | undefined =
+      node.task_kind === 'review'
+        ? 'review'
+        : (node.source === 'auto' || (!node.source && node.batch_id)) ? 'auto' : undefined;
+    return {
+      id: node.id,
+      title: node.title || t('components.subTaskCard.noTitle'),
+      status: node.status,
+      depth: tn.depth,
+      // countDescendants counts the node itself, so more than one means
+      // it has descendants.
+      hasChildren: countDescendants(tn) > 1,
+      index: posOf.get(node.id) ?? 0,
+      total: flatAll.length,
+      kind,
+      durationText: node.duration_seconds > 0 ? fmtDuration(node.duration_seconds) : '',
+      jobId: node.job_id,
+      batchId: node.batch_id,
+    };
+  }), [flat, flatAll, posOf, t]);
+
+  // Rows whose job is live. The tree colours them as running even when the
+  // persisted status still says pending.
+  const runningIds = useMemo(
+    () => new Set(visibleItems.filter((i) => i.status === 'running').map((i) => i.id)),
+    [visibleItems],
+  );
+
+  // The right-hand detail column. Switching cards changes the container's
+  // scrollHeight in the same commit, so the scroll is reset BEFORE paint:
+  // the new card never appears half-scrolled from the old card's position.
+  const detailRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+  }, [selectedId]);
 
   // latestArtifactStale: derived from the freshest sub-task's artifact.
   // Used to auto-select the 「带上下文」 radio on follow-up clicks when the
@@ -2867,6 +3263,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const loadList = useCallback(async () => {
     try {
       const list = await subTasksApi.list(requirementId);
+      // Stale response: the user switched requirements while this request
+      // was in flight. Dropping it here also drops the three side effects
+      // below (the parent count, the batch marker, the error state) — the
+      // previous requirement's rows must never land on the new one.
+      if (requirementId !== latestReqIdRef.current) return;
       setItems(list);
       // Forward the new count to the parent so the page can flip
       // hasSubTasks and hide the requirement-level "Follow-up" composer.
@@ -2922,7 +3323,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // mounts in developing/done states and the startup poll only fires
   // while items.length === 0, so the cost of a longer window is at most
   // ~150 extra 5ms GETs per requirement.
-  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
+  //
+  // The ref itself is declared with the other panel-level refs above (the
+  // requirement-switch reset has to restart the window).
   useEffect(() => {
     if (items === null) return; // not yet loaded
     if (items.length > 0) return; // already have data, nothing to do
@@ -4074,54 +4477,108 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         </div>
       </div>
 
-      <div className="sub-list">
-        {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
-        {items && items.length === 0 && (
-          <div className="sub-list-empty">
-            <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
-            <div>{t('components.subTaskPanel.empty')}</div>
+      {/* Split workbench: a tree of every sub-task on the left, the
+          selected one in full on the right. Each column clamps its OWN
+          height and scrolls by itself, so a long log can no longer push
+          the page apart and the tree stays in view. */}
+      <div className="sub-split">
+        <aside className="sub-split-aside" aria-label={t('components.subTaskPanel.split.asideTitle')}>
+          <div className="sub-split-head">
+            <span className="sub-split-head-title">{t('components.subTaskPanel.split.asideTitle')}</span>
+            <button
+              type="button"
+              className={`sub-split-follow${followRunning ? ' is-on' : ''}`}
+              onClick={() => setFollowRunning((v) => !v)}
+              aria-pressed={followRunning}
+              title={t('components.subTaskPanel.split.followHint')}
+            >
+              {followRunning
+                ? t('components.subTaskPanel.split.followOn')
+                : t('components.subTaskPanel.split.followOff')}
+            </button>
           </div>
-        )}
-        {flat.length > 0 && flat.map((tn, i) => (
-          <SubTaskCard
-            key={tn.node.id}
-            st={tn.node}
-            index={i}
-            total={flat.length}
-            requirementId={requirementId}
-            isLatestReviewRound={isLatestReviewRound(tn.node)}
-            depth={tn.depth}
-            childCount={countDescendants(tn)}
-            isCollapsed={collapsed.has(tn.node.id)}
-            onToggleCollapse={() => setCollapsed((prev) => {
-              const next = new Set(prev);
-              if (next.has(tn.node.id)) next.delete(tn.node.id);
-              else next.add(tn.node.id);
-              return next;
-            })}
-            onChanged={onItemChanged}
-            onCreated={loadList}
-            onRestarted={handleSubTaskRestarted}
-            onDeleted={handleSubTaskDeleted}
-            // Per-card: this child's OWN effective environment decides whether
-            // Stop is offered. `?? agent_server_id` is the same old-backend
-            // fallback the environment badge above uses.
-            canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
-            adjustModel={adjustModel}
-            // Per-card runs (Redo / Continue / Adjust) reuse the panel's
-            // picked reasoning-effort tier — they are implementation work,
-            // same as the composer. The RAW pick is passed (not the
-            // displayed default): an unpicked run must leave the field off
-            // so the backend resolves the configured stage default.
-            effort={composerEffort ?? undefined}
-            onAdjustModelChange={setAdjustModel}
-            retryMax={retryMax}
-            archivedKbId={archives[tn.node.id]}
-            archiveBusy={!!archiveBusy[tn.node.id]}
-            onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
-            onUnarchive={handleUnarchiveReport}
-          />
-        ))}
+          <div className="sub-split-aside-scroll">
+            {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
+            {items !== null && visibleItems.length === 0 && (
+              <div className="sub-list-empty">
+                <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
+                <div>{t('components.subTaskPanel.empty')}</div>
+              </div>
+            )}
+            {visibleItems.length > 0 && (
+              // The key remounts the tree on a requirement switch: the
+              // component's internal focus state then starts empty instead
+              // of pointing at a row of the previous requirement.
+              <SubTaskTree
+                key={requirementId}
+                nodes={treeNodes}
+                selectedId={selectedId}
+                onSelect={handleTreeSelect}
+                collapsed={collapsed}
+                onToggleCollapse={toggleCollapse}
+                runningIds={runningIds}
+              />
+            )}
+          </div>
+        </aside>
+        <div className="sub-split-detail" ref={detailRef}>
+          {/* EVERY card stays mounted — the unselected ones are merely
+              hidden. Unmounting them would drop their SSE connections and
+              clear their log buffers, which is exactly the regression the
+              split panel must not introduce. `flatAll` is collapse-
+              independent for the same reason: folding a subtree must not
+              unload the cards below it. */}
+          {flatAll.map((tn, i) => {
+            const isSelected = tn.node.id === selectedId;
+            return (
+              <div key={tn.node.id} className={`sub-split-card-slot${isSelected ? ' is-active' : ''}`}>
+                <SubTaskCard
+                  st={tn.node}
+                  index={i}
+                  total={flatAll.length}
+                  requirementId={requirementId}
+                  isLatestReviewRound={isLatestReviewRound(tn.node)}
+                  // The right column is flat: the hierarchy is the tree's
+                  // job now, so no card is indented and no card draws the
+                  // vertical connector line.
+                  depth={0}
+                  childCount={countDescendants(tn)}
+                  isCollapsed={collapsed.has(tn.node.id)}
+                  onToggleCollapse={() => toggleCollapse(tn.node.id)}
+                  onChanged={onItemChanged}
+                  onCreated={loadList}
+                  onRestarted={handleSubTaskRestarted}
+                  onDeleted={handleSubTaskDeleted}
+                  // Per-card: this child's OWN effective environment decides whether
+                  // Stop is offered. `?? agent_server_id` is the same old-backend
+                  // fallback the environment badge above uses.
+                  canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
+                  adjustModel={adjustModel}
+                  // Per-card runs (Redo / Continue / Adjust) reuse the panel's
+                  // picked reasoning-effort tier — they are implementation work,
+                  // same as the composer. The RAW pick is passed (not the
+                  // displayed default): an unpicked run must leave the field off
+                  // so the backend resolves the configured stage default.
+                  effort={composerEffort ?? undefined}
+                  onAdjustModelChange={setAdjustModel}
+                  retryMax={retryMax}
+                  archivedKbId={archives[tn.node.id]}
+                  archiveBusy={!!archiveBusy[tn.node.id]}
+                  onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
+                  onUnarchive={handleUnarchiveReport}
+                  // The selected card is the detail card: its body is
+                  // always open and its header arrow is gone. The others
+                  // render no body at all.
+                  detailMode={isSelected}
+                  bodyHidden={!isSelected}
+                />
+              </div>
+            );
+          })}
+          {!selectedId && (
+            <div className="sub-split-empty">{t('components.subTaskPanel.split.emptyDetail')}</div>
+          )}
+        </div>
       </div>
     </section>
   );

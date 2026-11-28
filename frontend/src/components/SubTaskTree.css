@@ -1,0 +1,185 @@
+/* SubTaskTree — the left-hand navigation tree of the sub-task split panel.
+ *
+ * Component-private stylesheet. Every colour comes from the global design
+ * tokens, so this file hardcodes no colour value of its own. Spacing and
+ * type sizes are raw pixels because the design system has no size scale.
+ *
+ * The component is pure display: it renders rows the parent already
+ * computed, and this sheet only describes how a row looks, which state it
+ * is in, and how the tree recedes for users who asked for less motion.
+ */
+
+/* ── Container ───────────────────────────────────────────────
+   The component-scoped custom properties are declared here, on the
+   component's own root class, never on the global root — otherwise they
+   would leak into every other stylesheet in the app.
+
+   --sub-tree-depth is not declared here: the component sets it inline on
+   each row, and the row's padding-left consumes it. The fallback of 0
+   keeps a row aligned if that inline value ever goes missing. */
+.sub-tree {
+  --sub-tree-indent-step: 16px;
+  --sub-tree-pad-base: 8px;
+  --sub-tree-dot-size: 8px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+/* ── Row ──────────────────────────────────────────────────────
+   The 3px left border is transparent on every row and only turns
+   primary on the selected one. Reserving it on all rows keeps the
+   content from shifting sideways when a row becomes selected.
+
+   The indent is one step per nesting level, measured from the row's own
+   base padding. It is applied as padding rather than margin so the
+   selected row's tint still spans the full width of the tree column. */
+.sub-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 3px 8px 3px 0;
+  padding-left: calc(var(--sub-tree-pad-base) + var(--sub-tree-depth, 0) * var(--sub-tree-indent-step));
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sub-tree-row:hover {
+  background: var(--color-hover);
+}
+
+.sub-tree-row:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+/* Declared after the hover rule on purpose: both selectors weigh the
+   same, so the later one wins and a selected row keeps its own tint
+   instead of flipping to the plain hover wash while the pointer is on it. */
+.sub-tree-row.is-selected {
+  background: var(--color-active);
+  border-left-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.sub-tree-row.is-selected .sub-tree-index {
+  color: var(--color-primary);
+}
+
+/* ── Caret ────────────────────────────────────────────────────
+   The glyph slot keeps a fixed width even for rows that have no
+   children, so the status dot and the title stay in the same column on
+   every row of the tree. */
+.sub-tree-caret {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sub-tree-caret:hover {
+  color: var(--color-primary);
+}
+
+/* ── Status dot ───────────────────────────────────────────────
+   The dot carries the row's state. The pending-and-undispatched colour
+   is deliberately the warning tone rather than the muted one: such a row
+   is owned by no dispatcher, which is a stuck state rather than a row
+   that is waiting its turn. */
+.sub-tree-dot {
+  flex: 0 0 auto;
+  width: var(--sub-tree-dot-size);
+  height: var(--sub-tree-dot-size);
+  border-radius: 999px;
+  background: var(--color-text-muted);
+}
+
+.sub-tree-dot.is-done {
+  background: var(--color-success);
+}
+
+.sub-tree-dot.is-running {
+  background: var(--color-primary);
+  animation: sub-tree-pulse 1.4s ease-in-out infinite;
+}
+
+.sub-tree-dot.is-error {
+  background: var(--color-error);
+}
+
+.sub-tree-dot.is-stopped {
+  background: var(--color-text-secondary);
+}
+
+.sub-tree-dot.is-pending {
+  background: var(--color-text-muted);
+}
+
+.sub-tree-dot.is-not-dispatched {
+  background: var(--color-warning);
+}
+
+/* ── Kind mark ────────────────────────────────────────────────
+   A fixed slot for the review and auto-orchestration marks, so a row
+   that carries no mark still lines up with its neighbours. */
+.sub-tree-kind {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+}
+
+/* ── Title ────────────────────────────────────────────────────
+   min-width of 0 is what lets the ellipsis kick in: a flex item
+   defaults to refusing to shrink below its content width. */
+.sub-tree-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Counter and duration ─────────────────────────────────────
+   Both are short, fixed-width readouts, so they use the monospaced face
+   with tabular figures to stop the tree from jittering as the numbers
+   change. */
+.sub-tree-index,
+.sub-tree-duration {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Motion ───────────────────────────────────────────────────
+   The keyframes name is global in CSS, so it carries the component
+   prefix to stay clear of the other pulse animations in the app. */
+@keyframes sub-tree-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+}
+
+/* Users who asked for less motion get a static dot instead. */
+@media (prefers-reduced-motion: reduce) {
+  .sub-tree-dot.is-running {
+    animation: none;
+  }
+}

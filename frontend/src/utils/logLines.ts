@@ -16,6 +16,13 @@ export interface LogLine {
   type: string;
   content: string;
   at?: number; // Unix ms; 后端自动注入；老数据/直连 SSE 兜底缺省
+  // Phase discriminator carried by the `phase` / `phase_section` events:
+  // "understanding" | "implementation" | "summary". The backend's
+  // store.LogLine always carries it for those two types (and omits it for
+  // every other event); the live SSE path only reads it on `phase_section`.
+  // Present in the persisted job snapshot too — which is why the snapshot
+  // replay has to drop those two types explicitly.
+  phase?: string;
   // Usage snapshot emitted by wizard.go runClaudeStream's `usage` event.
   // The Content field carries the same JSON as a string for backwards
   // compatibility with callers that only read `type + content`; the parsed

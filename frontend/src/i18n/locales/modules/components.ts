@@ -248,6 +248,17 @@ export const components = {
     archiveOk: '✅ 已归档到知识库',
     archiveErrPrefix: '❌ 归档失败：',
     unarchiveOk: '✅ 已从知识库移除',
+    // Split panel (左树右详情). The left column lists every sub-task as a
+    // tree, the right column shows the selected one in full.
+    split: {
+      asideTitle: '子任务',
+      followOn: '跟随运行中',
+      followOff: '跟随运行中：关',
+      followHint: '正在运行的任务会自动显示在右侧',
+      emptyDetail: '在左侧选择一个子任务，右侧显示它的实时输出与结果',
+      logUnavailable: '该任务的输出记录不可用（后台任务已结束且日志未持久化）',
+      historyBadge: '历史输出',
+    },
   },
   subTaskCard: {
     statusPending: '排队中',
