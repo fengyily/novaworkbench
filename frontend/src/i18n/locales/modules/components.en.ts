@@ -162,6 +162,8 @@ export const components = {
     errorKindStalled: 'Stream went silent (watchdog terminated it)',
     errorKindIdleTimeout: 'Idle timeout (idle watchdog terminated it)',
     errorKindTerminated: 'Terminated by NovaWorkbench before any result',
+    errorKindOutputLimit: 'Model output hit the per-response limit (reply truncated)',
+    errorKindContextWindow: 'Session context window exhausted',
     errorKindUnknown: 'Unknown reason',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 Main agent is generating the summary report…',

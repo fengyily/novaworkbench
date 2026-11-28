@@ -154,6 +154,14 @@ export const settings = {
     toastDeleted: '配置已删除',
     activateToast: '已切换为默认配置，未绑定角色的模型已重置为 {{model}}',
     deleteConfirm: '确定删除配置「{{name}}」吗？',
+    // 输出上限保护 —— 模型单次输出被截断后的自动续跑次数。
+    outputLimitTitle: '输出上限保护',
+    outputLimitDesc: '模型单次输出达到上限、回复被截断时，平台会在原会话上自动续跑，把中断的任务接着做完。0 = 关闭（只提示、不续跑）；建议 1。',
+    outputLimitLabel: '自动续跑次数',
+    outputLimitHint: '上限中断后最多自动续跑几次（0 = 关闭，1 = 默认，最多 3）。续跑时会要求模型分段写文件；若仍失败，建议把需求拆分为子任务分次执行。注意：调大模型自身的输出上限对这个问题无效，根因是一次写入过大。',
+    outputLimitSave: '💾 保存',
+    outputLimitSaving: '保存中...',
+    outputLimitSavedAt: '已保存 · {{time}}',
     modal: {
       createTitle: '添加配置',
       editTitle: '编辑配置',

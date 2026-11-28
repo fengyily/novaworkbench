@@ -395,6 +395,8 @@ function SubTaskJobDiagnostics({ job }: { job: RunJob }) {
       case 'stalled': return t('components.subTaskPanel.errorKindStalled');
       case 'idle-timeout': return t('components.subTaskPanel.errorKindIdleTimeout');
       case 'terminated': return t('components.subTaskPanel.errorKindTerminated');
+      case 'output-token-limit': return t('components.subTaskPanel.errorKindOutputLimit');
+      case 'context-window-exhausted': return t('components.subTaskPanel.errorKindContextWindow');
       default: return job.error_kind
         ? `${t('components.subTaskPanel.errorKindUnknown')} (${job.error_kind})`
         : '-';

@@ -3039,6 +3039,26 @@ export const subTaskConfigApi = {
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
 };
 
+// Coding-stage recovery policy.
+//
+// The claude CLI aborts a turn whose reply exceeds the model's per-response
+// output budget ("exceeded the N output token maximum") — usually because the
+// model tried to emit one huge file in a single Write. The backend recovers
+// by resuming the same session with a "write in small pieces" constraint.
+//
+// `output_limit_auto_resume` caps how many times that resume may happen:
+// 0 = never resume (the failure is only labelled), 1 = the shipped default,
+// 3 = the ceiling. Read live before every coding run, so saving takes effect
+// without a restart.
+export interface CodingRecoveryConfig {
+  output_limit_auto_resume: number;
+}
+export const codingRecoveryApi = {
+  get: () => api.get<CodingRecoveryConfig>('/api/settings/coding-recovery'),
+  update: (data: CodingRecoveryConfig) =>
+    api.put<CodingRecoveryConfig>('/api/settings/coding-recovery', data),
+};
+
 // The project-level CLAUDE.md injection policy.
 //
 // `inject_mode` decides HOW the managed document reaches the model:

@@ -151,6 +151,15 @@ export const settings = {
     toastDeleted: 'Config deleted',
     activateToast: 'Default config switched; unbound roles reset to {{model}}',
     deleteConfirm: 'Delete config "{{name}}"?',
+    // Output-limit protection — how many times the coding stage may
+    // automatically resume a turn whose reply was truncated.
+    outputLimitTitle: 'Output limit protection',
+    outputLimitDesc: 'When a model reply hits the per-response output limit and gets truncated, the platform resumes the same session and finishes the interrupted work. 0 = disabled (label the failure only); 1 is recommended.',
+    outputLimitLabel: 'Automatic resumes',
+    outputLimitHint: 'How many times the coding stage may automatically resume after an output-limit abort (0 = disabled, 1 = default, 3 = max). The resume asks the model to write in small pieces; if it still fails, split the requirement into sub-tasks. Note: raising the model\'s own output limit does not help here — the root cause is a single oversized write.',
+    outputLimitSave: '💾 Save',
+    outputLimitSaving: 'Saving…',
+    outputLimitSavedAt: 'Saved · {{time}}',
     modal: {
       createTitle: 'Add config',
       editTitle: 'Edit config',
