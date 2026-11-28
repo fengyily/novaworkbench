@@ -623,6 +623,49 @@ export const components = {
     upload_done: '上传完成',
     upload_error: '上传失败',
   },
+
+  // RequirementAcceptancePanel — the 「验收核对」 block on a master
+  // requirement whose development was delegated to its split children.
+  acceptanceCheck: {
+    checksTitle: '逐条验收判定',
+    gapsTitle: '未实现清单',
+    proposalsTitle: '建议再拆的子需求',
+    gapFlag: '缺失',
+    evidenceTag: '依据',
+    childTag: '归属',
+    goalTag: '目标',
+    acceptanceTag: '验收标准',
+    dependsOnTag: '建议前置',
+    reportTitle: '核对报告原文',
+    historyTitle: '历史核对（{{count}} 次）',
+    ratio: '达成度 {{pct}}%',
+    countYes: '通过 {{n}}',
+    countPartial: '部分 {{n}}',
+    countNo: '未达成 {{n}}',
+    countUnknown: '无法验证 {{n}}',
+    logWaiting: '⏳ 等待核对作业输出…',
+    errNoJob: '核对作业未能启动，请重试',
+    errFailed: '验收核对失败，请重试',
+    // 核对可以在子需求没做完时发起 —— 这条提示告诉用户「不用等」。
+    partialHint: '还有 {{n}} 个子需求未完成 —— 现在也可以发起核对，结论是当前进度的一次快照（子需求完成后可再核对一次）。',
+    // 阶段性结论：结论只对当下成立，未完成的子需求列在下面。
+    provisionalTitle: '阶段性结论',
+    provisionalHint: '本次核对反映的是当前进度的一次快照，还有 {{n}} 个子需求未完成。子需求完成后可重新核对。',
+    // 子需求在核对时所处的开发状态。
+    stage: {
+      done: '已完成',
+      in_progress: '开发中',
+      not_started: '未开工',
+      unavailable: '实现不可见',
+      unknown: '状态未知',
+    },
+    status: {
+      yes: '通过',
+      partial: '部分通过',
+      no: '未通过',
+      unknown: '无法验证',
+    },
+  },
 } as const;
 
 export default components;

@@ -964,6 +964,31 @@ export const requirements = {
     importDesignFailContentTooLarge: '内容超过 500 KB 上限',
     importDesignFailEmpty: '请粘贴内容或选择文件',
     importDesignPreviewLabel: '预览',
+    // 验收核对 (acceptance check) — 主需求把开发下放给子需求之后的达成度
+    // 核对区块。只在 dev_delegated 的主需求上渲染。
+    acceptance: {
+      title: '验收核对',
+      hint: '核对拆分子需求的开发是否达成了主需求的目的：逐条判定验收点、列出未实现的部分，并给出是否需要再拆的建议。核对只读，不会修改任何代码。子需求还没做完也可以随时核对 —— 此时的结论是当前进度的一次阶段性快照。',
+      modelLabel: '核对模型',
+      btnStart: '开始核对',
+      btnAgain: '重新核对',
+      running: '核对中…',
+      readyHint: '所有子需求已完成，建议做一次验收核对。',
+      badge: {
+        none: '未核对',
+        running: '核对中',
+        yes: '已达成',
+        partial: '部分达成',
+        no: '未达成',
+        failed: '核对失败',
+      },
+      verdict: {
+        none: '未给出结论',
+        yes: '已达成',
+        partial: '部分达成',
+        no: '未达成',
+      },
+    },
   },
   // Requirement-scoped file attachments. Shown as a collapsible panel
   // on the requirement detail page; each row has its own description,

@@ -617,6 +617,51 @@ export const components = {
     upload_done: 'Uploaded',
     upload_error: 'Upload failed',
   },
+
+  // RequirementAcceptancePanel — the 「验收核对」 block on a master
+  // requirement whose development was delegated to its split children.
+  acceptanceCheck: {
+    checksTitle: 'Acceptance points',
+    gapsTitle: 'Not implemented',
+    proposalsTitle: 'Suggested further sub-requirements',
+    gapFlag: 'Missing',
+    evidenceTag: 'Evidence',
+    childTag: 'Owner',
+    goalTag: 'Goal',
+    acceptanceTag: 'Acceptance',
+    dependsOnTag: 'Depends on',
+    reportTitle: 'Full check report',
+    historyTitle: 'Past checks ({{count}})',
+    ratio: 'Attainment {{pct}}%',
+    countYes: 'Passed {{n}}',
+    countPartial: 'Partial {{n}}',
+    countNo: 'Not met {{n}}',
+    countUnknown: 'Unverifiable {{n}}',
+    logWaiting: '⏳ Waiting for the check to produce output…',
+    errNoJob: 'The check could not be started — please retry',
+    errFailed: 'The acceptance check failed — please retry',
+    // A check can run while the children are unfinished — this line says the
+    // user does not have to wait.
+    partialHint: '{{n}} sub-requirement(s) are still unfinished — you can run a check now; the result is a snapshot of the current progress (run it again once they are done).',
+    // A provisional verdict: it holds for the current progress only, and the
+    // unfinished children are listed below it.
+    provisionalTitle: 'Provisional verdict',
+    provisionalHint: 'This check is a snapshot of the current progress: {{n}} sub-requirement(s) are still unfinished. Run it again once they are done.',
+    // The development state of a sub-requirement at check time.
+    stage: {
+      done: 'Done',
+      in_progress: 'In progress',
+      not_started: 'Not started',
+      unavailable: 'Implementation not visible',
+      unknown: 'Unknown',
+    },
+    status: {
+      yes: 'Passed',
+      partial: 'Partially passed',
+      no: 'Not passed',
+      unknown: 'Unverifiable',
+    },
+  },
 } as const;
 
 export default components;

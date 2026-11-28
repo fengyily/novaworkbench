@@ -38,7 +38,7 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
 	title, description, status, job_id, result_md, findings_json, findings_source,
-	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
+	p0_count, p1_count, p3_count, goal_met, goal_checks_json, acceptance_json, revision_no,
 	model, effort, claude_config_id,
 	agent_server_id, claude_session_id, requirement_id, role_key,
 	auto_iterate_rounds, auto_iterate_state, auto_iterate_note,
@@ -79,12 +79,12 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 	_, err := s.db.Exec(`INSERT INTO code_reviews (
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
-		p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
+		p0_count, p1_count, p3_count, goal_met, goal_checks_json, acceptance_json, revision_no,
 		model, effort, claude_config_id,
 		agent_server_id, claude_session_id, requirement_id, role_key,
 		auto_iterate_rounds, auto_iterate_state, auto_iterate_note,
 		created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', '', 0, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
 		rv.Model, llm.NormalizeEffort(rv.Effort), rv.ClaudeConfigID, rv.AgentServerID,
@@ -139,13 +139,50 @@ func (s *CodeReviewService) ListByProject(projectID string, limit int) ([]model.
 //
 // The rows come back with their Verdict already computed (see ReviewVerdict),
 // so the frontend renders the banner without re-deriving the pass rule.
+//
+// The query is narrowed to review_type='requirement' on purpose: an
+// 「验收核对」 session (review_type='acceptance') is ALSO bound to a
+// requirement, but it is not a Review round — it has no findings, no fix
+// sub-tasks and no recheck chain, so letting it in would put a row in the
+// round chain that the round-chain UI cannot render. Every pre-existing row
+// is a 'requirement' row, so this is an equivalent transformation for them.
+// The acceptance rows have their own reader: ListAcceptanceChecks.
 func (s *CodeReviewService) ListByRequirement(reqID string) ([]model.CodeReview, error) {
 	if strings.TrimSpace(reqID) == "" {
 		return []model.CodeReview{}, nil
 	}
 	rows, err := s.db.Query(`SELECT `+codeReviewCols+`
-		FROM code_reviews WHERE requirement_id = ?
-		ORDER BY created_at DESC, id DESC`, reqID)
+		FROM code_reviews WHERE requirement_id = ? AND review_type = ?
+		ORDER BY created_at DESC, id DESC`, reqID, model.ReviewTypeRequirement)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.CodeReview{}
+	for rows.Next() {
+		rv, err := scanCodeReview(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rv)
+	}
+	return out, rows.Err()
+}
+
+// ListAcceptanceChecks returns the 「验收核对」 sessions of one requirement,
+// newest first.
+//
+// It is the mirror image of ListByRequirement: the acceptance panel reads
+// this one, the Review round chain reads the other. Keeping them apart is
+// what stops an acceptance row from polluting the round chain (and vice
+// versa) while both still live in the one code_reviews table.
+func (s *CodeReviewService) ListAcceptanceChecks(reqID string) ([]model.CodeReview, error) {
+	if strings.TrimSpace(reqID) == "" {
+		return []model.CodeReview{}, nil
+	}
+	rows, err := s.db.Query(`SELECT `+codeReviewCols+`
+		FROM code_reviews WHERE requirement_id = ? AND review_type = ?
+		ORDER BY created_at DESC, id DESC`, reqID, model.ReviewTypeAcceptance)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +259,7 @@ func (s *CodeReviewService) MarkRunning(id, jobID, modelName string) error {
 		SET status = ?, job_id = ?, model = ?, result_md = '', findings_json = '',
 		    findings_source = '',
 		    p0_count = 0, p1_count = 0, p3_count = 0, goal_met = '', goal_checks_json = '',
+		    acceptance_json = '',
 		    claude_session_id = '', finished_at = NULL, updated_at = ?
 		WHERE id = ?`,
 		model.ReviewStatusRunning, jobID, modelName, time.Now().UTC(), id)
@@ -352,6 +390,10 @@ type ReviewOutcome struct {
 	// GoalChecksJSON is the optional per-criterion evidence array. Empty
 	// when the model answered only the one-word verdict.
 	GoalChecksJSON string
+	// AcceptanceJSON is the structured result of an 「验收核对」 session
+	// (model.AcceptanceSummary marshalled as JSON). Empty for every
+	// ordinary Review — the column is only read by the acceptance panel.
+	AcceptanceJSON string
 }
 
 // MarkFinished writes the terminal row. A parse miss is not a failure: the
@@ -365,10 +407,11 @@ func (s *CodeReviewService) MarkFinished(id string, out ReviewOutcome) error {
 	_, err := s.db.Exec(`UPDATE code_reviews
 		SET status = ?, result_md = ?, findings_json = ?, findings_source = ?,
 		    p0_count = ?, p1_count = ?, p3_count = ?, goal_met = ?,
-		    goal_checks_json = ?, finished_at = ?, updated_at = ?
+		    goal_checks_json = ?, acceptance_json = ?, finished_at = ?, updated_at = ?
 		WHERE id = ?`,
 		out.Status, out.ResultMD, out.FindingsJSON, out.FindingsSource,
-		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, now, now, id)
+		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, out.AcceptanceJSON,
+		now, now, id)
 	return err
 }
 
@@ -468,7 +511,7 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 	if err := row.Scan(&rv.ID, &rv.ProjectID, &rv.ReviewType, &rv.Branch,
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.FindingsSource, &rv.P0Count, &rv.P1Count,
-		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
+		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.AcceptanceJSON, &rv.RevisionNo,
 		&rv.Model, &rv.Effort, &rv.ClaudeConfigID,
 		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.RequirementID, &rv.RoleKey,
 		&rv.AutoIterateRounds, &rv.AutoIterateState, &rv.AutoIterateNote,
@@ -483,6 +526,14 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		rv.FinishedAt = &t
 	}
 	rv.Verdict = ReviewVerdict(rv.Status, rv.P0Count, rv.P1Count)
+	if rv.ReviewType == model.ReviewTypeAcceptance {
+		// The round-chain verdict ("pass" / "fail", derived from the P0/P1
+		// counts) says NOTHING about an acceptance check: it has no findings,
+		// so the counts are always zero and the verdict would always be
+		// "pass" — even for a check that concluded 「未达成」. The acceptance
+		// verdict is goal_met; this field stays empty for those rows.
+		rv.Verdict = ""
+	}
 	return &rv, nil
 }
 

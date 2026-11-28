@@ -2429,7 +2429,7 @@ export const reviewApi = {
 // The run itself streams over reviewApi.streamJobUrl — there is no separate
 // SSE channel for branch reviews.
 export type CodeReviewStatus = 'draft' | 'running' | 'done' | 'error';
-export type CodeReviewType = 'branch' | 'pr' | 'requirement';
+export type CodeReviewType = 'branch' | 'pr' | 'requirement' | 'acceptance';
 /** Grading ladder. P2 is intentionally unused — see prompt/review.go. */
 export type ReviewSeverity = 'P0' | 'P1' | 'P3';
 /** '' means the model didn't answer the 目标达成 question. */
@@ -2496,6 +2496,13 @@ export interface CodeReview {
    * by the contract; the verdict chip still renders.
    */
   goal_checks_json: string;
+  /**
+   * JSON-encoded AcceptanceSummary — the structured result of an acceptance
+   * check session (review_type='acceptance'). '' on every ordinary Review
+   * row, and also '' when the model broke the contract (the report is then
+   * rendered as plain Markdown).
+   */
+  acceptance_json?: string;
   /**
    * Which version of the report this row currently holds (1-based). 0 on a
    * draft that has never produced one. Older versions stay readable through
@@ -2656,6 +2663,150 @@ export function parseGoalChecks(review: Pick<CodeReview, 'goal_checks_json'> | n
     return [];
   }
 }
+
+// ── Acceptance check ──────────────────────────────────────────────────────
+//
+// The structured result of one acceptance check on a master requirement
+// whose development was delegated to its split children.
+//
+// It answers four questions: did the children reach the master's goal, how
+// far did each acceptance point get, what is still missing, and should the
+// master be split further.
+
+/** The overall conclusion of an acceptance check. */
+export type AcceptanceVerdict = 'yes' | 'partial' | 'no' | '';
+/**
+ * The per-criterion verdict. 'unknown' is a real outcome — the check could
+ * not see the implementation (the sub-requirement never entered development,
+ * or its code is not on this machine).
+ */
+export type AcceptanceCheckStatus = 'yes' | 'partial' | 'no' | 'unknown';
+
+/**
+ * The development state of a sub-requirement at check time.
+ *
+ * It is what keeps "not written yet" and "not implemented" apart: a check
+ * runs mid-flight all the time, and a point owned by a child that is still
+ * being developed is pending, not failed.
+ */
+export type AcceptanceChildStage =
+  | 'done'          // finished — its delivery is final
+  | 'in_progress'   // still being developed — the directory is a partial snapshot
+  | 'not_started'   // never entered development — nothing to read
+  | 'unavailable'   // being developed elsewhere — nothing to read here
+  | '';             // unknown (not attributable to a child)
+
+/** One sub-requirement as the acceptance check saw it. */
+export interface AcceptanceChild {
+  child_id: string;
+  child_title: string;
+  /** The sub-requirement's raw status ("developing", "draft", …). */
+  status: string;
+  stage: AcceptanceChildStage;
+}
+
+export interface AcceptanceCheck {
+  /** The acceptance point being judged. */
+  criterion: string;
+  status: AcceptanceCheckStatus;
+  /** The traceable basis for the verdict (a file:line, a function name). */
+  evidence: string;
+  /** Which sub-requirement owns the point ('' when unattributable). */
+  child_id: string;
+  child_title: string;
+  /** The owner's development stage at check time ('' when unattributable). */
+  child_state: AcceptanceChildStage;
+}
+
+export interface AcceptanceGap {
+  /** One-line headline of what is missing. */
+  title: string;
+  detail: string;
+  child_id: string;
+  child_title: string;
+  /**
+   * The owner's development stage at check time. A gap owned by a child that
+   * is still being developed is "not delivered YET", not "not implemented".
+   */
+  child_state: AcceptanceChildStage;
+}
+
+export interface AcceptanceProposal {
+  title: string;
+  goal: string;
+  acceptance: string[];
+  depends_on: string[];
+}
+
+export interface AcceptanceSummary {
+  verdict: AcceptanceVerdict;
+  summary: string;
+  checks: AcceptanceCheck[];
+  gaps: AcceptanceGap[];
+  proposals: AcceptanceProposal[];
+  /** The children that had NOT delivered when the check ran. */
+  pending: AcceptanceChild[];
+  /**
+   * True when the verdict is a snapshot of the current progress rather than
+   * a sign-off — i.e. at least one child was still unfinished.
+   */
+  provisional: boolean;
+}
+
+/**
+ * Decodes CodeReview.acceptance_json.
+ *
+ * Returns null when there is nothing structured to show — an ordinary Review
+ * row, a row whose model broke the contract, or a legacy row. The caller then
+ * renders the Markdown report alone.
+ */
+export function parseAcceptanceSummary(review: Pick<CodeReview, 'acceptance_json'> | null | undefined): AcceptanceSummary | null {
+  if (!review?.acceptance_json) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(review.acceptance_json);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
+  return {
+    verdict: (parsed.verdict ?? '') as AcceptanceVerdict,
+    summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    checks: asArray(parsed.checks) as AcceptanceCheck[],
+    gaps: asArray(parsed.gaps) as AcceptanceGap[],
+    proposals: asArray(parsed.proposals) as AcceptanceProposal[],
+    // A legacy row (or a row whose model broke the contract) carries neither
+    // field: it was a finished check, so nothing is pending.
+    pending: asArray(parsed.pending) as AcceptanceChild[],
+    provisional: parsed.provisional === true,
+  };
+}
+
+/**
+ * Acceptance check — the read/write surface of the acceptance panel on a
+ * master requirement's detail page.
+ *
+ * The run streams over its OWN SSE channel (acceptanceCheckApi.streamUrl)
+ * because the terminal frame carries the review id and the verdict, so the
+ * panel can refresh the persisted result without a second round trip.
+ */
+export const acceptanceCheckApi = {
+  /** Starts a check. Returns the JobStore id + the code_reviews row id. */
+  start: (requirementId: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string; review_id: string }>(
+      `/api/requirements/${requirementId}/acceptance-check`, body ?? {},
+    ),
+  /** The requirement's checks, newest first. */
+  list: (requirementId: string) =>
+    api.get<CodeReview[]>(`/api/requirements/${requirementId}/acceptance-check`),
+  /** One check, including its structured result. */
+  get: (requirementId: string, checkId: string) =>
+    api.get<CodeReview>(`/api/requirements/${requirementId}/acceptance-check/${checkId}`),
+  /** The SSE channel of one run. */
+  streamUrl: (requirementId: string, jobId: string) =>
+    `${API_BASE}/api/requirements/${requirementId}/acceptance-check/jobs/${jobId}/stream`,
+};
 
 /** What produced a report version. */
 export type RevisionTrigger = 'initial' | 'regenerate';

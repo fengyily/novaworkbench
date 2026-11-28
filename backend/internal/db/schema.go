@@ -2190,6 +2190,19 @@ var alterColumns = []string{
 	// 会话线程策略 / 报告详略 / 任务类型），故新增独立列。
 	// DEFAULT 'auto' 让所有存量行行为逐字不变。
 	`ALTER TABLE sub_tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto'`,
+	// acceptance_json: 「验收核对」的结构化结论（review_type='acceptance'）。
+	//
+	// 主需求把开发下放给拆分子需求之后，唯一能回答「子需求合起来有没有
+	// 达成主需求的目的」的路径，就是跑一次只读的 AI 核对作业。核对结论的结构
+	// 是「总体结论 + 逐条验收判定（归属哪个子需求）+ 未实现清单 + 建议再拆的
+	// 子需求」，装不进 goal_checks_json（那是 {criterion,status,evidence}），
+	// 所以单开一列。
+	//
+	// 其它 review 行恒为 ''（= 无验收核对结果）。解析失败时也是 ''，此时 UI
+	// 退化为纯 Markdown 渲染（与 code_reviews 的既有降级约定一致）。
+	// 追加式（append-only）：新库靠这条 ALTER 建列，旧库重跑 migrate 时
+	// "duplicate column" 被 isIgnorableDDLError 吞掉。
+	`ALTER TABLE code_reviews ADD COLUMN acceptance_json TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

@@ -596,6 +596,14 @@ func main() {
 	// 杀掉驱动它的 goroutine，链就会永远停在这里。巡检按 20s 的节奏读
 	// 落库的链状态，把断在半路的链接上。
 	go reqReviewH.StartAutoIterateReconciler(context.Background())
+	// 验收核对 (acceptance check) — 主需求把开发下放给子需求之后，跑一次
+	// 只读的 AI 核对，回答「子需求合起来有没有达成主需求的目的」。结论落在
+	// 同一张 code_reviews 表（review_type='acceptance'），与需求级 Review 的
+	// 轮次链分开读。仅本地执行：远端拿不到各子需求本地的 worktree 目录。
+	acceptanceH := handler.NewAcceptanceHandler(
+		reqSvc, projectSvc, codeReviewSvc, roleSvc, claudeCfgSvc,
+		sharedJobs, llmGateway, usageSvc,
+	)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	// The project CLAUDE.md injection policy lives in the settings KV (see
@@ -774,6 +782,21 @@ func main() {
 	// static checks report (slow, on demand — it spawns the toolchain).
 	mux.HandleFunc("POST /api/requirements/{id}/reviews/candidates", reqReviewH.ReviewCandidates)
 	mux.HandleFunc("POST /api/requirements/{id}/reviews/candidates/scan", reqReviewH.ReviewCandidatesScan)
+	// 验收核对 (acceptance check) — 主需求（dev_delegated=1）对自己拆出来的
+	// 子需求做一次只读的达成度核对。结论落在 code_reviews
+	// （review_type='acceptance'），与上面的需求级 Review 轮次链互不干扰。
+	//
+	//   POST .../acceptance-check                     → {job_id, review_id}
+	//   GET  .../acceptance-check                     → 历史核对列表
+	//   GET  .../acceptance-check/{cid}               → 单次核对（含结构化结论）
+	//   GET  .../acceptance-check/jobs/{job_id}/stream → SSE（终帧带 review_id / verdict）
+	//
+	// 与其它需求路由一样：仅鉴权，不加 RequirePermission（见 main.go 里需求
+	// 路由的既有约定）。
+	mux.HandleFunc("POST /api/requirements/{id}/acceptance-check", acceptanceH.StartCheck)
+	mux.HandleFunc("GET /api/requirements/{id}/acceptance-check", acceptanceH.ListChecks)
+	mux.HandleFunc("GET /api/requirements/{id}/acceptance-check/{cid}", acceptanceH.GetCheck)
+	mux.HandleFunc("GET /api/requirements/{id}/acceptance-check/jobs/{job_id}/stream", acceptanceH.StreamCheckJob)
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)

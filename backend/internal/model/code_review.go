@@ -24,6 +24,70 @@ const (
 	// requirement page renders it, and 追问 / 重新生成 / 版本 / 导出 all reuse
 	// the existing code_reviews read paths unchanged.
 	ReviewTypeRequirement = "requirement"
+	// ReviewTypeAcceptance is an 「验收核对」 session: a READ-ONLY AI check of
+	// whether the sub-requirements a master requirement was split into
+	// actually deliver what the master asked for.
+	//
+	// It is a different thing from ReviewTypeRequirement: a requirement-level
+	// Review grades CODE (findings, P0/P1/P3, fix sub-tasks), while an
+	// acceptance check grades the master's CONTRACT (did the children reach
+	// the goal, what is still missing, should we split further). It produces
+	// no findings and no fixes — it produces a verdict plus a list of gaps.
+	//
+	// The rows live in the same table so one query lists the whole history,
+	// but every read path that serves the requirement's Review round chain
+	// filters them out (see CodeReviewService.ListByRequirement).
+	ReviewTypeAcceptance = "acceptance"
+)
+
+// Acceptance verdicts — the overall conclusion of an acceptance check.
+//
+// They reuse the yes / partial / no vocabulary of the Review contract
+// (prompt.GoalMet*) so the UI can colour them with the same tokens.
+const (
+	AcceptanceVerdictYes     = "yes"
+	AcceptanceVerdictPartial = "partial"
+	AcceptanceVerdictNo      = "no"
+)
+
+// AcceptanceCheckUnknown is the per-criterion verdict for a point that could
+// NOT be checked — e.g. the sub-requirement it belongs to never entered
+// development, so there is no implementation to read.
+//
+// It is deliberately distinct from AcceptanceVerdictNo ("not implemented"):
+// claiming a gap that was never verifiable would blame a sub-requirement for
+// something the acceptance check could not see.
+const AcceptanceCheckUnknown = "unknown"
+
+// Acceptance child stages — the development state of a split sub-requirement
+// at the moment an acceptance check ran.
+//
+// The stage describes what the CHECK could see, not what the workflow
+// believes: a child that is still being developed holds a PARTIAL
+// implementation, and a child whose implementation is not on this machine
+// holds none at all. Neither is "not implemented", and the difference
+// matters — the acceptance verdict is read as "the children failed to
+// deliver", and blaming a child for work that is still in flight is exactly
+// the wrong conclusion.
+//
+// The stage is also what makes an acceptance check runnable at ANY moment:
+// the user can ask for a check while the children are still being developed,
+// and the result is then a snapshot of the current progress rather than a
+// sign-off.
+const (
+	// AcceptanceStageDone — the child finished its development. Its code is
+	// the final delivery, and a point it missed is a real gap.
+	AcceptanceStageDone = "done"
+	// AcceptanceStageInProgress — the child is still being developed AND its
+	// implementation directory holds a partial snapshot to read.
+	AcceptanceStageInProgress = "in_progress"
+	// AcceptanceStageNotStarted — the child never entered development: there
+	// is nothing to read, so its points are unverifiable.
+	AcceptanceStageNotStarted = "not_started"
+	// AcceptanceStageUnavailable — the child is being developed but its
+	// implementation is not on this machine (no worktree): there is nothing
+	// to read either.
+	AcceptanceStageUnavailable = "unavailable"
 )
 
 // CodeReview is one persisted Review session: the owner of its attachments,
@@ -65,6 +129,18 @@ type CodeReview struct {
 	// yes/partial/no verdict. Empty when the model skipped it — the verdict
 	// alone still renders, so this never gates anything.
 	GoalChecksJSON string `json:"goal_checks_json"`
+	// AcceptanceJSON is the structured result of an 「验收核对」 session
+	// (review_type='acceptance'): an AcceptanceSummary marshalled as JSON.
+	//
+	// It is EMPTY on every other review row, and also empty when the model
+	// broke the contract (the parser then keeps the Markdown report alone
+	// and the UI degrades to plain-Markdown rendering).
+	//
+	// It is a separate column rather than a reuse of GoalChecksJSON because
+	// the shape is different: the acceptance result answers "did the children
+	// reach the master's goal, what is missing, should we split further",
+	// which the {criterion,status,evidence} triple cannot express.
+	AcceptanceJSON string `json:"acceptance_json"`
 	// RevisionNo is which version of the report code_reviews currently holds.
 	// It starts at 1 and climbs by one per finished run (a re-review or a
 	// 「基于对话重新生成」), matching the rev_no of the newest
@@ -181,6 +257,126 @@ type GoalCheck struct {
 const (
 	GoalCheckUnknown = "unknown"
 )
+
+// ── 验收核对 (acceptance check) ───────────────────────────────────────────
+//
+// The structured result of one acceptance check on a master requirement whose
+// development was delegated to its split children.
+//
+// It answers four questions: did the children reach the master's goal, how
+// far did each acceptance point get, what is still missing, and should the
+// master be split further.
+//
+// The four sections are SEPARATE on purpose: the verdict alone is not
+// actionable, the per-point verdicts are the evidence behind it, the gaps
+// are the "not implemented" list, and the proposals are the "split again"
+// advice. Collapsing them would lose exactly the detail the user needs to
+// decide what to do next.
+
+// AcceptanceSummary is the whole structured result of one acceptance check.
+//
+// It is persisted as JSON in code_reviews.acceptance_json. Every field is
+// optional in practice: a model that only answers the verdict still produces
+// a usable row (the UI shows the verdict and the Markdown report).
+type AcceptanceSummary struct {
+	// Verdict is the overall conclusion: AcceptanceVerdictYes / Partial / No.
+	// Empty when the model said something outside that vocabulary.
+	Verdict string `json:"verdict"`
+	// Summary is the one-sentence headline of the verdict.
+	Summary string `json:"summary"`
+	// Checks is the per-criterion evidence table.
+	Checks []AcceptanceCheck `json:"checks"`
+	// Gaps is the "not implemented" list.
+	Gaps []AcceptanceGap `json:"gaps"`
+	// Proposals is the "split further" advice.
+	Proposals []AcceptanceProposal `json:"proposals"`
+	// Pending lists the children that had NOT delivered when the check ran.
+	//
+	// It is computed from the database, NOT from the model's report: the
+	// model cannot know which children are still in flight, and the user
+	// needs this list to read the verdict correctly — a verdict produced
+	// while two children were still developing is a snapshot, not a
+	// sign-off.
+	Pending []AcceptanceChild `json:"pending"`
+	// Provisional marks the verdict as a snapshot: true when Pending is not
+	// empty, i.e. at least one child had not delivered yet.
+	Provisional bool `json:"provisional"`
+}
+
+// AcceptanceChild is one sub-requirement as the acceptance check saw it.
+//
+// It is the deterministic half of the "when" of a check: the model's report
+// says what it read, this says what state each child was in.
+type AcceptanceChild struct {
+	// ChildID is the sub-requirement id.
+	ChildID string `json:"child_id"`
+	// ChildTitle is the sub-requirement title.
+	ChildTitle string `json:"child_title"`
+	// Status is the sub-requirement's raw status ("developing", "draft", …).
+	Status string `json:"status"`
+	// Stage is the development stage (AcceptanceStage*).
+	Stage string `json:"stage"`
+}
+
+// AcceptanceCheck is one acceptance point of the master requirement and the
+// verdict the acceptance check reached for it.
+type AcceptanceCheck struct {
+	// Criterion is the acceptance point being judged.
+	Criterion string `json:"criterion"`
+	// Status is yes | partial | no | unknown.
+	Status string `json:"status"`
+	// Evidence is the traceable basis for the verdict (a file:line, a
+	// function name, a test name). Free text — the parser only checks that
+	// it is not one of the hollow phrases ("已确认" and friends).
+	Evidence string `json:"evidence"`
+	// ChildID / ChildTitle say WHICH sub-requirement the point belongs to.
+	// ChildID is empty when the point is not attributable to a single child
+	// (or when the model named a child that does not exist).
+	ChildID    string `json:"child_id"`
+	ChildTitle string `json:"child_title"`
+	// ChildState is the owner's development stage at check time
+	// (AcceptanceStage*): what the check could see of the child that owns
+	// this point. Empty when the point is not attributable to a child.
+	//
+	// It is what lets the UI say "this point is still in development"
+	// instead of "this point failed" — the two look identical in the
+	// model's report.
+	ChildState string `json:"child_state"`
+}
+
+// AcceptanceGap is one thing the children did NOT implement.
+type AcceptanceGap struct {
+	// Title is a one-line headline of the gap.
+	Title string `json:"title"`
+	// Detail explains what is missing and what it should look like.
+	Detail string `json:"detail"`
+	// ChildID / ChildTitle name the sub-requirement that should have
+	// delivered it (empty when the gap belongs to no single child).
+	ChildID    string `json:"child_id"`
+	ChildTitle string `json:"child_title"`
+	// ChildState is the owner's development stage at check time
+	// (AcceptanceStage*). A gap owned by a child that is still being
+	// developed is "not delivered YET", not "not implemented" — the UI
+	// labels it apart from a real gap.
+	ChildState string `json:"child_state"`
+}
+
+// AcceptanceProposal is a suggested additional sub-requirement.
+//
+// It is ADVICE ONLY: the acceptance check never creates rows. Changing the
+// requirement tree is the user's call (and the split flow is the tool for
+// it), so the check just names what is missing.
+type AcceptanceProposal struct {
+	// Title is the proposed sub-requirement's title.
+	Title string `json:"title"`
+	// Goal is what it is supposed to achieve.
+	Goal string `json:"goal"`
+	// Acceptance is the list of acceptance points it would carry.
+	Acceptance []string `json:"acceptance"`
+	// DependsOn names the sub-requirements it would depend on (titles or
+	// ids, whatever the model wrote — the UI shows them verbatim).
+	DependsOn []string `json:"depends_on"`
+}
 
 // Revision triggers: what produced this version of the report.
 const (
