@@ -151,6 +151,64 @@ func (h *SettingHandler) UpdateSubTaskConfig(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, SubTaskConfigResponse{Concurrency: concurrency, AutoRetry: autoRetry, RetryMax: retryMax})
 }
 
+// CodingRecoveryResponse is the API shape for the coding stage's recovery
+// policy.
+//
+// The claude CLI aborts a turn whose reply exceeds the model's per-response
+// output budget. The platform recovers by resuming the same session with a
+// "write in small pieces" constraint; OutputLimitAutoResume caps how many
+// times that resume may happen (0 = never resume, only label the failure).
+type CodingRecoveryResponse struct {
+	// OutputLimitAutoResume is the maximum number of automatic resumes after
+	// an output-limit abort. Clamped to [0, 3]; the shipped default is 1.
+	OutputLimitAutoResume int `json:"output_limit_auto_resume"`
+}
+
+// GetCodingRecoveryConfig returns the coding stage's recovery policy.
+// GET /api/settings/coding-recovery
+func (h *SettingHandler) GetCodingRecoveryConfig(w http.ResponseWriter, r *http.Request) {
+	n, err := h.svc.OutputLimitAutoResume()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, CodingRecoveryResponse{OutputLimitAutoResume: n})
+}
+
+// UpdateCodingRecoveryConfig persists the coding stage's recovery policy.
+// The write only touches the settings table — the coding stage re-reads the
+// budget before every run, so the new value takes effect on the next run
+// without a restart.
+func (h *SettingHandler) UpdateCodingRecoveryConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OutputLimitAutoResume *int `json:"output_limit_auto_resume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if req.OutputLimitAutoResume == nil {
+		writeError(w, 400, "INVALID", "output_limit_auto_resume 不能为空")
+		return
+	}
+	n := *req.OutputLimitAutoResume
+	if n < 0 || n > 3 {
+		writeError(w, 400, "INVALID", "output_limit_auto_resume 必须在 0..3 之间（0 = 关闭自动续跑）")
+		return
+	}
+	if err := h.svc.SetOutputLimitAutoResume(n); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted (clamped) state.
+	stored, err := h.svc.OutputLimitAutoResume()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, CodingRecoveryResponse{OutputLimitAutoResume: stored})
+}
+
 // ClaudeDocInjectionResponse is the API shape for the project-level
 // CLAUDE.md injection policy.
 //

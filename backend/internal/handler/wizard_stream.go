@@ -557,7 +557,12 @@ func extractJSON(s string) string {
 // claudeResultError extracts a human-readable error message from a non-success
 // claude "result" event. The CLI surfaces auth/transport failures in the
 // "error", "api_error_status", or "result" fields; we also log the full event.
-func claudeResultError(scope string, evt map[string]interface{}) string {
+//
+// It returns the message AND a failure class ("kind"). The kind lets callers
+// act on the failure shape (e.g. resume a truncated turn) instead of matching
+// on English text; an unknown class yields "" and the original message is
+// passed through untouched.
+func claudeResultError(scope string, evt map[string]interface{}) (string, string) {
 	msg := "Claude 执行出错"
 	if v, ok := evt["error"].(string); ok && v != "" {
 		msg = v
@@ -574,10 +579,18 @@ func claudeResultError(scope string, evt map[string]interface{}) string {
 		(strings.Contains(lower, "bad request") || strings.Contains(lower, "not found")) {
 		msg += "\n（这是上游代理返回的 400，通常是 BASE_URL / Token / 模型 配置有误或额度耗尽，请在「设置」里检查 Claude 配置）"
 	}
+	// Failure class: the model filled its per-response output budget (the
+	// reply was truncated) or the session's context window is exhausted.
+	// Append a Chinese, actionable hint so the user is not left with a raw
+	// English API error.
+	kind, limitTokens := classifyClaudeFailure(msg)
+	if hint := claudeFailureHint(kind, limitTokens); hint != "" {
+		msg += "\n" + hint
+	}
 	if raw, err := json.Marshal(evt); err == nil {
 		log.Printf("[%s] claude result event: %s", scope, truncateStr(string(raw), 800))
 	}
-	return msg
+	return msg, kind
 }
 
 // extractStreamError pulls every diagnostic field we can out of a top-level
@@ -799,10 +812,18 @@ func workerCategoryHint(cat, msg string) string {
 // so the caller can transparently fall back to a fresh session instead of
 // surfacing a hard error.
 type claudeStreamOutcome struct {
-	finalResult      string
-	sessionID        string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
-	staleSession     bool
-	errMsg           string
+	finalResult  string
+	sessionID    string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
+	staleSession bool
+	errMsg       string
+	// errKind classifies errMsg so callers can act on the failure class
+	// instead of matching on English text. Empty means "unknown class" —
+	// the message is then surfaced as-is.
+	//
+	// Known values: "output-token-limit" (the model filled its per-response
+	// output budget and the reply was truncated) and
+	// "context-window-exhausted". See classifyClaudeFailure.
+	errKind          string
 	hadStreamEvents  bool   // true if any stream_event/content_block_delta arrived
 	eventCount       int    // total NDJSON events parsed (any type)
 	streamEventCount int    // subset that are stream_event
@@ -1573,7 +1594,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					log.Printf("[%s] claude result event (empty result): %s", scope, truncateStr(line, 800))
 				}
 			} else {
-				out.errMsg = claudeResultError(scope, evt)
+				out.errMsg, out.errKind = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, stderrBuf.String()) {
 					out.staleSession = true
 					log.Printf("[%s] stale --resume detected (session not on disk)", scope)
@@ -1653,6 +1674,15 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			if msg != "" {
 				if out.errMsg == "" {
 					out.errMsg = msg
+					// Classify here too: the CLI can report the truncated
+					// reply as a top-level error event instead of a failed
+					// "result" event. No hint is appended here — the message
+					// already carries the worker's stderr / exit-code digest,
+					// and claudeResultError is the single place that appends
+					// the Chinese guidance.
+					if out.errKind == "" {
+						out.errKind, _ = classifyClaudeFailure(msg)
+					}
 				}
 				sink.emit(store.LogLine{Type: "error", Content: msg})
 			}
@@ -2041,7 +2071,7 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					out.emptyResult = true
 				}
 			} else {
-				out.errMsg = claudeResultError(scope, evt)
+				out.errMsg, out.errKind = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, "") {
 					out.staleSession = true
 				}
@@ -2087,6 +2117,15 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 			if msg != "" {
 				if out.errMsg == "" {
 					out.errMsg = msg
+					// Classify here too: the CLI can report the truncated
+					// reply as a top-level error event instead of a failed
+					// "result" event. No hint is appended here — the message
+					// already carries the worker's stderr / exit-code digest,
+					// and claudeResultError is the single place that appends
+					// the Chinese guidance.
+					if out.errKind == "" {
+						out.errKind, _ = classifyClaudeFailure(msg)
+					}
 				}
 				sink.emit(store.LogLine{Type: "error", Content: msg})
 			}

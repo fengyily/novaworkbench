@@ -15,6 +15,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -562,7 +563,11 @@ func developerDecomposePrompt(title, leadIn, workDir, gitBlock string) string {
 			"3. 最后在回复中单独一行输出 [SUBTASKS_READY] 哨兵。\n"+
 			"注意：第 2 步的 Write 文件是后端调度子Agent 的主要依据，务必调用 Write 工具完成，不要只在回复里贴 JSON。\n"+
 			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。\n"+
-			"%s\n",
+			"%s\n"+
+			// The decomposition itself is written with a Write tool call, so
+			// the output-budget constraint applies here too: a breakdown that
+			// blows the model's per-response limit kills the whole turn.
+			promptpkg.OutputBudgetClause,
 		title, subTasksFilePath(workDir), gitBlock)
 }
 
@@ -594,7 +599,11 @@ func agentDirectPrompt(reqID, title, leadIn, workDir, gitBlock string) string {
 			leadIn+
 			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
 			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。\n"+
-			"%s\n",
+			"%s\n"+
+			// This path writes the implementation itself, so it is the most
+			// exposed one to the "model emitted one huge file and got
+			// truncated" failure. The clause keeps each Write / Edit small.
+			promptpkg.OutputBudgetClause,
 		reqID, title, workDir, gitBlock)
 }
 

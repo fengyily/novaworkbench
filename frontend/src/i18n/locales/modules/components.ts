@@ -167,6 +167,8 @@ export const components = {
     errorKindStalled: '流静默（看门狗终止）',
     errorKindIdleTimeout: '静默超时（空闲看门狗终止）',
     errorKindTerminated: '被主动中止（未产生结果）',
+    errorKindOutputLimit: '模型单次输出超上限（回复被截断）',
+    errorKindContextWindow: '会话上下文窗口耗尽',
     errorKindUnknown: '未知原因',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 主 Agent 正在生成汇总报告…',

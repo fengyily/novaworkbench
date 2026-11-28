@@ -911,6 +911,16 @@ func main() {
 	mux.HandleFunc("GET /api/settings/effort", settingH.GetEffortConfig)
 	mux.HandleFunc("PUT /api/settings/effort", settingH.UpdateEffortConfig)
 
+	// Coding-stage recovery policy (settings) — how many times the coding
+	// stage may automatically RESUME a turn that the claude CLI aborted
+	// because the model filled its per-response output budget
+	// ("exceeded the N output token maximum"). 0 = never resume, only label
+	// the failure. Read live before every coding run, so a change needs no
+	// restart. Permission key reuses "setting.llm" (same as the effort /
+	// subtask settings).
+	mux.HandleFunc("GET /api/settings/coding-recovery", settingH.GetCodingRecoveryConfig)
+	mux.HandleFunc("PUT /api/settings/coding-recovery", settingH.UpdateCodingRecoveryConfig)
+
 	// Agent Server remote work root — editable in 设置 → Agent 服务器; env
 	// NOVA_AGENT_WORKTREE_ROOT still wins. Remote workers resync before runs.
 	mux.HandleFunc("GET /api/settings/agent-worktree", settingH.GetAgentWorktree)

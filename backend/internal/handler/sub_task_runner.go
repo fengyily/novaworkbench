@@ -1703,6 +1703,15 @@ func (r *SubTaskRunner) run(
 	// 工作目录安全约束：禁止删除/重置工作目录、工作目录消失即停止、禁止轮询 CI。
 	// 2026-10-24 事故的直接教训（子任务在真实仓库里跑 rm -rf + clone 恢复循环）。
 	prompt += "\n" + promptpkg.WorkingDirSafety + "\n"
+	// 输出体积约束：子任务是要落盘代码的执行者，一次 Write 写太大就会撞上
+	// 模型的单次输出上限（"exceeded the N output token maximum"）而整轮失败。
+	//
+	// Review 子任务不注入：评审只读不写文件，这条约束对它没有意义，反而会
+	// 稀释评审指令的注意力。plan 阶段同样不注入——它产出的是一份方案文档，
+	// 不是代码，单文件体积天然受限。
+	if !isReview && !planMode {
+		prompt += "\n" + promptpkg.OutputBudgetClause + "\n"
+	}
 	// Replace the legacy GitCommitConvention tail with the full project
 	// context block (GitCommitConvention lives at the head of the rendered
 	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
@@ -2656,6 +2665,9 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			finalStatus = model.SubTaskStatusError
 			artifactBody = "❌ " + strings.TrimPrefix(out.errMsg, "❌ ")
 			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+			if out.errKind != "" {
+				job.SetErrorKind(out.errKind)
+			}
 		case planMarkdown == "":
 			finalStatus = model.SubTaskStatusError
 			artifactBody = "❌ Claude 未产出实施方案，请重试"
@@ -2706,6 +2718,15 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 				// Distinct from the two above: nothing is wrong with the proxy
 				// or the stream — the run simply never got anywhere.
 				job.SetErrorKind("terminated")
+			} else if out.errKind != "" {
+				// The CLI rejected the turn for a reason we can name (e.g. the
+				// model's per-response output budget was exhausted and the
+				// reply was truncated). The batch's automatic re-arm already
+				// retries a failed child, and the retry prompt carries the
+				// "write in small pieces" constraint — so labelling the
+				// failure is enough; the child does not need its own resume
+				// loop.
+				job.SetErrorKind(out.errKind)
 			}
 		case out.finalResult == "":
 			finalStatus = model.SubTaskStatusError

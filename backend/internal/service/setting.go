@@ -113,6 +113,34 @@ const (
 	maxGitSyncTimeoutSeconds     = 600
 )
 
+// Setting key + defaults for the coding stage's output-limit recovery.
+//
+// The claude CLI aborts a turn whose reply exceeds the model's per-response
+// output budget ("Claude's response exceeded the N output token maximum").
+// The platform recovers by RESUMING the same session with a "write in small
+// pieces" constraint; this setting caps how many times that resume may
+// happen, so a model that keeps trying to emit one huge file cannot burn
+// tokens in an unbounded loop.
+//
+//   - coding.output_limit_auto_resume: maximum automatic resumes after an
+//     output-limit abort. 0 disables the recovery entirely (the failure is
+//     then only labelled, never resumed); the shipped default is 1; the
+//     value is clamped to [0, 3].
+//
+// Read live before every coding run, so a change takes effect on the next
+// run without restarting the backend — same hot-reload pattern as the
+// settings above.
+const (
+	settingCodingOutputLimitAutoResume = "coding.output_limit_auto_resume"
+
+	// DefaultOutputLimitAutoResume is the shipped number of automatic
+	// resumes: one. Enough to recover from a single oversized Write, small
+	// enough that a pathological model cannot loop.
+	DefaultOutputLimitAutoResume = 1
+	minOutputLimitAutoResume     = 0
+	maxOutputLimitAutoResume     = 3
+)
+
 // SettingService persists arbitrary key/value settings. The Claude CLI
 // configuration now lives in the dedicated claude_configs table (see
 // ClaudeConfigService); this service still owns the direct HTTP LLM channel
@@ -660,6 +688,47 @@ func (s *SettingService) SetGitSyncTimeout(seconds int) error {
 		seconds = maxGitSyncTimeoutSeconds
 	}
 	return s.Set(settingGitSyncTimeout, strconv.Itoa(seconds))
+}
+
+// OutputLimitAutoResume returns the maximum number of automatic resumes the
+// coding stage may attempt after the model hits its per-response output
+// limit.
+//
+// A missing key, an unparsable value or an out-of-range value all fall back
+// to the shipped default (1) rather than erroring: the settings row is
+// optional, and a broken value must never stop a coding run from starting. A
+// DB error IS returned so the caller can keep its last known good value. The
+// result is always within [0, 3] regardless of what was persisted.
+func (s *SettingService) OutputLimitAutoResume() (int, error) {
+	raw, err := s.Get(settingCodingOutputLimitAutoResume)
+	if err != nil {
+		return DefaultOutputLimitAutoResume, err
+	}
+	n, cerr := strconv.Atoi(strings.TrimSpace(raw))
+	if cerr != nil {
+		return DefaultOutputLimitAutoResume, nil
+	}
+	return clampOutputLimitAutoResume(n), nil
+}
+
+// SetOutputLimitAutoResume persists the automatic-resume budget, clamped to
+// [0, 3]. The clamp runs on write so a bad payload can never end up on disk
+// in a shape the coding stage would have to defend against on every read.
+// Nothing else happens on write: the coding stage re-reads the budget before
+// every run, which is what makes the change hot without a restart.
+func (s *SettingService) SetOutputLimitAutoResume(n int) error {
+	return s.Set(settingCodingOutputLimitAutoResume, strconv.Itoa(clampOutputLimitAutoResume(n)))
+}
+
+// clampOutputLimitAutoResume keeps the resume budget inside [0, 3].
+func clampOutputLimitAutoResume(n int) int {
+	if n < minOutputLimitAutoResume {
+		return minOutputLimitAutoResume
+	}
+	if n > maxOutputLimitAutoResume {
+		return maxOutputLimitAutoResume
+	}
+	return n
 }
 
 // MaskToken returns a redacted preview of a secret token for API responses.

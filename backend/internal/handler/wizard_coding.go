@@ -1598,7 +1598,6 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// memory channel (a materialized copy granted via --add-dir), not
 	// through the prompt text.
 	claudeDoc.ApplyTo(&codingOpts)
-	cmd := h.llm.StreamCmd(stage.ctx, codingOpts)
 	codingProjectID := ""
 	if reqRow != nil {
 		codingProjectID = reqRow.ProjectID
@@ -1611,35 +1610,89 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// code back to origin. The job log + final result semantics match the
 	// local path so the frontend doesn't have to special-case anything.
 	if p.AgentServerID != "" && h.agentSvrSvc != nil {
-		out := h.runRemoteCoding(&remoteCodingInput{
-			job:      job,
-			serverID: p.AgentServerID,
-			req: startCodingReq{
-				ProjectPath:      p.ProjectPath,
-				RequirementTitle: p.RequirementTitle,
-				RequirementDesc:  p.RequirementDesc,
-				RequirementID:    p.RequirementID,
-				BranchName:       p.BranchName,
-				BaseBranch:       p.BaseBranch,
-				Model:            p.Model,
-				Effort:           p.Effort,
-				ReadKnowledge:    p.ReadKnowledge,
-				AgentServerID:    p.AgentServerID,
-			},
-			reqRow:         reqRow,
-			prompt:         prompt,
-			workDir:        workDir,
-			sourceSID:      sourceSID,
-			fork:           fork,
-			sessionArg:     sessionArg,
-			forkSessionID:  forkSessionID,
-			model:          model,
-			Effort:         p.Effort,
-			claudeConfigID: claudeConfigID,
-			usage:          codingUsage,
-			SyncMode:       p.SyncMode,
-			AddDirs:        addDirs,
-		})
+		// Remote path: same output-limit recovery as the local path below.
+		//
+		// The session lives on the AGENT HOST, so a resume needs two links
+		// to hold:
+		//   - down: runRemoteCoding's session down-sync fires when the run
+		//     errored (out.errMsg != ""), so the truncated turn's transcript
+		//     is pulled back to the local machine;
+		//   - up:   the next run's session up-sync pushes that transcript
+		//     back to the agent host before the CLI is invoked with
+		//     --resume.
+		// The resume shape (sourceSID == sessionArg == the coding session,
+		// fork=false) is the same one ContinueCoding's remote branch
+		// already uses, so it is a proven path.
+		remoteMaxResume := 1
+		if h.settingSvc != nil {
+			if n, err := h.settingSvc.OutputLimitAutoResume(); err == nil {
+				remoteMaxResume = n
+			}
+		}
+		remoteAttempt := 0
+		remoteSourceSID := sourceSID
+		remoteSessionArg := sessionArg
+		remoteFork := fork
+		remoteForkSessionID := forkSessionID
+		remotePrompt := prompt
+		var out claudeStreamOutcome
+		for {
+			out = h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: p.AgentServerID,
+				req: startCodingReq{
+					ProjectPath:      p.ProjectPath,
+					RequirementTitle: p.RequirementTitle,
+					RequirementDesc:  p.RequirementDesc,
+					RequirementID:    p.RequirementID,
+					BranchName:       p.BranchName,
+					BaseBranch:       p.BaseBranch,
+					Model:            p.Model,
+					Effort:           p.Effort,
+					ReadKnowledge:    p.ReadKnowledge,
+					AgentServerID:    p.AgentServerID,
+				},
+				reqRow:         reqRow,
+				prompt:         remotePrompt,
+				workDir:        workDir,
+				sourceSID:      remoteSourceSID,
+				fork:           remoteFork,
+				sessionArg:     remoteSessionArg,
+				forkSessionID:  remoteForkSessionID,
+				model:          model,
+				Effort:         p.Effort,
+				claudeConfigID: claudeConfigID,
+				usage:          codingUsage,
+				SyncMode:       p.SyncMode,
+				AddDirs:        addDirs,
+			})
+			if out.errKind != FailureKindOutputTokenLimit || remoteAttempt >= remoteMaxResume {
+				break
+			}
+			// Which session to resume? The CLI-reported id is authoritative
+			// (the forked coding session's id); the persisted coding session
+			// is the fallback.
+			sid := out.sessionID
+			if sid == "" && reqRow != nil {
+				sid = reqRow.CodingSessionID
+			}
+			if sid == "" {
+				break
+			}
+			remoteAttempt++
+			job.Append(store.LogLine{Type: "warning", Content: outputLimitAutoResumeWarning(remoteAttempt, remoteMaxResume)})
+			// Keep the DB pointing at the session we are about to resume —
+			// the up-sync looks the transcript up by the requirement's
+			// session ids.
+			if p.RequirementID != "" {
+				h.persistRemoteCodingSession(p.RequirementID, sid, p.AgentServerID)
+			}
+			remotePrompt = outputLimitResumePrompt()
+			remoteSourceSID = sid
+			remoteSessionArg = sid
+			remoteFork = false
+			remoteForkSessionID = ""
+		}
 		if out.staleSession {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
 			job.Finish(1, store.JobError)
@@ -1647,6 +1700,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		}
 		if out.errMsg != "" {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			if out.errKind != "" {
+				job.SetErrorKind(out.errKind)
+			}
+			if out.errKind == FailureKindOutputTokenLimit && remoteAttempt > 0 {
+				job.Append(store.LogLine{Type: "warning", Content: outputLimitStillFailedHint()})
+			}
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -1694,7 +1753,58 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
-	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
+	// Local execution.
+	//
+	// The claude CLI aborts a turn whose reply exceeds the model's
+	// per-response output budget ("Claude's response exceeded the N output
+	// token maximum") — usually because the model tried to emit one huge
+	// file in a single Write. The reply is truncated mid-file and the whole
+	// turn dies, leaving the requirement half-implemented with a raw English
+	// API error as the only feedback.
+	//
+	// The platform RECOVERS instead of giving up: it resumes the SAME
+	// session with a "write in small pieces" constraint, so the model
+	// picks the work up where it stopped. The resume happens INSIDE this
+	// same job (no second job, no new SSE channel) so the user sees one
+	// continuous log with a "🔄 自动续跑" line rather than two disjointed
+	// failures.
+	//
+	// The budget comes from the settings table and is re-read on every run,
+	// so an operator can turn the recovery off (0) or raise it (max 3)
+	// without a restart. A read failure falls back to 1 — the recovery is
+	// the useful default and must never block a run.
+	maxResume := 1
+	if h.settingSvc != nil {
+		if n, err := h.settingSvc.OutputLimitAutoResume(); err == nil {
+			maxResume = n
+		}
+	}
+	attempt := 0
+	var out claudeStreamOutcome
+	for {
+		// The command MUST be rebuilt per attempt: a resumed run is a new
+		// claude process with different --resume / --session-id flags.
+		cmd := h.llm.StreamCmd(stage.ctx, codingOpts)
+		out = runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, stage.hb, 0, withStallTimeout(codingStallTimeout), withCtx(stage.ctx))
+		if out.errKind != FailureKindOutputTokenLimit || attempt >= maxResume {
+			break
+		}
+		// Which session to resume? The CLI-reported id is authoritative
+		// (for a forked run it is the NEW forked id); the pre-minted id is
+		// the fallback and is already persisted to
+		// requirements.coding_session_id. Without either there is nothing
+		// to resume — fall through to the terminal failure.
+		sid := out.sessionID
+		if sid == "" {
+			sid = newCodingSID
+		}
+		if sid == "" {
+			break
+		}
+		attempt++
+		job.Append(store.LogLine{Type: "warning", Content: outputLimitAutoResumeWarning(attempt, maxResume)})
+		codingOpts = outputLimitResumeOpts(codingOpts, sid, outputLimitResumePrompt())
+	}
 
 	// No-branch mode promises "develop directly on <base>". The agent does not
 	// always honour that: on 2026-10-24 it created `fix/<reqID>`, pushed it,
@@ -1725,6 +1835,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
 		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 			job.SetErrorKind("stalled")
+		}
+		if out.errKind != "" {
+			job.SetErrorKind(out.errKind)
+		}
+		// The automatic resume did not save the turn. Point at the NEXT
+		// level of intervention — splitting the requirement — instead of
+		// letting the user guess.
+		if out.errKind == FailureKindOutputTokenLimit && attempt > 0 {
+			job.Append(store.LogLine{Type: "warning", Content: outputLimitStillFailedHint()})
 		}
 		job.Finish(1, store.JobError)
 		return
@@ -2238,6 +2357,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 				job.SetErrorKind("stalled")
 			}
+			if out.errKind != "" {
+				job.SetErrorKind(out.errKind)
+			}
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -2295,6 +2417,13 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 		return
 	case out.errMsg != "":
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		// The remote path had no error kind at all until now — the local
+		// paths set one but this shared finisher (used by Adjust / Continue
+		// on an Agent Server) did not, so a remote failure always reached
+		// the UI as "unknown reason".
+		if out.errKind != "" {
+			job.SetErrorKind(out.errKind)
+		}
 		job.Finish(1, store.JobError)
 		return
 	case out.finalResult == "":
@@ -2510,6 +2639,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +
 			"判断哪些部分已完成、哪些未完成或需要修复；然后基于技术方案继续完成剩余工作、补齐缺失内容。" +
 			"最后用中文总结本次完成的内容。"
+		// 输出体积约束：续接开发正是"上一轮被截断后重来"的高发场景，
+		// 不加约束的话模型很容易再一次尝试一次性写完整个文件。
+		prompt += "\n" + promptpkg.OutputBudgetClause
 		// Append the per-project "本项目 Git 约定" block — symmetric with the
 		// AdjustCoding fix: ContinueCoding previously had no GitCommitConvention
 		// either, so a "请接着帮我提交推送" follow-up was never going to inherit
@@ -2592,6 +2724,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
 			if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 				job.SetErrorKind("stalled")
+			}
+			if out.errKind != "" {
+				job.SetErrorKind(out.errKind)
 			}
 			job.Finish(1, store.JobError)
 			return

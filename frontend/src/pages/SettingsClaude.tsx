@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { claudeApi, type ClaudeConfigItem, type ModelEntry } from '../api/client';
+import { claudeApi, codingRecoveryApi, type ClaudeConfigItem, type ModelEntry } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
+import { fmtTime } from '../utils/intl';
 import './SettingsClaude.css';
 
 interface ConfigForm {
@@ -197,6 +198,7 @@ export default function SettingsClaude() {
   if (loading) return <div className="settings-empty">{t('settings.claude.loading')}</div>;
 
   return (
+    <>
     <div className="settings-section claude-configs">
       <div className="section-header">
         <div>
@@ -424,6 +426,97 @@ export default function SettingsClaude() {
             </div>
           </div>
         </div>
+      )}
+    </div>
+    <OutputLimitSettings />
+    </>
+  );
+}
+
+// OutputLimitSettings is the "输出上限保护" section.
+//
+// The claude CLI aborts a turn whose reply exceeds the model's per-response
+// output budget ("exceeded the N output token maximum") — usually because
+// the model tried to emit one huge file in a single Write, and the reply was
+// truncated mid-file. The backend recovers by resuming the same session with
+// a "write in small pieces" constraint; this counter caps how many times
+// that resume may happen.
+//
+// It lives on the Claude-configs page because the failure is a property of
+// the model / endpoint configured there, and because it is one of the
+// "AI execution channel" knobs (same permission family as the effort and
+// sub-task settings).
+function OutputLimitSettings() {
+  const { t } = useTranslation();
+  const [autoResume, setAutoResume] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [savedAt, setSavedAt] = useState('');
+
+  useEffect(() => {
+    codingRecoveryApi.get()
+      .then(cfg => setAutoResume(cfg.output_limit_auto_resume))
+      .catch(err => setError(errorMessage(err)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const cfg = await codingRecoveryApi.update({
+        output_limit_auto_resume: Math.max(0, Math.min(3, Math.floor(autoResume) || 0)),
+      });
+      // Write back what the server actually persisted (it clamps too), so
+      // the field can never show a value the backend would reject.
+      setAutoResume(cfg.output_limit_auto_resume);
+      setSavedAt(fmtTime(new Date()));
+    } catch (err: unknown) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="section-header">
+        <div>
+          <h3 className="settings-section-title">{t('settings.claude.outputLimitTitle')}</h3>
+          <p className="settings-section-desc">{t('settings.claude.outputLimitDesc')}</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="settings-empty">{t('settings.claude.loading')}</div>
+      ) : (
+        <>
+          {error && <div className="form-error">{error}</div>}
+
+          <div className="form-group">
+            <label>{t('settings.claude.outputLimitLabel')}</label>
+            <input
+              className="form-input"
+              type="number"
+              min={0}
+              max={3}
+              value={autoResume}
+              disabled={saving}
+              onChange={e => setAutoResume(Number(e.target.value))}
+            />
+            <small className="form-hint">{t('settings.claude.outputLimitHint')}</small>
+          </div>
+
+          <div className="form-actions stack-mobile">
+            <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+              {saving ? t('settings.claude.outputLimitSaving') : t('settings.claude.outputLimitSave')}
+            </button>
+            {savedAt && !saving && (
+              <span className="form-hint">{t('settings.claude.outputLimitSavedAt', { time: savedAt })}</span>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
