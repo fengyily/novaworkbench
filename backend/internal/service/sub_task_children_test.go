@@ -26,18 +26,18 @@ func TestSubTaskService_ListChildren(t *testing.T) {
 	}
 
 	// root → child1 → grandchild
-	root, err := svc.Create(reqID, "root", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, "", model.SubTaskSourceManual, model.SubTaskReportModeAuto)
+	root, err := svc.Create(reqID, "root", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, "", model.SubTaskSourceManual, model.SubTaskReportModeAuto, "")
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	child1, err := svc.Create(reqID, "child1", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, root.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto)
+	child1, err := svc.Create(reqID, "child1", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, root.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto, "")
 	if err != nil {
 		t.Fatalf("create child1: %v", err)
 	}
-	if _, err := svc.Create(reqID, "grandchild", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, child1.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto); err != nil {
+	if _, err := svc.Create(reqID, "grandchild", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, child1.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto, ""); err != nil {
 		t.Fatalf("create grandchild: %v", err)
 	}
-	child2, err := svc.Create(reqID, "child2", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, root.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto)
+	child2, err := svc.Create(reqID, "child2", "p", "", "", "", 0, "", model.SubTaskSessionModeFork, root.ID, model.SubTaskSourceManual, model.SubTaskReportModeAuto, "")
 	if err != nil {
 		t.Fatalf("create child2: %v", err)
 	}

@@ -31,6 +31,7 @@ import {
   requirementsApi,
   requirementDirsApi,
   type Attachment,
+  type Requirement,
   type RequirementDir,
   type RequirementReference,
   type SplitReference,
@@ -394,6 +395,22 @@ export function RequirementSplitModal({
   const [ctxRefs, setCtxRefs] = useState<RequirementReference[]>([]);
   const [ctxLoading, setCtxLoading] = useState(false);
 
+  /**
+   * The sub-requirements produced by the PREVIOUS split batch — the ones
+   * carrying a `split_batch_id`.
+   *
+   * Non-empty ⇒ this is a RE-SPLIT: confirming will discard them and
+   * replace them with a fresh batch cut from the current plan (which the
+   * user may have regenerated since). The dialog has to say so BEFORE the
+   * AI burns a run — and the confirm request has to carry the explicit
+   * `replace_existing` flag the backend demands.
+   *
+   * Hand-made children (quick-create / `SetParent`) have an EMPTY
+   * `split_batch_id`: they are NOT part of a split batch and are never
+   * discarded by a re-split, so they are filtered out here.
+   */
+  const [oldBatchChildren, setOldBatchChildren] = useState<Requirement[]>([]);
+
   const streamRef = useRef<EventStream | null>(null);
   /** True once the modal unmounted — guards the async start() against
    *  touching state that no longer exists. */
@@ -443,6 +460,11 @@ export function RequirementSplitModal({
     setRunState(null);
     setRestored(false);
     setReconnecting(false);
+    // The parent renders the modal conditionally, so closing it unmounts
+    // the component and throws away every piece of local state. Clearing
+    // the previous batch here keeps a reopened dialog from flashing the
+    // stale re-split banner before the fresh read lands.
+    setOldBatchChildren([]);
     onClose();
   }, [onClose]);
 
@@ -746,12 +768,83 @@ export function RequirementSplitModal({
     };
   }, [open, requirementId]);
 
+  // Read the requirement's children so the config stage can tell the user
+  // whether this split would DISCARD a previous batch.
+  //
+  // A separate read from the splitState one above: the two answer different
+  // questions (how far the last run got vs whether a previous batch
+  // exists) and neither depends on the other. A failure here must not hide
+  // the rest of the dialog — an unreadable child list simply means "no
+  // previous batch", and the backend still refuses a destructive confirm
+  // without the explicit flag.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void requirementsApi
+      .listChildren(requirementId)
+      .then((list) => {
+        if (cancelled) return;
+        setOldBatchChildren((list.children ?? []).filter((c) => !!c.split_batch_id));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setOldBatchChildren([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, requirementId]);
+
   // Keep the stream panel pinned to the newest line.
   useEffect(() => {
     const el = streamBodyRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [streamLines]);
+
+  /**
+   * Split error codes → the text the user should read.
+   *
+   * The map holds FUNCTIONS, not key strings, on purpose: the i18n key
+   * checker (scripts/check-i18n-keys.mjs) only validates a LITERAL
+   * `t('…')` call, so a computed key would never be checked and a typo
+   * would surface as a raw key at runtime.
+   */
+  const SPLIT_ERROR_TEXT = useMemo<Record<string, () => string>>(
+    () => ({
+      SPLIT_ALREADY_SPLIT: () => t('requirements.split.errAlreadySplit'),
+      SPLIT_ALREADY_DEVELOPED: () => t('requirements.split.errDeveloped'),
+      SPLIT_NO_DESIGN: () => t('requirements.split.errNoDesign'),
+      SPLIT_KIND_UNSUPPORTED: () => t('requirements.split.errKind'),
+      SPLIT_PARENT_IS_CHILD: () => t('requirements.split.errIsChild'),
+      SPLIT_PARENT_ARCHIVED: () => t('requirements.split.errArchived'),
+      SPLIT_IN_PROGRESS: () => t('requirements.split.errInProgress'),
+      SPLIT_DEPENDENCY_CYCLE: () => t('requirements.split.errCycle'),
+      SPLIT_CHILDREN_IN_PROGRESS: () => t('requirements.split.errChildrenInProgress'),
+      SPLIT_CONFLICT: () => t('requirements.split.errConflict'),
+    }),
+    [t],
+  );
+
+  /**
+   * splitErrorText turns a failed request into something a user can act on.
+   *
+   * `ApiError.message` is `"CODE: <server text>"` — the raw code prefix is
+   * noise for the reader, so the code is looked up in the map above and the
+   * server's own wording is only used as the fallback for codes we have no
+   * translation for.
+   */
+  const splitErrorText = useCallback(
+    (err: unknown): string => {
+      if (err instanceof ApiError) {
+        const hit = SPLIT_ERROR_TEXT[err.code];
+        if (hit) return hit();
+        return err.detail || err.message;
+      }
+      return t('requirements.split.errGeneric', { msg: String(err) });
+    },
+    [SPLIT_ERROR_TEXT, t],
+  );
 
   // start kicks off one split run with the configuration the user picked.
   const start = useCallback(async () => {
@@ -798,10 +891,10 @@ export function RequirementSplitModal({
         }
         return;
       }
-      setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
+      setError(splitErrorText(err));
       setStage('config');
     }
-  }, [requirementId, model, configId, agentServerId, splitEffortValue, t]);
+  }, [requirementId, model, configId, agentServerId, splitEffortValue, splitErrorText]);
 
   const update = (index: number, patch: Partial<Row>) => {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
@@ -908,6 +1001,10 @@ export function RequirementSplitModal({
             return { from: a, to: b, reason: ai?.reason || undefined };
           }),
           source_branch: sourceBranch.trim() || undefined,
+          // The explicit "discard the previous batch" authorization. The
+          // backend refuses a destructive confirm without it, so it goes
+          // out exactly when there IS a previous batch to discard.
+          replace_existing: oldBatchChildren.length > 0,
         },
         controller.signal,
       );
@@ -923,7 +1020,7 @@ export function RequirementSplitModal({
       if (controller.signal.aborted) {
         setError(t('requirements.split.confirmTimeout'));
       } else {
-        setError(err instanceof ApiError ? err.message : t('requirements.split.errGeneric', { msg: String(err) }));
+        setError(splitErrorText(err));
       }
     } finally {
       clearInterval(ticker);
@@ -1019,6 +1116,35 @@ export function RequirementSplitModal({
           {stage === 'config' && (
             <div className="req-split-config">
               <div className="req-split-config-title">{t('requirements.split.configTitle')}</div>
+
+              {/* ── The re-split warning ──
+                  This requirement already carries a batch of sub-requirements
+                  from a previous split. Confirming will DISCARD them and
+                  replace them with a fresh batch cut from the current plan
+                  (which the user may have regenerated since). The user has to
+                  see that before the AI burns a run — and the confirm
+                  request carries the explicit authorization the backend
+                  demands. */}
+              {oldBatchChildren.length > 0 && (
+                <div className="req-split-resplit-warn">
+                  <div className="req-split-resplit-title">
+                    ⚠️ {t('requirements.split.resplitTitle')}
+                  </div>
+                  <div className="req-split-resplit-text">
+                    {t('requirements.split.resplitWarn', { count: oldBatchChildren.length })}
+                  </div>
+                  <ul className="req-split-resplit-list">
+                    {oldBatchChildren.slice(0, 5).map((c) => (
+                      <li key={c.id}>{c.title || t('requirements.split.noTitle')}</li>
+                    ))}
+                    {oldBatchChildren.length > 5 && (
+                      <li>
+                        {t('requirements.split.resplitListMore', { count: oldBatchChildren.length - 5 })}
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
 
               <div className="req-split-config-field">
                 <span className="req-split-config-label">{t('requirements.split.modelLabel')}</span>
@@ -1419,7 +1545,9 @@ export function RequirementSplitModal({
               <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirm()} disabled={!canConfirm}>
                 {busy
                   ? t('requirements.split.confirming', { sec: confirmElapsed })
-                  : t('requirements.split.confirm', { count: rows.length })}
+                  : oldBatchChildren.length > 0
+                    ? t('requirements.split.resplitConfirm', { count: rows.length })
+                    : t('requirements.split.confirm', { count: rows.length })}
               </button>
             </>
           )}

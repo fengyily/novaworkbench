@@ -90,6 +90,10 @@ func (s *spyProjectSvc) SyncDesignBase(ctx context.Context, projectID, baseBranc
 	return service.GitSyncResult{}, nil
 }
 
+func (s *spyProjectSvc) FetchBaseBranch(ctx context.Context, projectID, baseBranch string, timeout time.Duration) (service.FetchBaseResult, error) {
+	return service.FetchBaseResult{Skipped: true, Reason: "spy"}, nil
+}
+
 func (s *spyProjectSvc) OriginURL(projectID string) (string, error) {
 	return "", nil
 }
@@ -106,6 +110,12 @@ func (s *spyProjectSvc) UpdateSyncStatus(id, status, commit string) {}
 // the pre-feature behavior).
 func (s *spyProjectSvc) ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error) {
 	return nil, nil
+}
+
+// ReadDiskClaudeDoc reports no CLAUDE.md in the checkout — the spy stands
+// for a repository that ships none.
+func (s *spyProjectSvc) ReadDiskClaudeDoc(projectPath string) (string, bool, error) {
+	return "", false, nil
 }
 
 // runEnsureProjectDir is the shared test body for the four

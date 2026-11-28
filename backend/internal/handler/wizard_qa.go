@@ -137,61 +137,17 @@ type qaSessionPlan struct {
 //     failed turn may have left a half-written session behind), nil when the
 //     thread is empty.
 //
-// Three branches:
-//
-//  1. resume — the thread's QA session is alive and still matches the stage
-//     session it was forked from. Continue it.
-//  2. fork   — the stage session exists but the thread's QA session belongs to
-//     a DIFFERENT stage session: the user re-ran the stage (re-design /
-//     re-develop), so the old thread context is stale. Fork a NEW QA session
-//     from the current stage session. The old turns are kept for display.
-//  3. fresh  — there is neither a stage session to fork nor a QA session to
-//     continue. Start over with the context pasted into the prompt.
-//
-// The "S == ''" condition in branch 1 covers "the user compressed the stage
-// session away": the QA session itself is still alive, so the thread continues
-// instead of needlessly re-opening a new segment.
-//
-// The "latest.source_session_id == ''" condition covers a DEGRADED previous
-// turn (the stage session was gone, so the turn ran fresh with the context
-// pasted into the prompt): its session holds that context plus the earlier
-// Q&A, so continuing it preserves the thread. Without this condition the very
-// next question would re-fork from the stage session and silently drop the
-// Q&A history the user just built up.
+// The decision tree itself lives in qa_session_plan.go — it is shared with
+// the cross-requirement design-adjustment thread, which asks the same
+// question against a different turn model. This function is only the
+// translation from a RequirementQATurn to that tree's input.
 func resolveQASession(stageSID string, latest *model.RequirementQATurn) qaSessionPlan {
-	stageSID = strings.TrimSpace(stageSID)
-	qaSID := ""
-	sourceSnapshot := ""
+	src := qaSessionSource{StageSID: stageSID}
 	if latest != nil {
-		qaSID = strings.TrimSpace(latest.SessionID)
-		sourceSnapshot = strings.TrimSpace(latest.SourceSessionID)
+		src.ThreadSID = latest.SessionID
+		src.ThreadSourceSID = latest.SourceSessionID
 	}
-
-	if qaSID != "" && (sourceSnapshot == "" || stageSID == sourceSnapshot || stageSID == "") {
-		return qaSessionPlan{
-			Mode:         qaModeResume,
-			ResumeSID:    qaSID,
-			// Carry the fork source forward. A resumed turn did NOT fork
-			// again, so the thread's source session is still the one the
-			// first turn forked from — dropping it would make the next
-			// "did the stage get re-run?" comparison look like a mismatch
-			// and trigger a needless re-fork.
-			SourceSID:    sourceSnapshot,
-			NewSessionID: qaSID,
-			Resumed:      true,
-		}
-	}
-	if stageSID != "" {
-		return qaSessionPlan{
-			Mode:         qaModeFork,
-			SourceSID:    stageSID,
-			NewSessionID: util.NewUUID(),
-		}
-	}
-	return qaSessionPlan{
-		Mode:         qaModeFresh,
-		NewSessionID: util.NewUUID(),
-	}
+	return resolveQASessionPlan(src)
 }
 
 // AskStageQAReq is the body of POST /api/wizard/qa-chat.

@@ -46,7 +46,50 @@ type SubTaskService struct {
 var (
 	ErrAlreadyRedoing    = errors.New("sub_task is not in 'error' status — 重做 requires a failed sub-task")
 	ErrAlreadyContinuing = errors.New("sub_task is not in 'error' or 'stopped' status — 继续 requires an interrupted sub-task")
+	// ErrAlreadyConverting is returned by ConvertPlanToDev when the guarded
+	// UPDATE matched no row — the row is no longer a finished plan-mode
+	// sub-task (already converted, or never finished its plan phase). The
+	// guard lives in the WHERE clause (not in a preceding SELECT) so the
+	// check and the flip are one atomic statement: two concurrent
+	// "开始开发" clicks produce exactly one winner and one 409.
+	ErrAlreadyConverting = errors.New("sub_task is not a finished plan-mode sub-task — 开始开发 requires a completed 方案")
 )
+
+// subTaskSelectColsPrefix / subTaskSelectColsSuffix are the shared column
+// list for every SELECT that feeds scanSubTask.
+//
+// Why a constant: the list is ~44 columns long and feeds a POSITIONAL scan
+// (scanSubTask). Adding a column in the middle shifts every following one
+// and silently mis-assigns fields (the model column would be read as the
+// tier, or vice versa) — a bug that compiles, passes a smoke test and is
+// nearly impossible to spot by eye. One constant means one place to edit.
+//
+// The list is split in two because the agent_server_name expression differs
+// between sites: FindRecentPushForReq uses a literal empty string (it never
+// shows the name), the other seven use a correlated subquery.
+//
+// APPEND-ONLY RULE: a new column goes at the very END of the suffix (after
+// work_dir), and its Scan target goes at the very END of scanSubTask.
+const subTaskSelectColsPrefix = `id, requirement_id, parent_subtask_id, title, prompt, status,
+	session_id, source_session_id, job_id, artifact, model, claude_config_id,
+	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+	cost_cents, duration_seconds,
+	created_at, updated_at, completed_at, started_at,
+	batch_id, batch_seq, batch_id_seq_run, source,
+	agent_server_id, `
+
+const subTaskSelectColsSuffix = `
+	session_mode, retry_count,
+	report_mode,
+	phase_understanding, phase_implementation, phase_summary, phase_emitted,
+	task_kind, review_id, review_round, effort,
+	child_pid, child_pgid, work_dir, mode`
+
+// subTaskAgentServerNameExpr is the correlated subquery that resolves
+// agent_servers.name for the read paths that display the server name.
+// FindRecentPushForReq uses a literal empty string instead (it never shows
+// the name).
+const subTaskAgentServerNameExpr = `COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),`
 
 func NewSubTaskService(database *db.DB, archiveSvc *ReportArchiveService) *SubTaskService {
 	return &SubTaskService{db: database, archiveSvc: archiveSvc}
@@ -106,7 +149,12 @@ func (s *SubTaskService) notifyChanged(reqID string) {
 // defaults to SubTaskSourceManual — pre-existing callers that omit the field
 // keep the original behaviour, while dispatchPushPRSubTask can pass
 // SubTaskSourcePushPR so the idempotency guard can find it later.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source, reportMode string) (*model.SubTask, error) {
+//
+// mode stamps the row's execution mode (see model.SubTaskMode*). Empty
+// defaults to SubTaskModeAuto — the historical behaviour. Only the manual
+// "方案先行" entry point passes SubTaskModePlan; the orchestrated / Review /
+// adjust paths leave it empty so they keep running as auto.
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source, reportMode, mode string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -129,15 +177,18 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	if reportMode == "" {
 		reportMode = model.SubTaskReportModeAuto
 	}
+	if mode == "" {
+		mode = model.SubTaskModeAuto
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, report_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, report_mode, mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, source, agentServerID,
-		sessionMode, reportMode, now, now)
+		sessionMode, reportMode, mode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
@@ -157,6 +208,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
 		ReportMode:       reportMode,
+		Mode:             mode,
 		TaskKind:         model.SubTaskKindCode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
@@ -231,9 +283,13 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
 		ReportMode:       reportMode,
-		TaskKind:         model.SubTaskKindCode,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		// The INSERT does not carry a mode column: batch children are always
+		// 'auto' (the schema default), and the auto-orchestrate path has no
+		// human review gate for a plan to sit in.
+		Mode:       model.SubTaskModeAuto,
+		TaskKind:   model.SubTaskKindCode,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}, nil
 }
 
@@ -365,18 +421,7 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 	if lookbackSec <= 0 {
 		lookbackSec = 90
 	}
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, '' AS agent_server_name,
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+"'' AS agent_server_name,"+subTaskSelectColsSuffix+`
 		FROM sub_tasks
 		WHERE requirement_id = ?
 		  AND source = ?
@@ -451,18 +496,7 @@ func (s *SubTaskService) HasCommitPushChild(batchID string) (bool, error) {
 // rows with the same created_at (millisecond ties possible across DBs)
 // keep a stable order.
 func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -485,6 +519,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 	// (the deferred call above is now a no-op).
 	rows.Close()
 	s.attachEffectiveEnv(out, s.requirementAgentServerID(reqID))
+	s.attachPlanFlags(out)
 	return out, nil
 }
 
@@ -493,18 +528,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 // matches the URL parameter happens in the handler, not here (this service
 // stays a thin SQL wrapper).
 func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -524,7 +548,50 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 	rows.Close()
 	one := []model.SubTask{*st}
 	s.attachEffectiveEnv(one, s.requirementAgentServerID(st.RequirementID))
+	s.attachPlanFlags(one)
 	return &one[0], nil
+}
+
+// attachPlanFlags marks the rows that carry a saved implementation plan.
+//
+// One extra query per read — NOT per row: the plan table is tiny and the
+// card needs to know whether to show the plan section even AFTER the row
+// was converted to auto mode (the plan is the evidence that the work was
+// two-phase, and it has to stay visible above the implementation report).
+//
+// A failure here is not fatal: the flag simply stays false and the card
+// hides the plan section (the plan is still reachable through
+// GET .../plan).
+func (s *SubTaskService) attachPlanFlags(rows []model.SubTask) {
+	if len(rows) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(rows))
+	idx := make(map[string]int, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+		idx[rows[i].ID] = i
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	planRows, err := s.db.Query(`SELECT sub_task_id FROM sub_task_plans WHERE sub_task_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		log.Printf("[sub-task] failed to load plan flags: %v", err)
+		return
+	}
+	defer planRows.Close()
+	for planRows.Next() {
+		var id string
+		if err := planRows.Scan(&id); err != nil {
+			return
+		}
+		if i, ok := idx[id]; ok {
+			rows[i].HasPlan = true
+		}
+	}
 }
 
 // Subtree returns rootID's row plus every descendant (children linked via
@@ -554,18 +621,7 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		q := `SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-			session_id, source_session_id, job_id, artifact, model, claude_config_id,
-			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-			cost_cents, duration_seconds,
-			created_at, updated_at, completed_at, started_at,
-			batch_id, batch_seq, batch_id_seq_run, source,
-			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-			session_mode, retry_count,
-			report_mode,
-			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+		q := "SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -607,18 +663,7 @@ func (s *SubTaskService) ListChildren(parentID string) ([]model.SubTask, error) 
 	if strings.TrimSpace(parentID) == "" {
 		return []model.SubTask{}, nil
 	}
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 		FROM sub_tasks WHERE parent_subtask_id = ? ORDER BY created_at ASC, id ASC`, parentID)
 	if err != nil {
 		return nil, err
@@ -668,6 +713,12 @@ func (s *SubTaskService) DeleteByIDs(ids []string) error {
 	if _, err := s.db.Exec(`DELETE FROM sub_task_thinking WHERE sub_task_id IN (`+strings.Join(placeholders, ",")+`)`, args...); err != nil {
 		return fmt.Errorf("cleanup sub_task_thinking: %w", err)
 	}
+	// The plan text lives in its own table (no FK — SQLite never enables
+	// foreign_keys), so it has to be cleaned up explicitly, exactly like the
+	// thinking text above.
+	if _, err := s.db.Exec(`DELETE FROM sub_task_plans WHERE sub_task_id IN (`+strings.Join(placeholders, ",")+`)`, args...); err != nil {
+		return fmt.Errorf("cleanup sub_task_plans: %w", err)
+	}
 	_, err := s.db.Exec(`DELETE FROM sub_tasks WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	return err
 }
@@ -690,24 +741,37 @@ func (s *SubTaskService) GetThinking(id string) (string, error) {
 	return content, err
 }
 
+// SavePlan upserts the implementation plan produced by a plan-mode run.
+//
+// Same shape as SaveThinking: the plan can reach tens of KB, so it lives in
+// its own table (sub_task_plans) instead of on the sub_tasks row — the List /
+// SSE payloads never carry it. The card fetches it lazily on expand.
+func (s *SubTaskService) SavePlan(id, content string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO sub_task_plans (sub_task_id, content, created_at, updated_at) VALUES (?, ?, ?, ?)`+
+		s.db.OnConflict("sub_task_id", "content = excluded.content, updated_at = excluded.updated_at"),
+		id, content, now, now)
+	return err
+}
+
+// GetPlan returns the stored implementation plan, or "" when none was
+// recorded (a row that never ran in plan mode).
+func (s *SubTaskService) GetPlan(id string) (string, error) {
+	var content string
+	err := s.db.QueryRow(`SELECT content FROM sub_task_plans WHERE sub_task_id = ?`, id).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return content, err
+}
+
 // ListByBatch returns every sub-task attached to batchID, ordered by
 // batch_seq ASC (then created_at ASC as a tie-breaker for the legacy
 // batch_seq=0 manual rows). Used by OrchestrationQueue to enumerate a batch's
 // children when computing summary inputs. Returns an empty slice when the
 // batch has no rows — never nil.
 func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -740,6 +804,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 	if parentReqID != "" {
 		s.attachEffectiveEnv(out, s.requirementAgentServerID(parentReqID))
 	}
+	s.attachPlanFlags(out)
 	return out, nil
 }
 
@@ -1003,18 +1068,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		// docstring: a batch may hold several running rows at once, and
 		// handing back one we didn't promote re-dispatches a live child while
 		// stranding the row we did promote.
-		rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-			session_id, source_session_id, job_id, artifact, model, claude_config_id,
-			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-			cost_cents, duration_seconds,
-			created_at, updated_at, completed_at, started_at,
-			batch_id, batch_seq, batch_id_seq_run, source,
-			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-			session_mode, retry_count,
-			report_mode,
-			phase_understanding, phase_implementation, phase_summary, phase_emitted,
-			task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+		rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
 			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
@@ -1115,18 +1169,7 @@ func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) erro
 //
 // Returns nil (not an empty slice) when there is nothing to do.
 func (s *SubTaskService) ListOrphanPending(olderThan time.Time) ([]model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at, started_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count,
-		report_mode,
-		phase_understanding, phase_implementation, phase_summary, phase_emitted,
-		task_kind, review_id, review_round, effort,
-			child_pid, child_pgid, work_dir
+	rows, err := s.db.Query("SELECT "+subTaskSelectColsPrefix+subTaskAgentServerNameExpr+subTaskSelectColsSuffix+`
 		FROM sub_tasks
 		WHERE status = ?
 		  AND (job_id = '' OR job_id IS NULL)
@@ -1623,6 +1666,11 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 // model the previous attempt used. SaveThinking upserts on the next run, so
 // deleting the stale thinking row here is safe even if a crash lands between
 // the UPDATE and the DELETE.
+//
+// The `mode` column is deliberately NOT in the SET list: it is a work-item
+// property (like session_mode / report_mode), not a result of the previous
+// attempt. A FAILED plan-mode sub-task that the user retries must re-run the
+// PLAN phase, not silently become an implementation run.
 func (s *SubTaskService) resetForManualRerun(id, modelOverride, statusClause string, statusArgs []any, conflictErr error) (*model.SubTask, error) {
 	if id == "" {
 		return nil, errors.New("sub_task_id is required")
@@ -1689,6 +1737,43 @@ func (s *SubTaskService) RedoReset(id, modelOverride string) (*model.SubTask, er
 func (s *SubTaskService) ContinueReset(id, modelOverride string) (*model.SubTask, error) {
 	return s.resetForManualRerun(id, modelOverride, "status IN (?, ?)",
 		[]any{model.SubTaskStatusError, model.SubTaskStatusStopped}, ErrAlreadyContinuing)
+}
+
+// ConvertPlanToDev re-arms a FINISHED plan-mode sub-task for the
+// implementation phase, in place (the row keeps its identity — one sub-task
+// stays one row and one card).
+//
+// One atomic UPDATE flips BOTH status and mode. They must move together: two
+// separate statements would let a crash in between leave the row at
+// status='pending', mode='plan', and the orphan reaper would then re-dispatch
+// it in plan mode — the user thinks it is developing, but they get a second
+// plan instead of code.
+//
+// The guard is `status='done' AND mode='plan'`, so an ordinary
+// (mode='auto') sub-task is never rolled back by this path.
+//
+// The saved plan is deliberately NOT deleted: the implementation phase injects
+// it into the prompt as the spec it must follow.
+func (s *SubTaskService) ConvertPlanToDev(id string) (*model.SubTask, error) {
+	if id == "" {
+		return nil, errors.New("sub_task_id is required")
+	}
+	now := time.Now()
+	res, err := s.db.Exec(`UPDATE sub_tasks SET
+		status='pending', mode='auto', artifact='', job_id='',
+		input_tokens=0, output_tokens=0, cache_creation_tokens=0, cache_read_tokens=0,
+		cost_cents=0, duration_seconds=0, started_at=NULL, completed_at=NULL,
+		phase_understanding='', phase_implementation='', phase_summary='', phase_emitted=0,
+		updated_at=?
+		WHERE id=? AND status=? AND mode=?`,
+		now, id, model.SubTaskStatusDone, model.SubTaskModePlan)
+	if err != nil {
+		return nil, fmt.Errorf("convert plan sub_task %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrAlreadyConverting
+	}
+	return s.Get(id)
 }
 
 // MarkStopped flips a running sub_task into the "stopped" terminal state
@@ -2405,9 +2490,12 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
 // share the column order without each method carrying its own Scan list.
-// The SELECT must end with `source, agent_server_id, <server name>,
-// session_mode, retry_count` — the server name being a correlated subquery /
-// join resolving agent_servers.name.
+//
+// The column list lives in subTaskSelectColsPrefix / subTaskSelectColsSuffix
+// (the server-name expression differs per site and is spliced between them).
+// The rule that actually matters is the APPEND-ONLY one documented inside the
+// Scan call below: a new column goes at the very END of the suffix AND at the
+// very END of this scan, or every following field is silently mis-assigned.
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
@@ -2441,6 +2529,11 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.ChildPID,
 		&st.ChildPGID,
 		&st.WorkDir,
+		// mode follows the same append-only rule (see the effort note
+		// above): 'auto' (implement directly) or 'plan' (read-only, produce
+		// an implementation plan). A legacy row that predates the column
+		// scans as an empty string — callers must treat that as 'auto'.
+		&st.Mode,
 	); err != nil {
 		return nil, err
 	}

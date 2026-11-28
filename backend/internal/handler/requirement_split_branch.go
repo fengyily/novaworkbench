@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -167,11 +168,18 @@ func (h *WizardHandler) prepareSplitStackBase(reqRow *model.Requirement, proj *m
 	// When the fetch is skipped we must prefer the LOCAL ref: origin/<branch>
 	// may be a stale remote-tracking ref that the skipped fetch would not
 	// have refreshed.
-	startRef, remoteReachable := resolveSplitStartRef(projectPath, sourceBranch, env, hasOrigin)
+	startRef, remoteReachable, remoteErr := resolveSplitStartRef(projectPath, sourceBranch, env, hasOrigin)
 	if hasOrigin && !remoteReachable {
+		// The generic wording ("网络不可达或仓库凭据无效") told the user
+		// nothing they could act on — the two situations have completely
+		// different fixes, and the user had to guess which one they hit.
+		// git's own stderr names the reason (a refused proxy port, a DNS
+		// failure, a 401, a missing branch), so it goes into the message.
+		detail := splitRemoteDetail(remoteErr)
+		log.Printf("[split] %s: origin unreachable for %s: %s", reqRow.ID, sourceBranch, detail)
 		return "", false, warnings, &splitStackError{
 			code: "SPLIT_REMOTE_UNREACHABLE",
-			msg:  "无法连接远端仓库 origin（网络不可达或仓库凭据无效）。子需求尚未创建 —— 请检查网络与凭据后重试。",
+			msg: "子需求尚未创建 —— 无法连接远端仓库 origin，请检查网络与凭据后重试。git 原始报错：" + detail,
 		}
 	}
 	if startRef == "" {
@@ -276,36 +284,40 @@ func splitStepBudget(deadline time.Time, step time.Duration) time.Duration {
 // problem. The point is that a dead remote is discovered in SECONDS, not
 // after the push has burned its own timeout.
 //
+// The error is RETURNED, not swallowed: it is the only thing that says WHY
+// origin did not answer (a refused proxy port, a DNS failure, a 401, …) and
+// the user cannot fix a generic "check your network" hint.
+//
 // hasOrigin=false means the repo has no remote at all: there is nothing to
 // probe, the fetch is pointless and the remote is trivially "not needed".
-func resolveSplitStartRef(projectPath, sourceBranch string, env []string, hasOrigin bool) (string, bool) {
+func resolveSplitStartRef(projectPath, sourceBranch string, env []string, hasOrigin bool) (string, bool, error) {
 	if !hasOrigin {
-		return resolveStartRef(projectPath, sourceBranch), false
+		return resolveStartRef(projectPath, sourceBranch), false, nil
 	}
 	remoteSHA, remoteErr := splitRemoteHeadSHA(projectPath, sourceBranch, env)
 	if remoteErr != nil {
 		// origin did not answer. The fetch would fail the same way — skip it
 		// and resolve from the local refs only.
-		return resolveStartRef(projectPath, sourceBranch), false
+		return resolveStartRef(projectPath, sourceBranch), false, remoteErr
 	}
 	if remoteSHA == "" {
 		// origin answered but has no such branch. The fetch would fail with
 		// "couldn't find remote ref" — skip it and resolve locally. This is
 		// NOT an unreachable remote: the user simply picked a branch that
 		// does not exist, and the caller must say so.
-		return resolveStartRef(projectPath, sourceBranch), true
+		return resolveStartRef(projectPath, sourceBranch), true, nil
 	}
 
 	if local, err := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+sourceBranch); err == nil {
 		if strings.TrimSpace(local) == remoteSHA {
-			return sourceBranch, true
+			return sourceBranch, true, nil
 		}
 	}
 
 	if _, ferr := gitRunWithTimeout(projectPath, splitFetchTimeout, env, "fetch", "--quiet", "origin", sourceBranch); ferr != nil {
 		log.Printf("[split] fetch origin %s failed (continuing): %v", sourceBranch, ferr)
 	}
-	return resolveStartRef(projectPath, sourceBranch), true
+	return resolveStartRef(projectPath, sourceBranch), true, nil
 }
 
 // splitRemoteHeadSHA returns the sha origin has for a branch.
@@ -326,6 +338,61 @@ func splitRemoteHeadSHA(projectPath, branch string, env []string) (string, error
 		return "", nil
 	}
 	return fields[0], nil
+}
+
+// splitRemoteDetailMaxLen caps the git detail that reaches the UI. Git's
+// transport errors are one line, but a credential helper or a hook can make
+// them arbitrarily long; the UI shows this inside a sentence, not in a log.
+const splitRemoteDetailMaxLen = 300
+
+// splitRemoteURLUserinfo matches the credential part of a URL ("scheme://
+// user:pass@") so a token embedded in the remote URL never reaches the log
+// or the browser.
+//
+// Same shape as the service layer's redactor (service/project.go
+// redactUserinfo) — the handler needs its own copy because that one is
+// unexported, and it must handle EVERY occurrence in the string, not just
+// the first (git prints the URL once, but a credential helper may add more).
+var splitRemoteURLUserinfo = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)[^/\s:@]+(?::[^@\s/]*)?@`)
+
+// splitRemoteDetail turns a failed git call into a short, credential-free
+// explanation the user can act on.
+//
+// gitRunCtx formats its error as "<stderr>: <exec error>", e.g.
+//
+//	fatal: unable to access 'https://github.com/x/y.git/': Failed to connect
+//	to 127.0.0.1 port 7993 after 0 ms: Couldn't connect to server: exit status 128
+//
+// The stderr is where the REASON lives; the exec suffix ("exit status 128",
+// "signal: killed") only repeats what the reader can already see. An empty
+// stderr means git was killed before it said anything — that is the timeout
+// path, and it gets its own wording instead of an empty sentence.
+func splitRemoteDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(err.Error())
+	if i := strings.LastIndex(detail, ": exit status "); i >= 0 {
+		detail = detail[:i]
+	}
+	detail = strings.TrimSpace(strings.TrimPrefix(detail, ":"))
+	if strings.HasSuffix(detail, "signal: killed") {
+		detail = strings.TrimSpace(strings.TrimSuffix(detail, "signal: killed"))
+	}
+	detail = splitRemoteURLUserinfo.ReplaceAllString(detail, "$1<redacted>@")
+	// git wraps long transport errors over several lines; the UI shows this
+	// inside a sentence, so it has to be one line.
+	detail = strings.Join(strings.Fields(detail), " ")
+	if detail == "" {
+		return "远端无响应（连接超时或被拒绝）"
+	}
+	if len(detail) > splitRemoteDetailMaxLen {
+		// truncateRunes cuts by rune, not by byte — git speaks the user's
+		// locale, so the detail can be Chinese, and a byte cut would split a
+		// character in half and show mojibake.
+		detail = truncateRunes(detail, splitRemoteDetailMaxLen) + "…"
+	}
+	return strings.TrimRight(detail, ".。")
 }
 
 // pushSplitStackBase pushes the stack bottom to origin.
@@ -355,8 +422,8 @@ func (h *WizardHandler) pushSplitStackBase(projectPath, dev string, env []string
 		}
 		return false, warnings, &splitStackError{
 			code: "SPLIT_PUSH_FAILED",
-			msg: fmt.Sprintf("主需求分支 %s 推送失败：%v。子需求尚未创建 —— 请检查网络与仓库凭据后重试。",
-				dev, redactOriginForLog(perr.Error())),
+			msg: fmt.Sprintf("子需求尚未创建 —— 主需求分支 %s 推送失败，请检查网络与仓库凭据后重试。git 原始报错：%s",
+				dev, splitRemoteDetail(perr)),
 		}
 	}
 	return true, warnings, nil

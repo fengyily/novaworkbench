@@ -531,7 +531,7 @@ export function CreateRequirementForm({
             setDescription(v);
             setDraftTouched(true);
           }}
-          requirementId={pendingReqId}
+          ownerId={pendingReqId}
           placeholder={tLabel(t, kindPlaceholderKeys as Record<string, string>, kind)}
           minRows={7}
           disabled={saving || importing}

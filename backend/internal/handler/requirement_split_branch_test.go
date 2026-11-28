@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -279,5 +280,87 @@ func TestPrepareSplitStackBase_DegradesWithoutGit(t *testing.T) {
 	}
 	if len(warnings) == 0 {
 		t.Error("expected a warning that the project is not a git repository")
+	}
+}
+
+// splitRemoteDetail decides what the user actually reads when origin does
+// not answer. Three properties matter:
+//
+//  1. git's REASON survives — the exec suffix ("exit status 128") does not,
+//     because it repeats what the reader can already see.
+//  2. The credentials embedded in a remote URL never leave the process.
+//  3. A git that was killed before it said anything (the timeout path) still
+//     produces a sentence, not an empty one.
+func TestSplitRemoteDetail(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		want    string
+		notWant string
+	}{
+		{
+			name: "git's stderr survives, the exec suffix does not",
+			err:  errors.New("fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to 127.0.0.1 port 7993: Couldn't connect to server: exit status 128"),
+			want: "Failed to connect to 127.0.0.1 port 7993",
+			// "exit status 128" is noise for a human.
+			notWant: "exit status",
+		},
+		{
+			name:    "a token in the remote URL is redacted",
+			err:     errors.New("fatal: unable to access 'https://ghp_secret1234567890:@github.com/x/y.git/': failed: exit status 128"),
+			want:    "https://<redacted>@github.com/x/y.git/",
+			notWant: "ghp_secret1234567890",
+		},
+		{
+			name: "a killed git still says something",
+			err:  errors.New(": signal: killed"),
+			want: "远端无响应",
+		},
+		{
+			name: "multi-line transport errors are collapsed into one line",
+			err:  errors.New("fatal: unable to access 'https://github.com/x/y.git/':\n\tFailed to connect: exit status 128"),
+			want: "fatal: unable to access",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitRemoteDetail(tc.err)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("splitRemoteDetail = %q, want it to contain %q", got, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Errorf("splitRemoteDetail = %q, want it NOT to contain %q", got, tc.notWant)
+			}
+			if strings.Contains(got, "\n") {
+				t.Errorf("splitRemoteDetail = %q, want a single line", got)
+			}
+		})
+	}
+
+	if got := splitRemoteDetail(nil); got != "" {
+		t.Errorf("splitRemoteDetail(nil) = %q, want an empty string", got)
+	}
+}
+
+// The truncation must cut by RUNE, not by byte: git speaks the user's
+// locale, so the detail can be Chinese, and a byte cut would split a
+// character in half and show mojibake.
+func TestSplitRemoteDetail_TruncatesWithoutBreakingCharacters(t *testing.T) {
+	long := strings.Repeat("远端不可达", 200)
+	got := splitRemoteDetail(errors.New(long))
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("splitRemoteDetail did not mark the truncation: %q", got)
+	}
+	if strings.ContainsRune(got, '�') {
+		t.Errorf("splitRemoteDetail produced a broken character: %q", got)
+	}
+	// Everything before the ellipsis must be whole runes.
+	body := strings.TrimSuffix(got, "…")
+	for _, r := range body {
+		if r == '�' {
+			t.Errorf("splitRemoteDetail produced a broken character: %q", got)
+			break
+		}
 	}
 }

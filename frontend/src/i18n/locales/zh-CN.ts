@@ -19,6 +19,7 @@ import schedules from './modules/schedules';
 import settings from './modules/settings';
 import components from './modules/components';
 import { claudeDoc } from './modules/claudeDoc';
+import { crossRequirements } from './modules/crossRequirements';
 
 
 const zhCN = {
@@ -39,6 +40,7 @@ const zhCN = {
   schedules,
   settings,
   claudeDoc,
+  crossRequirements,
 
   components,
 };

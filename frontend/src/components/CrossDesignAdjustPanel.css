@@ -1,0 +1,221 @@
+/* 「方案调整对话」面板的私有样式。
+ *
+ * 规则与页面私有样式表同款：类名统一加 `xqa-` 前缀（本文件不在页面的私有
+ * 样式表里，所以用组件自己的前缀），颜色一律走 index.css 的设计令牌。
+ */
+
+.xqa-panel {
+  margin-top: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.xqa-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.xqa-panel:not(.is-expanded) .xqa-head {
+  border-bottom: none;
+}
+
+.xqa-head-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.xqa-head-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.xqa-caret {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.xqa-count {
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-active);
+  color: var(--color-primary-hover);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.xqa-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xqa-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xqa-hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.xqa-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.xqa-chips-label {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.xqa-chip {
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-align: left;
+}
+
+.xqa-chip:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.xqa-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.xqa-empty {
+  margin: 0;
+  padding: 10px 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.xqa-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.xqa-turn {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  background: var(--color-bg);
+}
+
+.xqa-turn-error {
+  border-color: var(--color-error-soft);
+}
+
+.xqa-turn-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.xqa-turn-tag {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.xqa-turn-qtext {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.xqa-turn-del {
+  flex: none;
+  padding: 0 6px;
+  color: var(--color-text-muted);
+}
+
+.xqa-turn-a {
+  margin-top: 6px;
+}
+
+.xqa-turn-abody {
+  font-size: 13px;
+}
+
+.xqa-turn-pending {
+  margin: 6px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.xqa-turn-errtext {
+  margin: 6px 0 0;
+  color: var(--color-error);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.xqa-turn-meta {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.xqa-turn-retry {
+  margin-left: auto;
+}
+
+.xqa-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-size: 12px;
+}
+
+.xqa-error-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0 2px;
+}
+
+.xqa-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.xqa-textarea {
+  flex: 1;
+}

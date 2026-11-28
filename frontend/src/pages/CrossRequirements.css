@@ -1,0 +1,610 @@
+/* 跨项目需求页面私有样式。
+ *
+ * 规则：类名统一加 `xreq-` 前缀 —— 页面私有样式表里不得出现通用类名
+ * （btn-* / form-* / status-* … 属于全站共享词汇，必须住在 index.css）。
+ * 颜色一律走 index.css 的设计令牌，不在本文件写死任何色值。
+ *
+ * 状态 chip 复用全站的 `.status-badge` 体系（见 index.css），本页不另造一套
+ * 状态色词汇 —— 两套并行词汇表是 UI 审计里最刺眼的一条。
+ */
+
+.xreq-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+}
+
+/* ── 头部 ─────────────────────────────────────────────────────────────── */
+
+.xreq-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.xreq-head-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.xreq-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.xreq-subtitle {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-top: 4px;
+}
+
+.xreq-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.xreq-back {
+  margin-right: 2px;
+}
+
+/* ── 工具栏 ───────────────────────────────────────────────────────────── */
+
+.xreq-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+/* 新建面板的落位：挂在工具栏**上方**、紧跟头部。
+   列表可能有十几张卡片，面板放在列表底部时用户点了「新建」却要滚到底
+   才看见它展开 —— 与普通需求的新建面板同一个教训（ProjectDetail 把
+   CreateRequirementForm 挂在列表上方）。 */
+.xreq-create-anchor {
+  margin-bottom: 18px;
+}
+
+.xreq-filter {
+  width: auto;
+  min-width: 140px;
+}
+
+.xreq-search {
+  flex: 1 1 240px;
+  min-width: 180px;
+}
+
+/* ── 列表 ─────────────────────────────────────────────────────────────── */
+
+.xreq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.xreq-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.15s ease;
+}
+
+.xreq-item:hover {
+  border-color: var(--color-primary);
+}
+
+.xreq-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+/* 标题本身是一个按钮（键盘可达），整张卡片也可点 —— 按钮要吃掉自己的点击，
+   否则一次点击会既走按钮又走卡片的导航（同一个目的地，触发两次）。 */
+.xreq-item-title-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 行内的破坏性入口（移到回收站）。
+   软删 —— 可恢复，所以它不需要确认框，只需要一个说得清的图标 + title。 */
+.xreq-item-action {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.xreq-item-action:hover {
+  color: var(--color-error);
+  border-color: var(--color-border);
+  background: var(--color-hover);
+}
+
+/* 回收站视图的行内动作（恢复 / 彻底删除）。 */
+.xreq-item-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.xreq-item-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.xreq-item-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.xreq-item-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* ── chip ─────────────────────────────────────────────────────────────── */
+
+.xreq-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-active);
+  color: var(--color-primary-hover);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.xreq-chip-warn {
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+}
+
+/* ── 进度条 ───────────────────────────────────────────────────────────── */
+
+.xreq-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.xreq-progress-track {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.xreq-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+
+.xreq-progress-text {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* ── 空态 / 提示 ──────────────────────────────────────────────────────── */
+
+.xreq-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.xreq-empty-title {
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 6px;
+}
+
+.xreq-empty-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.xreq-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  padding: 10px 0;
+}
+
+.xreq-error {
+  background: var(--color-error-soft);
+  color: var(--color-error-deep);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.xreq-toast {
+  background: var(--color-success-soft);
+  color: var(--color-success-deep);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+/* 回收站横幅：回收站里的跨项目需求是只读的，横幅把「为什么不能操作」与
+   「怎么才能继续」一起说清楚（而不是让按钮莫名其妙地灰着）。 */
+.xreq-trash-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.xreq-trash-banner strong {
+  color: var(--color-warning-deep);
+  font-size: 14px;
+}
+
+/* ── 详情区块 ─────────────────────────────────────────────────────────── */
+
+.xreq-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-card);
+}
+
+.xreq-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.xreq-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 10px;
+}
+
+.xreq-section-head .xreq-section-title {
+  margin-bottom: 0;
+}
+
+.xreq-meta {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-bottom: 10px;
+}
+
+.xreq-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.xreq-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.xreq-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+.xreq-design,
+.xreq-report {
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+/* ── 编辑器 ───────────────────────────────────────────────────────────── */
+
+.xreq-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xreq-field {
+  margin-bottom: 12px;
+}
+
+.xreq-field-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 4px;
+}
+
+.xreq-field-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-bottom: 6px;
+}
+
+.xreq-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  background: var(--color-bg);
+}
+
+.xreq-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.xreq-option input {
+  width: auto;
+  margin: 0;
+}
+
+/* 参与项目编辑行：项目名 + 基础分支输入 + 角色输入。 */
+.xreq-option .xreq-project-base {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.xreq-option .xreq-project-role {
+  width: 110px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+/* ── 子需求矩阵 ───────────────────────────────────────────────────────── */
+
+.xreq-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xreq-matrix-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.xreq-matrix-project {
+  flex: 0 0 140px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  padding-top: 6px;
+  word-break: break-all;
+}
+
+.xreq-matrix-cells {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.xreq-matrix-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.xreq-matrix-cell:hover {
+  border-color: var(--color-primary);
+}
+
+.xreq-cell-title {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xreq-cell-blocked {
+  color: var(--color-warning-deep);
+}
+
+/* ── 依赖 ─────────────────────────────────────────────────────────────── */
+
+.xreq-deps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.xreq-dep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.xreq-dep-text {
+  flex: 1 1 auto;
+}
+
+/* ── 阶段 ─────────────────────────────────────────────────────────────── */
+
+.xreq-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.xreq-phase {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  background: var(--color-bg);
+}
+
+.xreq-phase-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.xreq-phase-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.xreq-phase-members {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+/* ── 内联编辑器的操作栏 ───────────────────────────────────────────────── */
+/*
+   这一组原本叫 .xreq-modal-actions —— 跨项目需求页曾有两个弹窗（新建、
+   拆分确认）。两者都换成了页面内的面板，弹窗外壳（.xreq-modal-overlay /
+   .xreq-modal / .xreq-modal-wide / .xreq-modal-title）随之删除，只留下这
+   个被内联编辑器复用的操作栏。名字里的 "modal" 已经不成立了。
+*/
+
+.xreq-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ── 拆分候选 ─────────────────────────────────────────────────────────── */
+
+.xreq-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xreq-candidate {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--color-bg);
+}
+
+.xreq-candidate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.xreq-candidate-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.xreq-candidate-order {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* ── 窄屏 ─────────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .xreq-page {
+    padding: 16px 14px 60px;
+  }
+
+  .xreq-matrix-row {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .xreq-matrix-project {
+    flex: 0 0 auto;
+  }
+}

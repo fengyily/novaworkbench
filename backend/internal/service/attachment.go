@@ -77,6 +77,17 @@ func NewCodeReviewAttachmentService(d *db.DB) *AttachmentService {
 	return &AttachmentService{db: d, table: "code_review_attachments", ownerCol: "review_id"}
 }
 
+// NewCrossRequirementAttachmentService builds the cross-requirement-scoped
+// twin. The owner is a cross_requirements row (xreq_*), so the files live
+// under attachmentRoot/<xreq_id>/ and are injected into the cross-project
+// job prompts by handler.attachManifestFor.
+//
+// The xreq_* owner id space never collides with req_* / crv_*, so all three
+// attachment tables share one on-disk root without stepping on each other.
+func NewCrossRequirementAttachmentService(d *db.DB) *AttachmentService {
+	return &AttachmentService{db: d, table: "cross_requirement_attachments", ownerCol: "cross_requirement_id"}
+}
+
 // ownerDir returns the per-owner directory (creating it on first use).
 // Returns absolute path.
 func (s *AttachmentService) ownerDir(ownerID string) (string, error) {

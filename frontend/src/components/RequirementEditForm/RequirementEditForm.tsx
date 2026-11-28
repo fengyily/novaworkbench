@@ -246,7 +246,7 @@ export default function RequirementEditForm({ requirement, onSaved, onCancel }: 
         <RichDescriptionEditor
           value={description}
           onChange={setDescription}
-          requirementId={requirement.id}
+          ownerId={requirement.id}
           placeholder={t('requirements.detail2.editMentionPlaceholder')}
           minRows={12}
           disabled={saving || importing}

@@ -200,17 +200,20 @@ func TestResolveSplitStartRef_SkipsFetchWhenLocalMatchesRemote(t *testing.T) {
 
 	// No fetch is needed: local featureA == origin/featureA. The helper must
 	// return the LOCAL ref — and report that the remote answered.
-	got, reachable := resolveSplitStartRef(repo, "featureA", nil, true)
+	got, reachable, rerr := resolveSplitStartRef(repo, "featureA", nil, true)
 	if got != "featureA" {
 		t.Fatalf("resolveSplitStartRef = %q, want the local ref %q", got, "featureA")
 	}
 	if !reachable {
 		t.Errorf("reachable = false, want true (origin answered)")
 	}
+	if rerr != nil {
+		t.Errorf("error = %v, want nil (origin answered fine)", rerr)
+	}
 
 	// A branch that exists nowhere resolves to "" (the caller turns that into
 	// the "来源分支不存在" error).
-	if got, _ := resolveSplitStartRef(repo, "nope", nil, true); got != "" {
+	if got, _, _ := resolveSplitStartRef(repo, "nope", nil, true); got != "" {
 		t.Fatalf("resolveSplitStartRef for a missing branch = %q, want an empty string", got)
 	}
 }
@@ -238,7 +241,7 @@ func TestResolveSplitStartRef_UnknownRemoteIsNotFatal(t *testing.T) {
 	// No origin configured → ls-remote fails → the helper falls back to the
 	// local branch rather than giving up, and reports the remote as
 	// unreachable so the caller skips the pointless fetch.
-	got, reachable := resolveSplitStartRef(repo, "featureA", nil, false)
+	got, reachable, _ := resolveSplitStartRef(repo, "featureA", nil, false)
 	if got == "" {
 		t.Fatalf("resolveSplitStartRef returned an empty ref for an existing local branch")
 	}

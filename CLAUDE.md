@@ -80,9 +80,9 @@ handler/  ->  service/  ->  *db.DB (model/ holds structs, no behavior)
 
 Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N` on PostgreSQL (`Exec`/`Query`/`QueryRow`/`Begin`), quotes reserved identifiers via `Ident` (the `key` column is reserved in MySQL), and builds upsert suffixes via `OnConflict` (`ON CONFLICT … DO UPDATE` vs `ON DUPLICATE KEY UPDATE`). **Conventions for new SQL**: write `?` placeholders, go through the wrapper, use `Ident`/`OnConflict` where relevant. New columns still follow the ad-hoc pattern: append an `ALTER TABLE` to `alterColumns` in `schema.go` — no separate migration files.
 
-`db.Migrate(src, dst)` copies the **27 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
+`db.Migrate(src, dst)` copies the **44 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
 
-**37 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743,776,829`):
+**38 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,321,332,341,350,367,400,439,466,516,638,669,716,743,776,829`):
 
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
@@ -98,6 +98,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `code_review_followups` | `crf_` | **Review 追问**(一行一问一答,`resumed` 记录是否续接了原 Review 会话;`CodeReviewService.Delete` 显式清理,不依赖 SQLite 不生效的 FK CASCADE) |
 | `code_review_revisions` | `crr_` | **Review 报告版本**(一行一版,`rev_no` 按 review 从 1 递增,`trigger_kind` 区分 `initial`/`regenerate`;`code_reviews` 只存「当前版」,所有既有读路径不变,本表是其身后的历史——这正是「基于对话重新生成」敢点的原因:被替换的那版仍可读、可切回。`trigger_kind` 而非 `trigger`,后者在 MySQL 是保留字) |
 | `requirement_qa_turns` | `qat_` | **阶段答疑轮次**(一行一问一答,`stage` 区分 design/coding;`session_id` 是本轮运行的 QA 会话(首问 fork 时预铸),`source_session_id` 是 fork 来源的阶段会话快照,`resumed` 记录本轮是否真的续接了会话上下文;源会话重跑后 `source_session_id` 失配 → 自动重新 fork,旧轮保留。**本表 `session_id` 是答疑流程唯一写入的会话列**——`requirements.design_session_id`/`coding_session_id` 全程只读,答疑零污染) |
+| `cross_requirement_qa_turns` | `xqat_` | **跨项目需求 · 方案调整对话轮次**(一行一问一答,owner 列 `cross_requirement_id`,**没有 `stage` 列** —— 一个 xreq 只有一条线程)。`session_id` = 线程自己的会话,`source_session_id` = fork 来源的**整体方案会话**快照(方案重跑后失配 → 重新 fork)。答案由后端落库,并被下一次方案作业当「调整讨论记录」读进提示词 |
 
 > **`roles` vs `acl_roles`**: 两个"角色"语义独立。`roles` = AI persona(由 wizard/review 注入 system prompt);`acl_roles` = RBAC 角色(由 `middleware/auth.go` `RequirePermission` 消费)。
 
@@ -185,6 +186,46 @@ ACL 落地在 7 张表(`users`/`sessions`/`acl_roles`/`permissions`/`acl_role_pe
 物化失败(家目录只读、磁盘满)**降级为提示词注入**,绝不阻断一次需求。远端(Agent Server)同理:托管副本 SFTP 落到 `<worktreeRoot>/<projectID>/memory/CLAUDE.md`,排除清单用的是**远端路径**;上传失败同样降级。worker 侧协议(`claudeMdDir` / `claudeMdExcludes`)与本地路径逐字对齐(`agent-worker/server.mjs` + `deploy/` + Go 内嵌副本三份,靠 `scripts/sync-agent-worker.sh` 保持同步)。
 
 **去重**(原生通道下才生效,否则会连仓库那份一起丢):`collectProjectContext` 的预读不再内联 CLAUDE.md/AGENTS.md,知识库块也过滤掉 `source_ref` 为这两个文件的条目(scanner 把它们索引成了 knowledge 行)——否则同一份文档会从第三条路**绕回**提示词里。
+
+### 跨项目需求(附件 + 富文本/插图 + 面板化)
+
+跨项目需求(`cross_requirements`,xreq_*)是横跨多个仓库的顶层实体。它是**独立实体**,不是 `requirements` 的一种 kind(`requirements.project_id` NOT NULL + FK + CASCADE,既有数十条路径假设「一需求一项目」);子需求 = 普通 `requirements` 行,靠 `requirements.cross_requirement_id` 挂回父实体。派生数据(完成百分比、各项目完成数)**不落库**,是读路径实时聚合的。
+
+**附件**(`cross_requirement_attachments` 表)与需求 / Review 的附件同型:逐列照抄 `requirement_attachments`,只把 owner 列换成 `cross_requirement_id`。`service.NewCrossRequirementAttachmentService` 复用同一套 `AttachmentService`(表名 + owner 列在**构造期**固定,SQL 方法体完全共用),所以 `handler.NewAttachmentHandler` 一行不改就能挂在 `/api/cross-requirements/{id}/attachments/...` 下 —— 三个 owner id 空间(`req_*` / `crv_*` / `xreq_*`)互不冲突,可共用一个磁盘根 `attachmentRoot/<owner_id>/`。
+
+- **插图**走 `nova://attachment/<id>` 标记(与需求同一套约定):前端 `RichDescriptionEditor` 粘贴/拖拽/选图 → `useAttachmentUpload` 压缩上传 → 光标处插入标记;渲染时 `rewriteNovaLinks` 把标记换成 `/api/cross-requirements/<id>/attachments/<attId>/content`。**标记里没有 owner 信息**,所以渲染方必须被告知附件在哪个集合 —— 这就是 `rewriteNovaLinks(md, ownerId, resource)` / `useAttachmentUpload(ownerId, resource)` 多出来的 `resource` 参数。`MarkdownRender` 的 `isAuthedImageUrl` 也必须认得 `cross-requirements`,否则登录态下插图渲染成碎图标。
+- **AI 也能看到**:`attachManifestFor` + `rewriteAttachmentMarkers`(两个都是 owner 无关的纯函数)把附件清单与描述里的标记带进跨项目作业的提示词(整体方案 / 拆分 / 阶段验证)。跨项目作业**只在本地跑**(工作目录 `~/.novaworkbench/xreq/<id>/<kind>`),所以 `attachDir` 恒为本地根,不需要 `resolveAttachDirFor` 那套 SSH 同步。
+- **删除**要显式删附件行:SQLite 从不开 `PRAGMA foreign_keys`,schema 里的 `ON DELETE CASCADE` 是装饰。
+
+**草稿行**:`POST /api/cross-requirements` 带 `draft:true` 时允许**空标题 + 零参与项目**(占位标题 `（草稿）`),其余校验一步不松(基础分支名非法照样整批拒绝)。原因是面板式创建流程要在用户填完之前先落一行 —— 插图 / 附件必须有一个**已存在的宿主行**才能落库(与 `CreateRequirementForm` 预建需求草稿同构)。「至少一个项目」这条不变量的真正落点**不在创建**,而在**开始设计 / 开始拆分** —— 那两个动作没有参与项目就没有工作区可跑。
+
+**面板而非弹窗**:新建 / 编辑 / 拆分确认 / 详情页显示描述四处都是**页面内联面板**(跨项目需求页原本有两个 `.xreq-modal`,均已删除;只剩被内联编辑器复用的 `.xreq-panel-actions`)。表单组件在 `components/CrossRequirementForm/`,复用 `RichDescriptionEditor` + `AttachmentPanel`,视觉对齐普通需求的 `.create-req-form`。新建面板的**草稿清理是 mount-only effect**:依赖驱动的 cleanup 会在每次击键时重跑(React 先跑上一次的 cleanup),把用户正在写的草稿删掉 —— 与 `CreateRequirementForm` 里同一段注释讲的是同一个坑。
+
+**回收站(删除是两步的)**:`cross_requirements.deleted_at`(DATETIME,NULL = 不在回收站)。**删除 = 移进回收站 → 彻底删除**,不可逆的那一步只能从回收站里发起 —— 因为跨项目需求被拆过之后,整体方案 / 联调阶段 / 跨项目依赖是**不可再生产**的东西(子需求里的代码还在,但「三个仓库怎么对齐」的上下文丢了就是丢了)。这一套**逐字照抄 `projects` 的回收站**(active/trash 双视图、`Remove` 软删 / `Restore` / `Purge` 带 `NOT_IN_TRASH` 闸门 / `ListTrash`),不发明第二套词汇。
+
+- **接口**:`DELETE /api/cross-requirements/{id}`(软删)**语义已变**、新增 `POST .../{id}/restore`、`DELETE .../{id}/purge`、`GET /api/cross-requirements/trash`。`DELETE` 原本是硬删,改语义是**有意的**:不可逆删除从此需要两步。
+- **回收站里的行只读**:`service.requireActive` 是所有写路径(更新 / 归档 / 改参与项目 / 存方案 / 拆分 / 阶段 / 验证)共用的闸门,返回 `ErrCrossRequirementInTrash` → HTTP 409 `XREQ_IN_TRASH`。少这道闸门,用户会在垃圾堆里干活,作业跑完还会把结果写回一条已被「删掉」的行。
+- **恢复不是回滚**:只清 `deleted_at`,**不碰 `status_locked`**(人工标过的 done / 归档继续有效);没锁的行由读路径按**当前事实**重算 —— 子需求可能在回收站期间被做完了,恢复回来时显示旧状态就是错的。回收站期间派生刷新早退(`ApplyDerivedStatus`),状态冻结在「被移走的那一刻」。
+- **子需求一律脱离保留**,不级联删(它们背后可能有代码 / 分支 / PR)。`Purge` 才把 `cross_requirement_id` 置空并删阶段 / 映射 / 基线 / 附件行 + 清理 worktree。确认框(`components/CrossRequirementPurgeDialog.tsx`,列表页与详情页共用)把「会保留的」与「会永久丢的」分成两块风险面板 —— 子需求那半句是让人敢点这个按钮的关键。
+- **草稿清理要两步**:新建面板放弃时走「软删 + 立即 purge」(`discardDraft`),否则废弃草稿会堆在回收站里。
+- **状态筛选补「已归档」**:跨项目需求的 `archived` 状态此前在前端**完全不可达**(筛选器里没有这一项,后端默认又排除归档行)—— 归档行存在库里但用户永远看不到。
+
+### 跨项目需求 · 方案追加调整(微调方案)
+
+整体方案跑完之后常留着「待决策事项」(接口超时取多少、幂等键用哪种策略……)。原有的两个出口都不够用:「重新生成」是盲跑(用户说不清要改什么),手工编辑则没有讨论过程。这条路径补上第三种:**跟 AI 谈拢 → 重跑方案作业把结论吃进去**。
+
+- **待决策事项进契约**:`prompt.CrossDesignContract` 里多一段**软性**的 `## 待决策事项`(没有就写「（无）」)。服务端用 `prompt.ExtractCrossPendingDecisions` 解析成 `[]model.CrossPendingDecision`,详情接口现算返回(`Detail.PendingDecisions`)—— **不落库**,它就是方案正文的一部分,方案一改它就跟着变。标题匹配刻意宽松(按 `待决策` / `待定` / `待确认` / `开放问题` / `遗留问题` **包含**匹配,接受二三级标题):存量方案的待决策点很可能在模型自选标题下。
+- **调整对话**:一条挂在这个跨项目需求下的线程(`cross_requirement_qa_turns` 表,一行一问一答,形状照抄 `requirement_qa_turns` 但 owner 列换成 `cross_requirement_id`、**没有 `stage` 列** —— 一个 xreq 只有一条线程)。后端 `handler/cross_requirement_adjust.go`,前端 `components/CrossDesignAdjustPanel.tsx`。答案由**后端**落库(关掉浏览器答案不能丢),前端**不从 SSE 重建答案**,终帧后重拉线程。
+- **会话策略 = fork 整体方案会话**:首轮 `--resume <design_session_id> --fork-session --session-id <新 id>`(模型保留自己写方案时的探索记忆),后续轮 `--resume <线程会话>`,两者都失效时降级为 fresh(把当前方案原文 + 参与项目 + 约定 + 附件 + 待决策事项 + 此前问答贴进提示词)。`cross_requirements.design_session_id` 这一列本来就存在、一直写空串,现在由方案作业落 `out.sessionID`(CLI 没报出会话 id 时**必须清空** —— 旧会话对应旧方案)。**手工编辑保留这个 id**(手编改的是文字,不是「这份方案是哪个会话写的」这个事实),否则调整线程会静默降级成 fresh(浅一层,不报错,最难查的那种退化)。
+- **fork 的 cwd 必须是方案作业的那个**(`~/.novaworkbench/xreq/<id>/design`):claude CLI 的会话转录按 cwd 的 slug 分目录存放,换 cwd 就找不到源会话(仓库自己的结论见 `wizard_qa.go` 的锚定注释)。调整线程的每一轮(首轮 fork / 后续 resume / 降级 fresh)都用它 —— **一个都不能例外**,否则下一轮 `--resume` 又找不到线程自己的会话。两条线程的转录落在同一目录、不同的 session id,互不冲突。
+- **决策树与单项目的阶段答疑共用一棵**(`handler/qa_session_plan.go` 的 `resolveQASessionPlan`):两个功能问的是同一个问题(「这一轮跑在哪个会话里」),只是 turn 模型不同 —— 两棵树 = 两套 bug,而单项目那棵树已被 `wizard_qa_test.go` 的九个子测试钉死。
+- **没有 fork 守卫**:单项目的 `requireAnchoredFork` 防的是「fork 之后模型拿着共享检出的绝对路径去改文件」。跨项目作业**不能改代码**(Write / Edit / NotebookEdit 在协议层被禁用),不存在这个风险 —— 照抄一段守卫只会造一条永远不触发的分支。
+- **工具权限:可读可查,不可改**(2026-11) —— 跨项目作业过去在协议层把 `Write` / `Edit` / `Bash` / `NotebookEdit` 全禁了,模型只能 Read / Glob / Grep:一份不看 git 历史、不看 blame、不看跨仓库 diff 的方案。现在对齐「项目」里方案设计 / 开发的权限口径:**`Bash` 放开**(可跑 `git log` / `git show` / `git diff` / `git blame` / `grep` 等只读命令),**`Write` / `Edit` / `NotebookEdit` 仍然禁用** —— 跨项目阶段只产出方案 / 拆分 / 验证报告,真正的开发在拆出来的子需求里做(那边全权限)。「不改仓库」这条保证由**两层**兜住:①**CLI denylist**(`crossDisallowedTools`,`--disallowedTools` 的 `Bash(git checkout *)` 形态)拒掉所有会改动仓库的 git 子命令 —— 拒规则在权限模式**之前**求值,`--dangerously-skip-permissions` 绕不过它,而且拒绝是**非致命**的:模型拿到一条「命令被拒绝」的工具错误就改用只读写法(`git show <sha>:<path>`),作业照常跑完;②**破坏性命令守卫**(`crossJobSink`,复用子任务那套 `destructiveCommandReason`)堵住 CLI denylist 覆盖不到的**文件系统类**(`rm -rf` / `mv` / `find -delete`)—— 它按二进制 basename 匹配,`/bin/rm` 也照样被拦;受保护目录 = `opts.AddDirs`(授权与保护同一个决定,同一份清单)。**为什么必须堵**:跨项目作业读到的目录不全是安全的 —— 参与仓库锁定不了基线时读的是用户的**共享检出**,阶段验证还要读子需求开发者**未提交的实现 worktree**,这些未提交改动一旦被改写就找不回来了。**残留**(已记录):CLI 的模式匹配是**字面**的,`/usr/bin/git checkout …` 这种带绝对路径的写法不在 denylist 匹配范围内(提示词已禁止跑改动仓库的 git 命令)。另:提示词新增 `prompt.CrossToolNote`(整体方案 / 拆分 / 阶段验证三处注入)+ 调整对话的规则 2 —— **放开能力必须同时讲清边界**,否则模型不知道自己能跑命令,等于没放开。
+- **读取的是**基线台账**里的树,不是重新 fetch**(`crossWorkspaceFromBases`):调整的对象是**已经写好的那份方案**,方案里的 `文件路径:行号` 是对着锁定基线写的;再 fetch 一次把基线挪走,模型读到的行号就对不上方案 —— 而且每问一句就要 fetch N 个仓库。
+- **回答必须显式分三段**(prompt 契约写死):`## 已确认结论` / `## 待决策事项` / `## 调整建议`。这是「按讨论结论重新补全方案」能吃下结论的**唯一**依据 —— 服务端靠 `ExtractCrossConfirmedConclusions` / `ExtractCrossOpenDecisions` 抽出来,重跑方案时喂进提示词。**「已确认」与「待决策」的区分**是要紧的一条:用户只是提问、还在权衡、或者模型说「建议选 A」的,一律不算「已确认」—— 把没拍板的东西写成结论,重跑时就会被当成用户的决定写进方案。
+- **`apply_discussion` 是显式开关**(`POST .../design` 的请求体):页头的「重新生成」是「从头再来」(不勾 → 提示词与这个特性存在之前**逐字相同**),调整面板里的「按讨论结论重新补全方案」才勾。讨论记录里混着用户还没拍板的问答,自动注入等于 AI 替用户拍板。
+- **互斥**:方案作业与调整轮次不能并发(前者把讨论记录整段喂进提示词,后者还没落答案)—— 提问时 409 `XREQ_IN_PROGRESS`,起方案作业时 409 `XREQ_ADJUST_RUNNING`。
+- **接口**:`POST|GET|DELETE /api/cross-requirements/{id}/design/adjust`、`DELETE .../design/adjust/turns/{tid}`、`GET .../design/adjust/{job}/stream`。GET 返回 `{status, job_id, running, error_message, turns[]}`(一次拿全:线程 + 正在跑的那一轮)。回收站里的行**读得到但写不了**(409 `XREQ_IN_TRASH`);`Purge` 必须显式删轮次行(SQLite 的 CASCADE 是装饰)。
 
 ### Merge & Weekly Reports
 

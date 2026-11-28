@@ -34,22 +34,30 @@ import (
 // chain ("the caller overrode the base") never fires for an untouched picker.
 
 // ResolveAutoBase resolves the base branch WITHOUT the caller's override —
-// i.e. tiers 2..6 of the resolution chain.
+// i.e. tiers 2..7 of the resolution chain.
 //
 // The tiers, in order:
 //
 //  2. explicit    — the user picked this base last time and we remembered
 //     it (requirements.base_branch_source == "explicit").
-//  3. parent      — a child requirement bases itself on the branch its
+//  3. cross       — the participating project's base branch of the
+//     cross-project requirement this row belongs to
+//     (requirements.base_branch_source == "cross_project").
+//  4. parent      — a child requirement bases itself on the branch its
 //     parent requirement actually develops on (feat/req_<parent> — the
 //     stack bottom of a split).
-//  4. requirement — this requirement's own previously persisted value, but
+//  5. requirement — this requirement's own previously persisted value, but
 //     ONLY when that value was not merely derived from the
 //     project default.
-//  5. project     — projects.default_branch.
-//  6. default     — the hard-coded "main" fallback.
+//  6. project     — projects.default_branch.
+//  7. default     — the hard-coded "main" fallback.
 //
-// Tier 4 deliberately does NOT reuse a value whose source is "project",
+// Tier 3 sits right below "explicit" on purpose: the cross-project base is
+// a value the user typed on the cross requirement (per participating
+// project), so it must beat the project default — but a base the user
+// picked ON THIS REQUIREMENT beats it.
+//
+// Tier 5 deliberately does NOT reuse a value whose source is "project",
 // "default" or empty (legacy rows). Those are DERIVED values: the project
 // default branch is a moving target, and freezing whatever happened to be
 // current when the row was written would silently ignore a later change of
@@ -61,6 +69,9 @@ func ResolveAutoBase(req *model.Requirement, projDefaultBranch, parentBranch str
 	if req != nil {
 		if req.BaseBranchSource == model.BaseSourceExplicit && strings.TrimSpace(req.BaseBranch) != "" {
 			return req.BaseBranch, model.BaseSourceExplicit
+		}
+		if req.BaseBranchSource == model.BaseSourceCrossProject && strings.TrimSpace(req.BaseBranch) != "" {
+			return req.BaseBranch, model.BaseSourceCrossProject
 		}
 	}
 	if b := strings.TrimSpace(parentBranch); b != "" {

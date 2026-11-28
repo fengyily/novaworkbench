@@ -244,6 +244,31 @@ type SubTask struct {
 	// it and the user can see at a glance whether two sub-tasks are
 	// editing the same files.
 	WorkDir string `json:"work_dir,omitempty"`
+	// Mode is the execution mode of this row:
+	//   - SubTaskModeAuto  (default): the child directly implements the
+	//     sub-task and writes code to disk — every pre-existing row keeps
+	//     this value, so behaviour is byte-for-byte unchanged.
+	//   - SubTaskModePlan: the child runs read-only (--permission-mode plan)
+	//     and produces a Markdown implementation plan, stored in the
+	//     separate sub_task_plans table. The user reviews it and converts
+	//     the row to auto mode to get the implementation phase.
+	//
+	// Deliberately separate from SessionMode / ReportMode / TaskKind: those
+	// three are "conversation policy" / "report verbosity" / "kind of work",
+	// while this one is "what this round does".
+	Mode string `json:"mode,omitempty"`
+	// HasPlan reports whether this row carries a saved implementation plan
+	// (a row in sub_task_plans). It is NOT a column — the service fills it
+	// in on the read paths.
+	//
+	// Why the card needs it: the plan section must stay visible ABOVE the
+	// implementation report, because that is what makes the two-phase shape
+	// legible. But the row's `mode` flips to 'auto' when the user approves
+	// the plan, so `mode` alone can no longer answer "is there a plan to
+	// show?". This flag can.
+	//
+	// An old backend omits it → falsy → the card renders exactly as before.
+	HasPlan bool `json:"has_plan,omitempty"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with
@@ -341,6 +366,19 @@ const (
 	// instead of the executor persona's implementation instructions, and its
 	// report is persisted as a code_reviews row.
 	SubTaskKindReview = "review"
+)
+
+// Sub-task execution MODE values — what this round of the sub-task does.
+//
+//   - SubTaskModeAuto (default): implement the sub-task and write the code
+//     to disk. Every pre-existing row keeps this value.
+//   - SubTaskModePlan: read-only exploration that produces a Markdown
+//     implementation plan (stored in sub_task_plans) and writes no code.
+//     The user converts the row to auto mode afterwards to run the
+//     implementation phase.
+const (
+	SubTaskModeAuto = "auto"
+	SubTaskModePlan = "plan"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

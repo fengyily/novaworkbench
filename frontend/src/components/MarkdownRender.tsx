@@ -286,11 +286,15 @@ function ImageFigure({
 }
 
 // ZoomableImage — 普通 markdown 图片：onClick 走 ImageFigure 全屏浮层 + 工具栏。
-// Attachment images served at /api/requirements/.../attachments/.../content require
+// Attachment images served at /api/<collection>/.../attachments/.../content require
 // an Authorization header that <img> cannot send. We detect those URLs and fetch
 // the bytes via authedFetch, then hand the resulting blob: URL to the element.
+//
+// The collection list must cover every attachment owner the app has:
+// requirements (req_*), code-reviews (crv_*) and cross-requirements (xreq_*).
+// A missing one renders as a broken-image icon rather than an error.
 function isAuthedImageUrl(url: string): boolean {
-  return /\/api\/(requirements|code-reviews)\/[^/]+\/attachments\/[^/]+\/content(\?.*)?$/.test(url);
+  return /\/api\/(requirements|code-reviews|cross-requirements)\/[^/]+\/attachments\/[^/]+\/content(\?.*)?$/.test(url);
 }
 
 function useAuthedImage(origSrc: string | undefined): string | undefined {

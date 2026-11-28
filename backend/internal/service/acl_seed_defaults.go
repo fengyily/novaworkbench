@@ -14,6 +14,7 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_menu_chat", Key: "menu.chat", Name: "AI对话", Module: "menu", SortOrder: 4},
 		{ID: "perm_menu_reports", Key: "menu.reports", Name: "周报", Module: "menu", SortOrder: 5},
 		{ID: "perm_menu_settings", Key: "menu.settings", Name: "设置入口", Module: "menu", SortOrder: 6},
+		{ID: "perm_menu_cross_requirements", Key: "menu.cross_requirements", Name: "跨项目需求", Module: "menu", SortOrder: 7},
 
 		{ID: "perm_proj_manage", Key: "project.manage", Name: "项目管理（增删改）", Module: "project", SortOrder: 10},
 
@@ -27,6 +28,7 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_set_preflight", Key: "setting.preflight", Name: "环境依赖", Module: "setting", SortOrder: 27},
 
 		{ID: "perm_action_fs_browse", Key: "fs.browse", Name: "文件系统浏览（项目目录与 ~/workspace）", Module: "action", SortOrder: 30},
+		{ID: "perm_cross_requirement_manage", Key: "cross_requirement.manage", Name: "跨项目需求管理（创建/编辑/拆分/阶段验证）", Module: "action", SortOrder: 31},
 	}
 }
 
@@ -56,11 +58,17 @@ func DefaultRolePermissions() map[string][]string {
 	return map[string][]string{
 		"developer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.chat", "menu.reports",
-			"menu.settings", "setting.roles_ai", "setting.preflight",
-			"fs.browse",
+			"menu.settings", "menu.cross_requirements", "setting.roles_ai", "setting.preflight",
+			"fs.browse", "cross_requirement.manage",
 		},
+		// The viewer role gets the menu permission too: the cross-requirement
+		// pages are read-only for it, but the menu visibility is decided by the
+		// permission table — without the key the observer cannot even see the
+		// progress. The write key (cross_requirement.manage) is deliberately
+		// NOT granted here: creating / editing / deleting a cross-requirement
+		// and launching the AI jobs (design, split, verify) are guarded by it.
 		"viewer": {
-			"menu.dashboard", "menu.projects", "menu.knowledge",
+			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.cross_requirements",
 		},
 	}
 }

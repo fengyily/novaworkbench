@@ -256,7 +256,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.parent_design_hash,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.split_generation,r.cross_requirement_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.parent_design_hash,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at,"+
 			"(SELECT COUNT(1) FROM requirements c WHERE c.parent_id = r.id AND c.status != 'archived') AS child_count,"+
 			// qa_turn_count — how many stage-Q&A turns this requirement has been
@@ -281,7 +281,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.SplitGeneration, &r.CrossRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
@@ -482,12 +482,12 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.parent_design_hash,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,r.analyst_effort,r.architect_effort,r.developer_effort"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.parent_id,r.split_batch_id,r.dev_delegated,r.split_order,r.split_generation,r.cross_requirement_id,r.analysis_session_id,r.design_session_id,r.design_revision_no,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.parent_design_hash,r.base_branch,r.base_branch_source,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.auto_commit,r.auto_push_remote,r.auto_create_pr,r.no_branch,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,r.source_review_id,r.session_server_id,r.analyst_effort,r.architect_effort,r.developer_effort"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.ParentID, &r.SplitBatchID, &r.DevDelegated, &r.SplitOrder, &r.SplitGeneration, &r.CrossRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignRevisionNo, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.LastCodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
@@ -678,10 +678,10 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	// PromoteFromIdea below has its own INSERT and needs no change — the
 	// column defaults keep those rows at '' / 0.
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated,base_branch,base_branch_source) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,source_review_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data,parent_id,split_batch_id,dev_delegated,base_branch,base_branch_source,cross_requirement_id) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, sourceReviewID, skipAnalysis, skipDesign, now, now,
 		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData, req.ParentID,
-		req.SplitBatchID, req.DevDelegated, baseBranch, baseSource)
+		req.SplitBatchID, req.DevDelegated, baseBranch, baseSource, req.CrossRequirementID)
 	if err != nil {
 		return nil, err
 	}
@@ -1947,6 +1947,25 @@ func (s *RequirementService) Delete(id string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := s.purgeRequirementRows(tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// purgeRequirementRows deletes one requirement row and everything that
+// points at it, INSIDE the caller's transaction.
+//
+// It exists so that 「方案重新拆分」 can discard the previous batch of
+// sub-requirements and write the new batch inside the SAME transaction —
+// the atomicity invariant the split service is built on (see the three
+// invariants at the top of requirement_split.go). Delete's own semantics are
+// unchanged: the knowledge cleanup stays OUTSIDE the transaction, in Delete.
+//
+// The caller owns the transaction: it must have already begun one and must
+// roll it back on error.
+func (s *RequirementService) purgeRequirementRows(tx *db.Tx, id string) error {
+	// Children detach to top level rather than being cascaded away.
 	if _, err := tx.Exec("UPDATE requirements SET parent_id='' WHERE parent_id=?", id); err != nil {
 		return err
 	}
@@ -1975,6 +1994,13 @@ func (s *RequirementService) Delete(id string) error {
 	if _, err := tx.Exec("DELETE FROM requirement_findings WHERE requirement_id=? OR parent_id=?", id, id); err != nil {
 		return fmt.Errorf("cleanup requirement_findings: %w", err)
 	}
+	// A requirement that is a member of a cross-project phase must be
+	// removed from that phase too — otherwise the phase would keep a
+	// dangling member id and its "all members done" derivation would never
+	// become ready.
+	if _, err := tx.Exec("DELETE FROM cross_requirement_phase_items WHERE requirement_id=?", id); err != nil {
+		return fmt.Errorf("cleanup cross_requirement_phase_items: %w", err)
+	}
 	// Same reasoning for every other requirement_id child table: the schema
 	// declares ON DELETE CASCADE on them, but SQLite never enables
 	// PRAGMA foreign_keys, so the cascade silently no-ops and each deleted
@@ -2001,7 +2027,7 @@ func (s *RequirementService) Delete(id string) error {
 	if _, err := tx.Exec("DELETE FROM requirements WHERE id = ?", id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // BatchDeleteResult reports a batch delete row by row. A row that fails

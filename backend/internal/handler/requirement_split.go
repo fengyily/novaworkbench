@@ -105,6 +105,12 @@ type ConfirmSplitReq struct {
 	// （feat/req_<master>）由它 checkout 出来，拆分时还会被推送到远端。
 	// 留空则沿用主需求当前的基线。
 	SourceBranch string `json:"source_branch"`
+	// ReplaceExisting — 显式授权作废上一批子需求。
+	//
+	// 主需求已有子需求（上一批拆分产物）时，不带这个标志 ⇒ 400
+	// SPLIT_ALREADY_SPLIT —— 删数据是硬动作，必须由用户显式确认。
+	// 带上它 ⇒ 旧批次在确认事务里被整体替换为新批次。
+	ReplaceExisting bool `json:"replace_existing"`
 }
 
 // splitState holds the per-handler mutable state of the split feature.
@@ -144,15 +150,20 @@ func (h *WizardHandler) splitState() *splitState {
 //	no design docs           → SPLIT_NO_DESIGN
 //	the requirement is itself a child → SPLIT_PARENT_IS_CHILD
 //	archived                 → SPLIT_PARENT_ARCHIVED
-//	already split (dev_delegated) → SPLIT_ALREADY_SPLIT
 //	currently developing      → SPLIT_ALREADY_DEVELOPED
 //	a split is already running → SPLIT_IN_PROGRESS (409)
+//	an old sub-requirement is still developing → SPLIT_CHILDREN_IN_PROGRESS (409)
 //
 // NOTE: the "already developed" test used to be `branch_name != ""`, which
 // was wrong — the DESIGN stage writes branch_name (anchorWorktree), so a
 // requirement that had merely been designed looked "already in development"
-// and could never be split. The gate is the state machine plus the
-// dev_delegated flag instead. See splitPreconditionError.
+// and could never be split. The gate is the state machine instead. See
+// splitPreconditionError.
+//
+// "Already split" is NOT a precondition: a requirement whose development was
+// handed down to a batch of children may be split again (the plan can be
+// regenerated, which makes the previous breakdown stale). Whether that is
+// allowed depends on the CHILDREN's state — see splitChildrenBlocker.
 //
 // Returns {"job_id": ...}; the candidate list arrives on the job's SSE stream.
 func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +189,21 @@ func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
 
 	if code, msg := splitPreconditionError(reqRow); code != "" {
 		writeError(w, http.StatusBadRequest, code, msg)
+		return
+	}
+
+	// The old batch's state decides whether a (re-)split may start.
+	//
+	// This check must land BEFORE the AI is asked for candidates — a split
+	// run costs minutes, and a run that is bound to be refused at confirm
+	// time would have burned them for nothing.
+	oldChildren, err := h.reqSvc.ListChildren(reqID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	if code, msg := splitChildrenBlocker(splitBatchChildren(oldChildren)); code != "" {
+		writeError(w, http.StatusConflict, code, msg)
 		return
 	}
 
@@ -225,13 +251,14 @@ func (h *WizardHandler) Split(w http.ResponseWriter, r *http.Request) {
 // branch_name made branch-mode splitting a deadlock — 321 of the 476
 // requirements that had a design in the wild were blocked by it.
 //
-// Two distinct gates remain:
-//
-//   - dev_delegated → SPLIT_ALREADY_SPLIT. The master already handed its
-//     development down to a batch of children; splitting it again would
-//     produce a second, conflicting batch.
-//   - status == "developing" → SPLIT_ALREADY_DEVELOPED. The requirement is
-//     mid-development right now, so its branch has real commits on it.
+// "Already split" is deliberately NOT one of the gates. dev_delegated used to
+// be one, and it was a one-way flag: the split transaction set it to 1 and
+// nothing ever reset it. A master that had been split once could therefore
+// never be split again — but the plan can be REGENERATED, which makes the
+// previous breakdown stale, so re-splitting is a legitimate request. Whether
+// it may happen is decided by the CHILDREN's state instead (see
+// splitChildrenBlocker): the only thing that actually forbids a re-split is
+// an old child that is still being developed.
 //
 // A "done" requirement stays splittable: topping up the task breakdown of
 // a finished requirement is a legitimate request.
@@ -251,11 +278,56 @@ func splitPreconditionError(req *model.Requirement) (code, msg string) {
 	if req.Status == "archived" {
 		return "SPLIT_PARENT_ARCHIVED", "已归档的需求不能拆分"
 	}
-	if req.DevDelegated {
-		return "SPLIT_ALREADY_SPLIT", "该需求已拆分，开发已下放给子需求，不能重复拆分"
-	}
 	if req.Status == "developing" {
 		return "SPLIT_ALREADY_DEVELOPED", "该需求已进入开发，不能再拆分"
+	}
+	return "", ""
+}
+
+// splitBatchChildren returns the children that were produced by a split
+// batch — the ones a re-split would replace.
+//
+// The filter is a non-empty split_batch_id: a child that was attached by hand
+// (quick-create / SetParent) never got a batch id, so it belongs to no batch
+// and survives a re-split untouched.
+//
+// The service layer filters the same way (parent_id = ? AND a non-empty
+// split_batch_id); this is a deliberately duplicated pure filter, not a
+// shared helper — the handler must not reach into the service's SQL.
+func splitBatchChildren(children []*model.Requirement) []*model.Requirement {
+	out := make([]*model.Requirement, 0, len(children))
+	for _, c := range children {
+		if c == nil {
+			continue
+		}
+		if strings.TrimSpace(c.SplitBatchID) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// splitChildrenBlocker returns the error code + message when the existing
+// sub-requirements forbid a (re-)split. Empty code = may split.
+//
+// Only one situation is forbidden: an old sub-requirement of the previous
+// batch is still BEING DEVELOPED. That row has a live development job
+// behind it — deleting it would interrupt work in progress.
+//
+// The input must already be filtered to the previous batch (see
+// splitBatchChildren): a hand-attached child is not part of any batch, is
+// never replaced, and therefore never blocks.
+//
+// A "done" old child does NOT block: replacing it only loses the row, the
+// code it produced is still in git.
+func splitChildrenBlocker(children []*model.Requirement) (code, msg string) {
+	for _, c := range children {
+		if c == nil {
+			continue
+		}
+		if c.Status == "developing" {
+			return "SPLIT_CHILDREN_IN_PROGRESS", "已有子需求正在开发中，无法重新拆分"
+		}
 	}
 	return "", ""
 }
@@ -286,6 +358,19 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 		return
 	}
 
+	// A previous batch exists ⇒ this is a RE-SPLIT.
+	//
+	// The old children are about to be discarded (the plan was regenerated,
+	// which made the previous breakdown stale), so the prompt must NOT list
+	// them as "do not split these again" — that would make the model circle
+	// around the stale breakdown and produce the same set. It gets the
+	// re-split instruction instead.
+	resplit := len(splitBatchChildren(existing)) > 0
+	promptChildren := existing
+	if resplit {
+		promptChildren = nil
+	}
+
 	systemPrompt, modelName, configID := h.roleConfig("architect")
 	// An explicit per-request model / config wins over the persona default.
 	if strings.TrimSpace(body.Model) != "" {
@@ -313,7 +398,8 @@ func (h *WizardHandler) runSplit(job *store.Job, reqRow *model.Requirement, body
 	// 拆分属于「方案设计」阶段：用户选的档位优先，否则取该阶段的默认档位。
 	run.Effort = resolveEffort(h.llm, body.Effort, llm.StageDesign)
 
-	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, existing, run.ContextBlock)
+	promptText := prompt.BuildSplitPrompt(reqRow, reqRow.DesignDocs, promptChildren, run.ContextBlock,
+		prompt.SplitPromptOptions{Resplit: resplit})
 	usage := h.usageCtxForConfig("requirement_split", reqRow.ID, reqRow.ProjectID, job.ID, modelName, "", "", configID)
 
 	job.Append(store.LogLine{Type: "phase", Content: "🧩 正在分析方案并拆分任务…"})
@@ -640,6 +726,32 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The previous batch, if any. A master that was already split may be
+	// split AGAIN (the plan can be regenerated, which makes the old
+	// breakdown stale) — but only with the user's explicit consent, since
+	// the old batch is deleted.
+	//
+	// This check must land BEFORE prepareSplitStackBase: that call pushes
+	// the master branch to origin and takes minutes, and we must not burn
+	// them on a confirmation that is bound to be refused.
+	oldChildren, err := h.reqSvc.ListChildren(reqID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	oldBatch := splitBatchChildren(oldChildren)
+	if len(oldBatch) > 0 {
+		if !body.ReplaceExisting {
+			writeError(w, http.StatusBadRequest, "SPLIT_ALREADY_SPLIT",
+				fmt.Sprintf("该需求已有 %d 个子需求；如需重新拆分，请在拆分弹窗中确认作废旧子需求", len(oldBatch)))
+			return
+		}
+		if code, msg := splitChildrenBlocker(oldBatch); code != "" {
+			writeError(w, http.StatusConflict, code, msg)
+			return
+		}
+	}
+
 	// Prepare the stack bottom: the master's own dev branch, created from
 	// the user-picked source branch and pushed to origin. Every child will
 	// develop on it (stacked PRs), so it must exist remotely before the
@@ -698,7 +810,8 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	children, err := h.reqSvc.CreateChildren(parent, tasks, edges, service.SplitCreateOpts{
-		BaseBranch: stackBase,
+		BaseBranch:      stackBase,
+		ReplaceExisting: len(oldBatch) > 0,
 	})
 	if err != nil {
 		switch {
@@ -712,6 +825,10 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "SPLIT_PARENT_CROSS_PROJECT", "主需求属于其它项目")
 		case errors.Is(err, service.ErrParentNotFound):
 			writeError(w, http.StatusNotFound, "SPLIT_PARENT_NOT_FOUND", "主需求不存在")
+		case errors.Is(err, service.ErrSplitConflict):
+			writeError(w, http.StatusConflict, "SPLIT_CONFLICT", "拆分状态已变化，请刷新后重试")
+		case errors.Is(err, service.ErrChildInProgress):
+			writeError(w, http.StatusConflict, "SPLIT_CHILDREN_IN_PROGRESS", "已有子需求正在开发中，无法重新拆分")
 		default:
 			writeError(w, http.StatusInternalServerError, "SPLIT_CREATE_FAILED", err.Error())
 		}
@@ -780,14 +897,21 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		effectiveBase = children[0].BaseBranch
 	}
 
+	// The master's split-round counter after this batch landed. Read it back
+	// so the response reports the committed value rather than a prediction;
+	// if the read fails we still know it advanced by exactly one.
+	splitGeneration := parent.SplitGeneration + 1
+	if master, gErr := h.reqSvc.Get(reqID); gErr == nil {
+		splitGeneration = master.SplitGeneration
+	}
+
 	// 候选已经落库，这一轮 run 就"用掉了" —— 标记为已消费，state 端点随即回
 	// status:none。用户重开弹窗回到配置阶段，不会看到一份已经落过库的旧候选
 	//（会误以为还能再创建一批）。
 	//
 	// 用 consumeLatest 而不是按 job_id 消费：ConfirmSplitReq 里没有 job_id，
-	// 而同一需求同时只允许跑一次拆分（splitLocks 保证），且确认后 dev_delegated
-	// 会让 splitPreconditionError 挡掉二次拆分 —— 所以"最近一次 run"就是被确认
-	// 的那一轮。
+	// 而同一需求同时只允许跑一次拆分（splitLocks 保证）—— 所以"最近一次 run"
+	// 就是被确认的那一轮。
 	h.splitState().runs.consumeLatest(reqID)
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -796,6 +920,11 @@ func (h *WizardHandler) ConfirmSplit(w http.ResponseWriter, r *http.Request) {
 		"base_branch": effectiveBase,
 		"stack_base":  stackBase,
 		"pushed":      stackPushed,
+		// replaced_count — how many old sub-requirements this confirm threw
+		// away. 0 for a first split.
+		"replaced_count": len(oldBatch),
+		// split_generation — which split round the master is on now.
+		"split_generation": splitGeneration,
 	})
 }
 

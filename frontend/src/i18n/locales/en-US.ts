@@ -18,6 +18,7 @@ import schedules from './modules/schedules.en';
 import settings from './modules/settings.en';
 import components from './modules/components.en';
 import { claudeDoc } from './modules/claudeDoc.en';
+import { crossRequirements } from './modules/crossRequirements.en';
 
 const enUS = {
   common,
@@ -37,6 +38,7 @@ const enUS = {
   schedules,
   settings,
   claudeDoc,
+  crossRequirements,
 
   components,
 };

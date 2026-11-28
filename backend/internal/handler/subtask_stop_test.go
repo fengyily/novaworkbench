@@ -64,7 +64,7 @@ func newStopTestHandler(t *testing.T) (*WizardHandler, *db.DB, *service.Requirem
 // given job id — the shape of a row whose run died with the backend.
 func seedRunningSubTask(t *testing.T, svc *service.SubTaskService, reqID, jobID string) *model.SubTask {
 	t.Helper()
-	st, err := svc.Create(reqID, "[P1-4] fix", "prompt", "", "", "", 0, "", "", "", "", "")
+	st, err := svc.Create(reqID, "[P1-4] fix", "prompt", "", "", "", 0, "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("create sub-task: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestStopSubTask_LiveJob_CancelsAndStops(t *testing.T) {
 // a row that is not running is a no-op with a 409.
 func TestStopSubTask_NotRunning_Still409(t *testing.T) {
 	h, _, _, subTaskSvc, reqID := newStopTestHandler(t)
-	st, err := subTaskSvc.Create(reqID, "done row", "prompt", "", "", "", 0, "", "", "", "", "")
+	st, err := subTaskSvc.Create(reqID, "done row", "prompt", "", "", "", 0, "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("create sub-task: %v", err)
 	}

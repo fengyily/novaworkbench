@@ -479,7 +479,7 @@ export const scannerApi = {
 // requirement_attachments / code_review_attachments respectively. The
 // (owner, sha256) unique pair on the server means re-uploading the same bytes
 // reuses the same row — treat identical content as idempotent.
-export type AttachmentResource = 'requirements' | 'code-reviews';
+export type AttachmentResource = 'requirements' | 'code-reviews' | 'cross-requirements';
 
 export interface Attachment {
   id: string;
@@ -733,6 +733,20 @@ export interface SubTask {
   // re-check). Fix sub-tasks stay at 0, so the round chain is made of Review
   // nodes only.
   review_round?: number;
+  // Execution mode of this sub-task:
+  //   'auto' (default, and what every pre-existing row carries): implement
+  //   the sub-task and write the code to disk.
+  //   'plan': read-only exploration that produced a Markdown implementation
+  //   plan (fetched lazily from GET .../plan). The user converts the row to
+  //   'auto' to run the implementation phase.
+  // undefined on older backends — treat it as 'auto'.
+  mode?: 'auto' | 'plan';
+  // Whether this row carries a saved implementation plan (the plan-mode
+  // phase produced one). The plan section stays visible above the
+  // implementation report — the row's `mode` flips to 'auto' once the user
+  // approves the plan, so this flag is what says "there is a plan to show".
+  // undefined on older backends → falsy → the card renders as before.
+  has_plan?: boolean;
 }
 
 // 需求级 Review 的一轮。GET /api/requirements/{id}/reviews 的元素类型。
@@ -792,7 +806,7 @@ export const subTasksApi = {
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full'; effort?: string },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full'; effort?: string; mode?: 'auto' | 'plan' },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
@@ -813,6 +827,18 @@ export const subTasksApi = {
   // of list/get); content is '' when nothing was recorded.
   getThinking: (requirementId: string, subTaskId: string) =>
     api.get<{ content: string }>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}/thinking`),
+  // The implementation plan produced by a plan-mode sub-task. Fetched
+  // lazily (never part of list/get); content is '' when nothing was recorded.
+  getPlan: (requirementId: string, subTaskId: string) =>
+    api.get<{ content: string }>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}/plan`),
+  // Convert a finished plan-mode sub-task into the implementation phase
+  // (in place — same sub_task_id) and start it. 409 when the row is not a
+  // finished plan-mode sub-task.
+  startDev: (requirementId: string, subTaskId: string, data: { model?: string; effort?: string } = {}) =>
+    api.post<{ job_id: string; sub_task_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/start-dev`,
+      data,
+    ),
   // Append a follow-up instruction to an existing sub-task. Resumes the
   // parent's claude session via --fork-session so the child inherits the
   // parent's prior edits + transcript. Returns a new job_id/sub_task_id
@@ -1117,6 +1143,11 @@ export interface Requirement {
   // ParentID nests this row under a master requirement (one level, same
   // project). Empty / undefined = top level. Unrelated to source_requirement_id.
   parent_id?: string;
+  // CrossRequirementID links this row to the cross-project requirement
+  // (cross-project requirement) it belongs to. Empty = an ordinary requirement. NOT a
+  // hierarchy edge: the cross-project children are PEERS, each living in
+  // its own project, so ParentID stays empty for them.
+  cross_requirement_id?: string;
   // Derived by List only: number of non-archived children.
   child_count?: number;
   // Derived by List only: how many stage-Q&A turns (方案/开发答疑) this
@@ -1345,6 +1376,10 @@ export interface Requirement {
   // 这一列是批次顺序**唯一**的持久化落点：同一批子需求共用一个 created_at，
   // 只按创建时间排的话批内顺序是未定义的（实际退化成按随机 id 排，顺序会乱）。
   split_order?: number;
+  // 这一行是第几轮「方案拆分」的主体（0 = 从未拆分）。主需求每成功落库一批
+  // 子需求 +1，子需求恒为 0。它同时是后端确认事务的 CAS 令牌 ——
+  // 并发确认时条件 UPDATE 匹配不到行，整批回滚。
+  split_generation?: number;
   // 开发权已下放给子需求（true）时，本需求不再自己写代码 —— coding 闸门会
   // 拒绝它进入开发，主需求改为「全部子需求完成后才能标记完成」。
   dev_delegated?: boolean;
@@ -1694,6 +1729,10 @@ export interface SplitConfirmResult {
   stack_base?: string;
   // 栈底分支是否已推送到远端。堆叠 PR 的 base 必须在 origin 上存在。
   pushed?: boolean;
+  // 本次被作废的旧子需求数（重新拆分时 > 0）。未发生替换时为空 / 0。
+  replaced_count?: number;
+  // 本轮之后的拆分代数（第几轮）。0 = 该需求从未拆分过。
+  split_generation?: number;
 }
 
 // 一条依赖边。requirement_id 依赖 depends_on_id。
@@ -1861,7 +1900,12 @@ export const requirementsApi = {
   // signal — optional AbortSignal. The confirm prepares the stack-bottom
   // branch and PUSHES it to origin, so the request can take a while on a slow
   // or unreachable remote; the caller aborts it instead of spinning forever.
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: SplitReferencePair[]; source_branch?: string }, signal?: AbortSignal) =>
+  //
+  // replace_existing — explicit authorization to discard the previous split
+  // batch. The backend refuses (SPLIT_ALREADY_SPLIT) when the requirement
+  // already has children and this flag is absent, so a re-split always needs
+  // the user's confirmation.
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: SplitReferencePair[]; source_branch?: string; replace_existing?: boolean }, signal?: AbortSignal) =>
     api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body, signal ? { signal } : undefined),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>
@@ -4064,4 +4108,366 @@ export const projectClaudeDocApi = {
     api.post<ProjectClaudeDoc>(`/api/projects/${projectId}/claude-doc/revisions/${revId}/restore`, {}),
   streamJobUrl: (projectId: string, jobId: string) =>
     `/api/projects/${projectId}/claude-doc/jobs/${jobId}/stream`,
+};
+
+// ── Cross-project requirements ─────────────────────────────────────────────
+//
+// 一个横跨多个项目 / 仓库的顶层需求实体。它的子需求是**普通的** requirements
+// 行（各归各的项目），所以子需求在各自的项目里走完全一样的开发流程 —— 前端
+// 只需要知道它们带一个 cross_requirement_id 徽章。
+
+export interface CrossRequirement {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  kind: string;
+  acceptance_criteria: string;
+  design_docs: string;
+  design_session_id: string;
+  design_job_id: string;
+  // split_batch_id — the id of the split batch that produced this
+  // requirement's children. Empty = never split. A cross-project
+  // requirement is split at most once, so a non-empty value means the
+  // split button must stay disabled.
+  split_batch_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string;
+  // deleted_at — the trash stamp. Empty = not in the trash; non-empty = the
+  // time it was moved there.
+  //
+  // It is orthogonal to `status`: status is the lifecycle (draft → … → done /
+  // archived), deleted_at is "does this row still show up in the list". The
+  // split exists because "archive" (keep, just hide) and "delete" (move away,
+  // restorable) are two different things.
+  deleted_at: string;
+}
+
+export interface CrossRequirementProjectProgress {
+  project_id: string;
+  project_name: string;
+  role: string;
+  // base_branch — the base branch of this participating project (its
+  // sub-requirements are developed from this branch). Empty = the project's
+  // own default branch.
+  base_branch: string;
+  total: number;
+  done: number;
+  blocked: number;
+}
+
+// CrossRequirementProjectInput — one participating project (id + role + base
+// branch).
+export interface CrossRequirementProjectInput {
+  project_id: string;
+  role?: string;
+  base_branch?: string;
+}
+
+export interface CrossRequirementProgress {
+  total: number;
+  done: number;
+  blocked: number;
+  percent: number;
+  projects: CrossRequirementProjectProgress[];
+  status_counts: Record<string, number>;
+}
+
+export interface CrossRequirementChild {
+  id: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: string;
+  priority: string;
+  split_order: number;
+  // base_branch — the base branch this sub-requirement actually uses
+  // (inherited from its participating project's base branch).
+  base_branch: string;
+  depends_on: string[];
+  blocked_by: string[];
+}
+
+export interface CrossRequirementDependency {
+  requirement_id: string;
+  depends_on_id: string;
+  requirement_title: string;
+  depends_on_title: string;
+  cross_project: boolean;
+  met: boolean;
+}
+
+export interface CrossRequirementPhaseItem {
+  id: string;
+  phase_id: string;
+  requirement_id: string;
+  status: string;
+}
+
+export interface CrossRequirementPhase {
+  id: string;
+  cross_requirement_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  status: string;
+  verify_job_id: string;
+  verify_report: string;
+  verified_at: string;
+  created_at: string;
+  updated_at: string;
+  items: CrossRequirementPhaseItem[];
+}
+
+export interface CrossRequirementDetail extends CrossRequirement {
+  projects: CrossRequirementProjectProgress[];
+  children: CrossRequirementChild[];
+  dependencies: CrossRequirementDependency[];
+  phases: CrossRequirementPhase[];
+  progress: CrossRequirementProgress;
+  // bases — 各参与仓库的基线台账：整体方案是对着哪个提交写的。
+  bases: CrossRequirementBase[];
+  // pending_decisions — 整体方案里还没定、需要人拍板的点。
+  //
+  // 服务端每次从 design_docs 现算（方案改了它就跟着变），不落库。
+  pending_decisions: CrossPendingDecision[];
+}
+
+/**
+ * CrossPendingDecision — one open question the overall design leaves for the
+ * human to settle.
+ *
+ * title is the short label ("接口超时时间"); detail is the full line the model
+ * wrote (why it needs a human, what the options are).
+ */
+export interface CrossPendingDecision {
+  title: string;
+  detail: string;
+}
+
+/**
+ * CrossRequirementQATurn — one question-and-answer turn of the design
+ * adjustment thread.
+ *
+ * The thread hangs off a cross requirement's overall design: the user settles
+ * the pending decisions with the AI, then re-completes the plan with the
+ * conclusions folded in.
+ */
+export interface CrossRequirementQATurn {
+  id: string;
+  cross_requirement_id: string;
+  question: string;
+  answer: string;
+  status: 'running' | 'done' | 'error';
+  job_id: string;
+  model: string;
+  session_id: string;
+  source_session_id: string;
+  resumed: boolean;
+  error_kind: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+/**
+ * CrossAdjustState — the adjustment thread plus whatever is running.
+ *
+ * One call carries everything the panel needs to re-attach after a refresh:
+ * the turns themselves plus the job id of the one still in flight.
+ */
+export interface CrossAdjustState {
+  status: 'none' | 'running' | 'done' | 'error';
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  turns: CrossRequirementQATurn[];
+}
+
+/**
+ * CrossRequirementBase — one participating repository's baseline.
+ *
+ * base_sha is the commit the overall design was written against; empty means
+ * the baseline could not be locked (non-git repo / no origin) and the design
+ * read the shared checkout instead.
+ */
+export interface CrossRequirementBase {
+  project_id: string;
+  base_branch: string;
+  base_sha: string;
+  worktree_path: string;
+  degraded: boolean;
+}
+
+export interface CrossRequirementListPayload {
+  items: CrossRequirement[];
+  progress: Record<string, CrossRequirementProgress>;
+}
+
+/** A candidate sub-requirement produced by the cross-project split. */
+export interface CrossSplitCandidate {
+  title: string;
+  description: string;
+  scope: string[];
+  acceptance: string[];
+  boundary: string;
+  /** The project name the model proposed (display only). */
+  project: string;
+  /** The resolved project id — the server rejects the batch when it is empty
+   *  or points outside the participating project set. */
+  project_id: string;
+  order: number;
+  /** Prerequisites, expressed as batch-local ordinals (1-based). */
+  depends_on: number[];
+}
+
+export interface CrossSplitState {
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  candidates: CrossSplitCandidate[];
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
+/** The state of the most recent overall-design run of a cross requirement. */
+export interface CrossDesignState {
+  /** none | running | done | error */
+  status: string;
+  job_id: string;
+  running: boolean;
+  error_message: string;
+  design: string;
+  model: string;
+  created_at: number;
+  finished_at: number;
+}
+
+export const crossRequirementsApi = {
+  list: (params?: { status?: string; keyword?: string }) => {
+    const q = new URLSearchParams();
+    Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
+    return api.get<CrossRequirementListPayload>(`/api/cross-requirements?${q.toString()}`);
+  },
+  create: (data: {
+    title?: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    project_ids?: string[];
+    // projects — the participating projects in full (each may carry its own
+    // base branch). Takes precedence over project_ids when present.
+    projects?: CrossRequirementProjectInput[];
+    // draft — pre-create a placeholder row so inline images / file
+    // attachments have an owner to hang off before the form is filled in.
+    // The server then accepts an empty title and zero projects; the panel
+    // completes both on submit.
+    draft?: boolean;
+  }) => api.post<CrossRequirement>('/api/cross-requirements', data),
+  get: (id: string) => api.get<CrossRequirementDetail>(`/api/cross-requirements/${id}`),
+  // Partial update: an omitted field keeps the stored value, so a
+  // status-only call never clobbers the title / priority / kind.
+  //
+  // `description` is the one exception: pass "" to CLEAR it. The server
+  // distinguishes "field absent" (keep) from "field present but empty"
+  // (clear) — without that distinction the panel could never empty the
+  // description.
+  update: (id: string, data: {
+    title?: string;
+    description?: string;
+    priority?: string;
+    kind?: string;
+    acceptance_criteria?: string[];
+    status?: string;
+  }) => api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}`, data),
+  // ── trash ───────────────────────────────────────────────────────────────
+  // Deletion is TWO steps: move to the trash (restorable), then purge
+  // (permanent, only reachable from the trash).
+  //
+  // The reason for the extra step: once a cross-project requirement has been
+  // split, the overall design / integration phases / cross-project
+  // dependencies are no longer reproducible — the code inside the children
+  // survives, but the context that aligned several repositories is gone for
+  // good. So the irreversible action must never be one click away.
+  trash: (id: string) => api.delete<{ trashed: boolean }>(`/api/cross-requirements/${id}`),
+  restore: (id: string) => api.post<CrossRequirementDetail>(`/api/cross-requirements/${id}/restore`, {}),
+  purge: (id: string) => api.delete<{ deleted: boolean }>(`/api/cross-requirements/${id}/purge`),
+  // trashList — the rows sitting in the trash, most recently deleted first.
+  trashList: () => api.get<CrossRequirementListPayload>('/api/cross-requirements/trash'),
+  setProjects: (id: string, projects: CrossRequirementProjectInput[]) =>
+    api.put<{ projects: unknown[] }>(`/api/cross-requirements/${id}/projects`, { projects }),
+  // ── overall design ──────────────────────────────────────────────────────
+  // apply_discussion — 把「方案调整对话」的讨论记录整段喂进提示词，让这一版
+  // 方案按讨论结论修订。
+  //
+  // 它是**显式开关**而不是「有讨论就自动注入」：讨论记录里混着用户还没拍板的
+  // 问答，自动注入等于 AI 把用户没同意的回答当成结论写进方案，而用户点的其实
+  // 是「重新生成」。两个意图必须由用户自己区分。
+  startDesign: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string; apply_discussion?: boolean }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/design`, body ?? {}),
+  // designState — the most recent overall-design run. The job survives the
+  // page being closed (it lives in the server's JobStore), but its id only
+  // exists in the server's in-process registry — this endpoint is the only
+  // way for a reopened page to find it again.
+  designState: (id: string) => api.get<CrossDesignState>(`/api/cross-requirements/${id}/design/state`),
+  streamDesignUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/design/${jobId}/stream`,
+  saveDesign: (id: string, designDocs: string) =>
+    api.put<CrossRequirementDetail>(`/api/cross-requirements/${id}/design`, { design_docs: designDocs }),
+  // ── design adjustment (方案调整对话) ───────────────────────────────────
+  // 整体方案跑完之后，方案里常留着「待决策事项」。用户在这里跟 AI 谈拢这些点，
+  // 谈完再点「按讨论结论重新补全方案」——方案作业会带上这段讨论重跑一次。
+  //
+  // adjustState — 整条线程 + 正在跑的那一轮（一次拿全，刷新后据此接回）。
+  adjustState: (id: string) =>
+    api.get<CrossAdjustState>(`/api/cross-requirements/${id}/design/adjust`),
+  // askAdjust — 提一个问题（或者拍一条板）。返回 job_id（订阅流用）与 turn_id。
+  askAdjust: (id: string, question: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string; turn_id: string }>(`/api/cross-requirements/${id}/design/adjust`, {
+      question,
+      ...(body?.model ? { model: body.model } : {}),
+      ...(body?.claude_config_id ? { claude_config_id: body.claude_config_id } : {}),
+      ...(body?.effort ? { effort: body.effort } : {}),
+    }),
+  // resetAdjust — 清空整条线程。清空之后，方案作业不再带这些结论。
+  resetAdjust: (id: string) => api.delete<void>(`/api/cross-requirements/${id}/design/adjust`),
+  // removeAdjustTurn — 删掉一轮。
+  removeAdjustTurn: (id: string, turnId: string) =>
+    api.delete<void>(`/api/cross-requirements/${id}/design/adjust/turns/${turnId}`),
+  // streamAdjustUrl — 一轮调整的 SSE 通道（与设计 / 拆分 / 验证各自的专属通道
+  // 同款，不共用全局作业流）。
+  streamAdjustUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/design/adjust/${jobId}/stream`,
+  // ── split ───────────────────────────────────────────────────────────────
+  startSplit: (id: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/split`, body ?? {}),
+  splitState: (id: string) => api.get<CrossSplitState>(`/api/cross-requirements/${id}/split/state`),
+  streamSplitUrl: (id: string, jobId: string) =>
+    `/api/cross-requirements/${id}/split/${jobId}/stream`,
+  confirmSplit: (id: string, candidates: CrossSplitCandidate[]) =>
+    api.post<{ children: CrossRequirementChild[]; detail: CrossRequirementDetail }>(
+      `/api/cross-requirements/${id}/split/confirm`, { candidates }),
+  // ── phases ──────────────────────────────────────────────────────────────
+  createPhase: (id: string, data: { name: string; description?: string; requirement_ids?: string[] }) =>
+    api.post<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases`, data),
+  updatePhase: (id: string, phaseId: string, data: {
+    name?: string;
+    description?: string;
+    requirement_ids?: string[];
+    status?: string;
+    verify_report?: string;
+  }) => api.put<CrossRequirementPhase>(`/api/cross-requirements/${id}/phases/${phaseId}`, data),
+  deletePhase: (id: string, phaseId: string) =>
+    api.delete<void>(`/api/cross-requirements/${id}/phases/${phaseId}`),
+  startVerify: (id: string, phaseId: string, body?: { model?: string; claude_config_id?: string; effort?: string }) =>
+    api.post<{ job_id: string }>(`/api/cross-requirements/${id}/phases/${phaseId}/verify`, body ?? {}),
+  streamVerifyUrl: (id: string, phaseId: string, jobId: string) =>
+    `/api/cross-requirements/${id}/phases/${phaseId}/verify/${jobId}/stream`,
 };

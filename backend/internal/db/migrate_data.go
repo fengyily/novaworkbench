@@ -24,6 +24,22 @@ var copyOrder = []string{
 	"project_claude_doc_revisions",
 	"memories",
 	"requirements",
+	// 跨项目需求 (cross-project requirement) — the top-level entity that
+	// spans several projects. Parents before children: the entity itself,
+	// then its project mapping / phases / phase items.
+	"cross_requirements",
+	"cross_requirement_projects",
+	"cross_requirement_phases",
+	"cross_requirement_phase_items",
+	// 基线台账 — 记录整体方案是对着哪个提交写的。It is a child of the
+	// cross requirement (and of the projects it names), so it travels after
+	// both.
+	"cross_requirement_bases",
+	// 跨项目需求的附件 — owner 是 cross_requirements 行，随它一起搬。
+	"cross_requirement_attachments",
+	// 跨项目需求的「方案调整对话」轮次 — 同样是 cross_requirements 的子表，
+	// 随它一起搬（讨论记录丢了，「按结论重新补全方案」就没东西可依据）。
+	"cross_requirement_qa_turns",
 	// Dependency edges between sibling sub-requirements — both endpoints are
 	// requirements, and "requirements" has already been copied above.
 	"requirement_dependencies",
@@ -65,6 +81,11 @@ var copyOrder = []string{
 	"project_stars",
 	"sessions",
 	"sub_tasks",
+	// 子任务的思考文本与实施方案正文 —— sub_tasks 的子表，随它一起搬。
+	// sub_task_thinking 此前漏登记，跨库迁移会静默丢掉所有子任务的思考文本
+	// （与 coding_chats 当年的同类 bug 同型，见本文件 59-64 行注释），一并补上。
+	"sub_task_thinking",
+	"sub_task_plans",
 	"scheduled_tasks",
 }
 

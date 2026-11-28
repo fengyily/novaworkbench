@@ -489,6 +489,7 @@ export const requirements = {
     headerBadgeIdea: '想法 — 仅讨论方案，不进入开发',
     headerBadgeIssue: '问题 — 排查根因并修复',
     headerBadgeRequirement: '需求 — 标准 3 阶段实现',
+    crossRequirementBadge: '跨项目需求',
     headerBadgeWiki: '知识库 — 沉淀可复用的 Markdown 文档',
     // Wiki kind detail-page actions + hints.
     tabWikiDoc: '知识库文档',
@@ -1093,6 +1094,22 @@ export const requirements = {
     confirming: '创建中… {{sec}}s',
     confirmingHint: '正在创建主需求分支、推送到远端并写入子需求；大仓库首次推送可能需要一两分钟。',
     confirmTimeout: '创建超时：推送主需求分支到远端耗时过长，已中止。请检查网络与仓库凭据后重试（已创建的子需求不会重复创建）。',
+    // ── 重新拆分 ───────────────────────────────────────────────────────
+    // 主需求已经拆过一次、而技术方案又被重新生成过时的提示与按钮文案。
+    // 旧子需求会在确认创建时被作废 —— 所以必须先讲清楚「会删掉什么」。
+    resplitTitle: '重新拆分',
+    resplitWarn: '该需求已有 {{count}} 个子需求（上一轮拆分的产物）。确认创建时它们会被作废，并按当前技术方案重新拆解。',
+    resplitListMore: '等 {{count}} 个',
+    resplitConfirm: '作废旧子需求并创建 {{count}} 个新子需求',
+    // 方案重新生成后、已有子需求可能已过时时的提示。它把「重新拆分」的下一步
+    // 直接摆在用户眼前 —— 否则子需求与新方案脱节这件事只有用户自己点进拆分
+    // 弹窗才会发现。
+    //
+    // 不带数量：主需求的子需求里既有拆分产物也有人工挂载的，而重新拆分只
+    // 作废前者（split_batch_id 非空的那批）。数量以拆分弹窗里的清单为准，
+    // 这里只负责把「该重新拆了」这件事说出来。
+    resplitHint: '技术方案已重新生成，之前的子需求可能已经过时。可以按新方案重新拆分。',
+    resplitHintAction: '去重新拆分',
     configTitle: '拆分设置',
     modelLabel: '模型',
     execEnvLabel: '执行环境',
@@ -1119,9 +1136,11 @@ export const requirements = {
     errIsChild: '子需求不能再拆分（需求层级仅支持一层）',
     errArchived: '已归档的需求不能拆分',
     errDeveloped: '该需求已进入开发，不能再拆分',
-    errAlreadySplit: '该需求已拆分，开发已下放给子需求，不能重复拆分',
+    errAlreadySplit: '该需求已有子需求；如需重新拆分，请确认作废旧子需求',
     errInProgress: '已有拆分任务在运行，请等待结束',
     errCycle: '前置依赖成环，无法创建子需求',
+    errChildrenInProgress: '已有子需求正在开发中，无法重新拆分',
+    errConflict: '拆分状态已变化，请刷新后重试',
     errExpired: '拆分结果已失效，请重新生成',
     errGeneric: '拆分失败：{{msg}}',
     // ── 状态条 / 流面板 ───────────────────────────────────────────────

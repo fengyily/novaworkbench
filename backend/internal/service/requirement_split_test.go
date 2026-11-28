@@ -608,3 +608,319 @@ func TestCreateChildren_NoBranchMasterFallsBackToProjectDefault(t *testing.T) {
 		}
 	}
 }
+
+// ── 重新拆分（ReplaceExisting）────────────────────────────────────────────
+
+// seedSplitChild inserts a sub-requirement row with an explicit batch id.
+//
+// The batch id is what separates a SPLIT PRODUCT (a non-empty
+// split_batch_id) from a hand-made child (an empty split_batch_id) —
+// only the former is discarded by a re-split.
+func seedSplitChild(t *testing.T, svc *RequirementService, id, parentID, batchID, status string, order int) {
+	t.Helper()
+	if _, err := svc.db.Exec(
+		`INSERT INTO requirements (id, project_id, title, description, status, base_branch, base_branch_source, parent_id, split_batch_id, dev_delegated, split_order)
+		 VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, 0, ?)`,
+		id, "proj_a", id, status, "main", model.BaseSourceParent, parentID, batchID, order,
+	); err != nil {
+		t.Fatalf("insert child %s: %v", id, err)
+	}
+}
+
+// childRows returns the rows of a master's children, keyed by id.
+func childRows(t *testing.T, svc *RequirementService, parentID string) map[string]model.Requirement {
+	t.Helper()
+	rows, err := svc.db.Query(
+		`SELECT id, split_batch_id, split_order, status FROM requirements WHERE parent_id=?`, parentID)
+	if err != nil {
+		t.Fatalf("query children: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]model.Requirement{}
+	for rows.Next() {
+		var r model.Requirement
+		if err := rows.Scan(&r.ID, &r.SplitBatchID, &r.SplitOrder, &r.Status); err != nil {
+			t.Fatalf("scan child: %v", err)
+		}
+		out[r.ID] = r
+	}
+	return out
+}
+
+// A re-split REPLACES the previous batch: the old children are gone and the
+// new ones land in their place, under a fresh batch id.
+//
+// The old batch's rows are physically deleted (not archived) — the whole
+// point of re-splitting is that the previous decomposition was based on a
+// plan that no longer exists.
+func TestCreateChildren_ReplaceExistingDiscardsPreviousBatch(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	firstBatch, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{})
+	if err != nil {
+		t.Fatalf("first CreateChildren: %v", err)
+	}
+	oldIDs := []string{}
+	oldBatchID := ""
+	for _, c := range firstBatch {
+		oldIDs = append(oldIDs, c.ID)
+		oldBatchID = c.SplitBatchID
+	}
+
+	// The master now carries the round counter — a re-split bumps it.
+	master, err = svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if master.SplitGeneration != 1 {
+		t.Fatalf("master split_generation = %d after the first split, want 1", master.SplitGeneration)
+	}
+
+	children, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{ReplaceExisting: true})
+	if err != nil {
+		t.Fatalf("re-split CreateChildren: %v", err)
+	}
+	if len(children) != 3 {
+		t.Fatalf("got %d children, want 3", len(children))
+	}
+
+	rows := childRows(t, svc, "req_master")
+	if len(rows) != 3 {
+		t.Errorf("got %d child rows after the re-split, want 3 (the old batch must be gone)", len(rows))
+	}
+	for _, oldID := range oldIDs {
+		if _, still := rows[oldID]; still {
+			t.Errorf("old child %s survived the re-split", oldID)
+		}
+	}
+	newBatchID := ""
+	for i, c := range children {
+		if c.SplitOrder != i+1 {
+			t.Errorf("child %s split_order = %d, want %d", c.ID, c.SplitOrder, i+1)
+		}
+		if c.SplitBatchID == "" {
+			t.Errorf("child %s has no split_batch_id", c.ID)
+		}
+		if c.SplitBatchID == oldBatchID {
+			t.Errorf("child %s reuses the old batch id %q — the batch must be fresh", c.ID, oldBatchID)
+		}
+		if newBatchID == "" {
+			newBatchID = c.SplitBatchID
+		} else if c.SplitBatchID != newBatchID {
+			t.Errorf("child %s batch id = %q, want %q (one batch per split)", c.ID, c.SplitBatchID, newBatchID)
+		}
+	}
+
+	after, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if !after.DevDelegated {
+		t.Error("master dev_delegated = false after a re-split")
+	}
+	if after.SplitGeneration != 2 {
+		t.Errorf("master split_generation = %d after the re-split, want 2", after.SplitGeneration)
+	}
+}
+
+// A re-split only discards the PREVIOUS SPLIT BATCH. A hand-made child
+// (an empty split_batch_id — quick-create or SetParent) is not part of any
+// batch and must survive untouched.
+func TestCreateChildren_ReplaceExistingKeepsManualChildren(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if _, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{}); err != nil {
+		t.Fatalf("first CreateChildren: %v", err)
+	}
+	// A hand-made child: same parent, but it belongs to no split batch.
+	seedSplitChild(t, svc, "req_manual", "req_master", "", "draft", 0)
+
+	master, err = svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if _, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{ReplaceExisting: true}); err != nil {
+		t.Fatalf("re-split CreateChildren: %v", err)
+	}
+
+	rows := childRows(t, svc, "req_master")
+	if _, still := rows["req_manual"]; !still {
+		t.Error("the hand-made child was deleted by the re-split — only the previous BATCH may be discarded")
+	}
+	if len(rows) != 4 {
+		t.Errorf("got %d child rows, want 4 (3 new + 1 hand-made)", len(rows))
+	}
+}
+
+// The old batch's dependency edges must go with it — in BOTH directions.
+// A dangling edge blocks the dependent's coding gate forever (the gate
+// looks up status != 'done' and a missing row never satisfies it).
+func TestCreateChildren_ReplaceExistingClearsOldDependencyEdges(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	// A previous batch with an edge between two of its members.
+	seedSplitChild(t, svc, "req_old_a", "req_master", "spb_old", "draft", 1)
+	seedSplitChild(t, svc, "req_old_b", "req_master", "spb_old", "draft", 2)
+	if _, err := svc.db.Exec(
+		`INSERT INTO requirement_dependencies (id,requirement_id,depends_on_id,batch_id,created_at) VALUES (?,?,?,?,?)`,
+		"dep_old", "req_old_b", "req_old_a", "spb_old", "2026-01-01 00:00:00",
+	); err != nil {
+		t.Fatalf("insert old edge: %v", err)
+	}
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if _, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{ReplaceExisting: true}); err != nil {
+		t.Fatalf("re-split CreateChildren: %v", err)
+	}
+
+	var n int
+	if err := svc.db.QueryRow(
+		`SELECT COUNT(1) FROM requirement_dependencies WHERE requirement_id IN ('req_old_a','req_old_b') OR depends_on_id IN ('req_old_a','req_old_b')`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count old edges: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("got %d dependency edges still pointing at the old batch, want 0", n)
+	}
+}
+
+// A child that is still being developed has a live dev job writing to that
+// row — deleting it would interrupt work in flight. The re-split is
+// refused and NOTHING is written.
+func TestCreateChildren_ReplaceExistingRefusesDevelopingChild(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	seedSplitChild(t, svc, "req_old_a", "req_master", "spb_old", "draft", 1)
+	seedSplitChild(t, svc, "req_old_b", "req_master", "spb_old", "developing", 2)
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	_, err = svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{ReplaceExisting: true})
+	if !errors.Is(err, ErrChildInProgress) {
+		t.Fatalf("err = %v, want ErrChildInProgress", err)
+	}
+
+	rows := childRows(t, svc, "req_master")
+	if len(rows) != 2 {
+		t.Errorf("got %d child rows, want 2 (the old batch must be untouched)", len(rows))
+	}
+	for _, id := range []string{"req_old_a", "req_old_b"} {
+		if _, still := rows[id]; !still {
+			t.Errorf("old child %s was deleted despite the refusal", id)
+		}
+	}
+	// The CAS was rolled back with the rest of the transaction.
+	after, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if after.SplitGeneration != 0 {
+		t.Errorf("master split_generation = %d after a refused re-split, want 0 (the CAS must roll back too)", after.SplitGeneration)
+	}
+}
+
+// Two tabs confirming at once: both read the same round counter, only one
+// may advance it. The loser gets ErrSplitConflict and writes NOTHING —
+// two batches of children would be worse than one.
+func TestCreateChildren_CASMismatchRollsBack(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if _, err := svc.CreateChildren(master, splitTasks(), nil, SplitCreateOpts{}); err != nil {
+		t.Fatalf("first CreateChildren: %v", err)
+	}
+
+	// The master is re-read — the value a second tab would have seen.
+	stale, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	// ...and meanwhile the other tab's confirm lands.
+	if _, err := svc.db.Exec(
+		`UPDATE requirements SET split_generation=split_generation+1 WHERE id=?`, "req_master",
+	); err != nil {
+		t.Fatalf("bump generation: %v", err)
+	}
+
+	before := len(childRows(t, svc, "req_master"))
+	_, err = svc.CreateChildren(stale, splitTasks(), nil, SplitCreateOpts{ReplaceExisting: true})
+	if !errors.Is(err, ErrSplitConflict) {
+		t.Fatalf("err = %v, want ErrSplitConflict", err)
+	}
+	if after := len(childRows(t, svc, "req_master")); after != before {
+		t.Errorf("got %d child rows after the conflict, want %d (nothing may be written)", after, before)
+	}
+}
+
+// A cycle in the NEW batch aborts the whole thing — including the
+// replacement of the old one. The old children must still be there and the
+// round counter must not have moved.
+func TestCreateChildren_ReplaceExistingRollsBackOnDependencyCycle(t *testing.T) {
+	svc := newSplitSvc(t)
+	seedSplitProject(t, svc, "proj_a", "main")
+	seedSplitReq(t, svc, "req_master", "proj_a", "大需求", "main", model.BaseSourceProject, "designed")
+
+	seedSplitChild(t, svc, "req_old_a", "req_master", "spb_old", "draft", 1)
+	if _, err := svc.db.Exec(
+		`UPDATE requirements SET split_generation=1, dev_delegated=1 WHERE id=?`, "req_master",
+	); err != nil {
+		t.Fatalf("seed master state: %v", err)
+	}
+
+	master, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	tasks := splitTasks()[:2]
+	tasks[0].ID = "req_a"
+	tasks[1].ID = "req_b"
+	edges := []model.DependencyEdge{
+		{RequirementID: "req_a", DependsOnID: "req_b"},
+		{RequirementID: "req_b", DependsOnID: "req_a"},
+	}
+	_, err = svc.CreateChildren(master, tasks, edges, SplitCreateOpts{ReplaceExisting: true})
+	if !errors.Is(err, ErrDependencyCycle) {
+		t.Fatalf("err = %v, want ErrDependencyCycle", err)
+	}
+
+	rows := childRows(t, svc, "req_master")
+	if len(rows) != 1 {
+		t.Errorf("got %d child rows, want 1 (the old batch must survive the rollback)", len(rows))
+	}
+	if _, still := rows["req_old_a"]; !still {
+		t.Error("the old batch was discarded despite the cycle rollback")
+	}
+	after, err := svc.Get("req_master")
+	if err != nil {
+		t.Fatalf("Get master: %v", err)
+	}
+	if after.SplitGeneration != 1 {
+		t.Errorf("master split_generation = %d after the rollback, want 1 (unchanged)", after.SplitGeneration)
+	}
+}

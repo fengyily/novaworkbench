@@ -75,6 +75,34 @@
   border-radius: var(--radius-sm);
 }
 
+/* ── 「重新拆分」警告条 ────────────────────────────────────────────────
+   该需求已经有一批拆分产物，确认创建时它们会被作废。这条警告条在用户
+   烧掉一次 AI 运行之前把这件事说清楚。
+
+   令牌用法照抄上面的 .req-split-error —— 颜色全部走 var()，不写死
+   字面量（ui-audit 的 R1/R2 规则会拦）。类名带 req-split- 前缀，属
+   于组件私有修饰类，不触发 R13「通用类名落在页面私有样式表」。 */
+.req-split-resplit-warn {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--color-warning-soft, #fef3c7);
+  color: var(--color-warning-deep, #b45309);
+  border-radius: var(--radius-sm);
+}
+.req-split-resplit-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.req-split-resplit-text {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.req-split-resplit-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
 /* ── 状态条（常驻）─────────────────────────────────────────────────────
    "关掉弹窗再打开能看到上次拆分的状态" 的主载体：它跟着最近一次拆分 run
    走，与当前处于哪个阶段无关。 */

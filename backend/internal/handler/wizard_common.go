@@ -37,11 +37,20 @@ type projectService interface {
 	EnsureCloned(id string) error
 	EnsureClonedAndSynced(ctx context.Context, id string, logf func(string)) (service.ProjectSyncResult, error)
 	SyncDesignBase(ctx context.Context, projectID, baseBranch string, timeout time.Duration, logf func(string)) (service.GitSyncResult, error)
+	// FetchBaseBranch — fetch-only base sync (never touches the working
+	// tree). The cross-requirement jobs use it to lock a baseline commit
+	// without moving the user's checkout.
+	FetchBaseBranch(ctx context.Context, projectID, baseBranch string, timeout time.Duration) (service.FetchBaseResult, error)
 	Get(id string) (*model.Project, error)
 	// ClaudeDoc returns the project-level CLAUDE.md (nil when the project
 	// has none). It is injected into the stages that need the project's
 	// conventions — see claudeDocBlock in project_claude_doc.go.
 	ClaudeDoc(projectID string) (*model.ProjectClaudeDoc, error)
+	// ReadDiskClaudeDoc reads the CLAUDE.md that already sits in a
+	// repository checkout (empty when there is none). The cross-requirement
+	// jobs run in a scratch directory, so the CLI cannot load it for them —
+	// they read it themselves — see handler/cross_claude_doc.go.
+	ReadDiskClaudeDoc(projectPath string) (string, bool, error)
 	OriginURL(projectID string) (string, error)
 	DiscoverAndCacheClaudeProjectSlug(id, localPath string) (string, error)
 	UpdateSyncStatus(id, status, commit string)
@@ -59,6 +68,26 @@ const DefaultModelLabel = "默认模型"
 // decomposes and emits [SUBTASKS_READY]), so every child launch must override
 // the system prompt with this role or it re-decomposes instead of coding.
 const executorRoleKey = "executor"
+
+// planRoleKey is the roles-table key for the plan-phase persona of a
+// plan-mode sub-task.
+//
+// The architect persona already instructs the model to write the plan to
+// ~/.claude/plans/<slug>.md (its rule 8) and carries no commit/push section —
+// the executor persona's commit rule would contradict a read-only plan run.
+//
+// Only the PERSONA changes for the plan phase. The claude-config resolution
+// chain deliberately stays bound to the executor role (see SubTaskRunner.run)
+// so the architect role's gateway binding cannot hijack the gateway the
+// composer picked.
+//
+// ALTERNATIVE (a one-line switch, verified to exist): roles.key='planner'
+// (role_defaults.go) is a ready-made read-only plan persona whose output
+// contract is a numbered implementation-step list — closer to a single
+// sub-task's granularity than the architect's requirement-level contract
+// (UI element list + ASCII layout). Swap this constant if the architect
+// persona visibly over-produces on sub-tasks.
+const planRoleKey = "architect"
 
 // effectiveModelFromValues resolves the effective model from its two sources:
 // the role's explicit per-role override (roleModel) and the active claude

@@ -156,16 +156,85 @@ func TestSplitPrecondition_DesignedWithBranchNameIsSplittable(t *testing.T) {
 }
 
 // A master that already handed its development down to a batch of children
-// must not be split again — a second batch would produce a second,
-// conflicting set of children.
-func TestSplitPrecondition_AlreadySplitIsRefused(t *testing.T) {
+// MAY be split again — the plan can be regenerated, which makes the previous
+// breakdown stale, and the old batch is replaced (not appended to).
+//
+// dev_delegated used to be a one-way flag that nothing ever reset, so it
+// could only be read as "this master was split once" and used as a veto.
+// That made the master permanently unsplittable. Whether a re-split is
+// allowed is now decided by the CHILDREN's state instead.
+func TestSplitPrecondition_AlreadySplitIsAllowed(t *testing.T) {
 	req := &model.Requirement{
 		ID: "req_m", Kind: "requirement", Status: "designed",
 		DesignDocs: "# 方案", BranchName: "feat/req_m", DevDelegated: true,
 	}
-	code, _ := splitPreconditionError(req)
-	if code != "SPLIT_ALREADY_SPLIT" {
-		t.Errorf("code = %q, want SPLIT_ALREADY_SPLIT", code)
+	code, msg := splitPreconditionError(req)
+	if code != "" {
+		t.Errorf("code = %q (%s), want the split to be allowed", code, msg)
+	}
+}
+
+// Only an old child that is STILL BEING DEVELOPED forbids a re-split —
+// that row has a live development job behind it.
+//
+// A hand-attached child is not part of any batch and never blocks; a "done"
+// old child does not block either (only the row is lost, the code stays in
+// git).
+func TestSplitChildrenBlocker(t *testing.T) {
+	cases := []struct {
+		name     string
+		children []*model.Requirement
+		wantCode string
+	}{
+		{
+			name:     "no children",
+			children: nil,
+		},
+		{
+			name:     "a done old child may be replaced",
+			children: []*model.Requirement{{ID: "req_c1", Status: "done", SplitBatchID: "spb_1"}},
+		},
+		{
+			name:     "a developing old child blocks",
+			children: []*model.Requirement{{ID: "req_c1", Status: "developing", SplitBatchID: "spb_1"}},
+			wantCode: "SPLIT_CHILDREN_IN_PROGRESS",
+		},
+		{
+			name: "one developing child among several blocks",
+			children: []*model.Requirement{
+				{ID: "req_c1", Status: "done", SplitBatchID: "spb_1"},
+				{ID: "req_c2", Status: "developing", SplitBatchID: "spb_1"},
+			},
+			wantCode: "SPLIT_CHILDREN_IN_PROGRESS",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, _ := splitChildrenBlocker(c.children)
+			if code != c.wantCode {
+				t.Errorf("code = %q, want %q", code, c.wantCode)
+			}
+		})
+	}
+}
+
+// Only the children of a split BATCH are candidates for replacement — a
+// hand-attached child (no batch id) belongs to no batch and survives.
+func TestSplitBatchChildren(t *testing.T) {
+	children := []*model.Requirement{
+		{ID: "req_b1", SplitBatchID: "spb_1"},
+		{ID: "req_manual", SplitBatchID: ""},
+		{ID: "req_b2", SplitBatchID: "spb_1"},
+		nil,
+	}
+	got := splitBatchChildren(children)
+	if len(got) != 2 {
+		t.Fatalf("got %d batch children, want 2", len(got))
+	}
+	for _, c := range got {
+		if c.ID == "req_manual" {
+			t.Error("a hand-attached child must not be treated as a batch child")
+		}
 	}
 }
 
@@ -659,5 +728,238 @@ func TestRunRemoteSplitTasks_WithoutAgentServerService(t *testing.T) {
 	}
 	if len(refs) != 0 {
 		t.Errorf("refs = %v, want none", refs)
+	}
+}
+
+// ── 重新拆分（re-split）：已拆分的需求可以被再次拆分 ──────────────────────
+
+// seedSplitBatch inserts a previous batch of split children under the master.
+//
+// batchID empty ⇒ a hand-attached child (no batch id): it belongs to no
+// batch and must survive a re-split.
+func seedSplitBatch(t *testing.T, d *db.DB, masterID, childID, title, status, batchID string, order int) {
+	t.Helper()
+	_, err := d.Exec(
+		`INSERT INTO requirements (id, project_id, title, status, parent_id, split_batch_id, split_order, dev_delegated)
+		 VALUES (?, 'proj_split', ?, ?, ?, ?, ?, 0)`,
+		childID, title, status, masterID, batchID, order)
+	if err != nil {
+		t.Fatalf("insert child %s: %v", childID, err)
+	}
+}
+
+// countChildren returns how many children the master has.
+func countChildren(t *testing.T, d *db.DB, masterID string) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRow("SELECT COUNT(1) FROM requirements WHERE parent_id=?", masterID).Scan(&n); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	return n
+}
+
+// A split whose previous batch still has a child IN DEVELOPMENT must be
+// refused before the AI is even asked — that child has a live development
+// job behind it.
+func TestSplit_RefusesWhenAnOldChildIsStillDeveloping(t *testing.T) {
+	h, _, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+	seedSplitBatch(t, d, "req_m", "req_c1", "旧子需求", "developing", "spb_old", 1)
+
+	status, code := splitErrorCode(t, h, "req_m")
+	if status != http.StatusConflict {
+		t.Errorf("status = %d, want 409", status)
+	}
+	if code != "SPLIT_CHILDREN_IN_PROGRESS" {
+		t.Errorf("code = %q, want SPLIT_CHILDREN_IN_PROGRESS", code)
+	}
+}
+
+// A "done" old child does NOT block — the re-split only loses the row, the
+// code it produced is still in git.
+func TestSplit_AllowsWhenTheOldBatchIsDone(t *testing.T) {
+	h, _, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+	seedSplitBatch(t, d, "req_m", "req_c1", "旧子需求", "done", "spb_old", 1)
+
+	// The split starts a job (the test handler has no gateway, so the job
+	// dies in the goroutine — what matters here is that it was NOT refused).
+	status, code := splitErrorCode(t, h, "req_m")
+	if status == http.StatusBadRequest || code == "SPLIT_CHILDREN_IN_PROGRESS" {
+		t.Errorf("status = %d, code = %q — a done old child must not block", status, code)
+	}
+}
+
+// Confirming a re-split WITHOUT the explicit authorization is refused — and
+// the old children are still there afterwards.
+//
+// Deleting rows is a hard action: the user has to say so.
+func TestConfirmSplit_WithoutReplaceExistingKeepsTheOldBatch(t *testing.T) {
+	h, _, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+	seedSplitBatch(t, d, "req_m", "req_c1", "旧子需求", "done", "spb_old", 1)
+
+	body := `{"tasks":[{"title":"新子需求","order":1,"depends_on":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_m/split/confirm", strings.NewReader(body))
+	req.SetPathValue("id", "req_m")
+	rec := httptest.NewRecorder()
+	h.ConfirmSplit(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body = %s)", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Error.Code != "SPLIT_ALREADY_SPLIT" {
+		t.Errorf("code = %q, want SPLIT_ALREADY_SPLIT", env.Error.Code)
+	}
+	// The old child must NOT have been deleted.
+	if n := countChildren(t, d, "req_m"); n != 1 {
+		t.Errorf("got %d children, want 1 — the old batch must survive a refused confirm", n)
+	}
+}
+
+// The authorized re-split replaces the old batch: the old rows are gone, the
+// new ones land with a fresh batch id, and the master moved on to the next
+// split round.
+func TestConfirmSplit_WithReplaceExistingReplacesTheOldBatch(t *testing.T) {
+	h, reqSvc, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+	seedSplitBatch(t, d, "req_m", "req_old1", "旧子需求 1", "done", "spb_old", 1)
+	seedSplitBatch(t, d, "req_m", "req_old2", "旧子需求 2", "done", "spb_old", 2)
+	// A hand-attached child (no batch id) is NOT part of any batch.
+	seedSplitBatch(t, d, "req_m", "req_manual", "人工子需求", "draft", "", 0)
+
+	body := `{"tasks":[
+		{"title":"新子需求 A","order":1,"depends_on":[]},
+		{"title":"新子需求 B","order":2,"depends_on":[1]}
+	],"replace_existing":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_m/split/confirm", strings.NewReader(body))
+	req.SetPathValue("id", "req_m")
+	rec := httptest.NewRecorder()
+	h.ConfirmSplit(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			Children []struct {
+				ID           string `json:"id"`
+				SplitBatchID string `json:"split_batch_id"`
+			} `json:"children"`
+			ReplacedCount   int `json:"replaced_count"`
+			SplitGeneration int `json:"split_generation"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data.Children) != 2 {
+		t.Fatalf("got %d children, want 2", len(resp.Data.Children))
+	}
+	if resp.Data.ReplacedCount != 2 {
+		t.Errorf("replaced_count = %d, want 2", resp.Data.ReplacedCount)
+	}
+	if resp.Data.SplitGeneration != 1 {
+		t.Errorf("split_generation = %d, want 1", resp.Data.SplitGeneration)
+	}
+	// The new children carry a FRESH batch id — not the replaced one.
+	newBatch := resp.Data.Children[0].SplitBatchID
+	if newBatch == "" || newBatch == "spb_old" {
+		t.Errorf("split_batch_id = %q, want a fresh non-empty batch id", newBatch)
+	}
+	if resp.Data.Children[1].SplitBatchID != newBatch {
+		t.Errorf("children carry different batch ids: %q / %q", newBatch, resp.Data.Children[1].SplitBatchID)
+	}
+
+	// The old batch is gone; the hand-attached child survived.
+	var oldLeft int
+	if err := d.QueryRow("SELECT COUNT(1) FROM requirements WHERE id IN ('req_old1','req_old2')").Scan(&oldLeft); err != nil {
+		t.Fatalf("count old children: %v", err)
+	}
+	if oldLeft != 0 {
+		t.Errorf("got %d old children, want 0 — the old batch must be replaced", oldLeft)
+	}
+	var manualLeft int
+	if err := d.QueryRow("SELECT COUNT(1) FROM requirements WHERE id='req_manual'").Scan(&manualLeft); err != nil {
+		t.Fatalf("count manual child: %v", err)
+	}
+	if manualLeft != 1 {
+		t.Error("the hand-attached child was deleted — it belongs to no batch and must survive")
+	}
+
+	// The master still handed development down, and the counter moved on.
+	master, err := reqSvc.Get("req_m")
+	if err != nil {
+		t.Fatalf("get master: %v", err)
+	}
+	if !master.DevDelegated {
+		t.Error("master dev_delegated = false, want true")
+	}
+	if master.SplitGeneration != 1 {
+		t.Errorf("master split_generation = %d, want 1", master.SplitGeneration)
+	}
+}
+
+// genBumpProjectSvc is a projectService that bumps the master's split
+// generation on every Get.
+//
+// It exists to open the CAS race window deterministically: ConfirmSplit
+// reads the master (and with it the generation it expects to claim), then
+// calls projectSvc.Get to resolve the project BEFORE it claims the split
+// round. Bumping the counter in between is exactly what a concurrent
+// confirmation in another tab does — the claim then finds a moved target
+// and must refuse instead of producing a second batch.
+type genBumpProjectSvc struct {
+	spyProjectSvc
+	d     *db.DB
+	reqID string
+}
+
+func (s *genBumpProjectSvc) Get(id string) (*model.Project, error) {
+	if _, err := s.d.Exec("UPDATE requirements SET split_generation=split_generation+1 WHERE id=?", s.reqID); err != nil {
+		return nil, err
+	}
+	return s.spyProjectSvc.Get(id)
+}
+
+// A concurrent confirmation must be refused with a conflict — not silently
+// produce a second batch of children.
+//
+// The CAS is the only arbiter of the confirm path: it compares against the
+// generation the caller read, and 0 rows affected means somebody else moved
+// it in between.
+func TestConfirmSplit_ConcurrentConfirmationIsRefused(t *testing.T) {
+	h, _, d := newSplitTestHandler(t, "req_m", "requirement", "designed", "# 方案", "", "")
+	// The project lookup sits between the master's read and the CAS claim.
+	h.projectSvc = &genBumpProjectSvc{d: d, reqID: "req_m"}
+
+	body := `{"tasks":[{"title":"子需求","order":1,"depends_on":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/requirements/req_m/split/confirm", strings.NewReader(body))
+	req.SetPathValue("id", "req_m")
+	rec := httptest.NewRecorder()
+	h.ConfirmSplit(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body = %s)", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Error.Code != "SPLIT_CONFLICT" {
+		t.Errorf("code = %q, want SPLIT_CONFLICT", env.Error.Code)
+	}
+	// Nothing may have been written.
+	if n := countChildren(t, d, "req_m"); n != 0 {
+		t.Errorf("got %d children, want 0 — a refused confirm must write nothing", n)
 	}
 }

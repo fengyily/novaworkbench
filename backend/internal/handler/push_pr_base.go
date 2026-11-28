@@ -114,7 +114,7 @@ func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, rem
 		title = "本地提交 base 分支"
 		shortDesc = "本地 shell 提交 base 分支（不推送）: " + base
 	}
-	st, job, _, nerr := r.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "")
+	st, job, _, nerr := r.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
