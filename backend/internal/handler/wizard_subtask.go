@@ -139,9 +139,7 @@ func buildParentContext(req *model.Requirement, subTaskSvc *service.SubTaskServi
 					continue
 				}
 				digest := row.Artifact
-				if len(digest) > 200 {
-					digest = digest[:200] + "…"
-				}
+				digest = util.TruncateRunes(digest, 200, "…")
 				digestsBlock += "- " + row.Title + " (" + row.Status + "): " + strings.TrimSpace(digest) + "\n"
 			}
 		}
@@ -186,14 +184,14 @@ func buildParentContext(req *model.Requirement, subTaskSvc *service.SubTaskServi
 
 // truncateForContext truncates a string to fit a soft byte budget. Used by
 // buildParentContext's individual sections before they are summed.
+//
+// The budget stays a BYTE budget (the surrounding len() comparisons and the
+// documented "32 KB hard cap" are byte-based); only the CUT POINT was wrong —
+// slicing at a byte offset can cut a multi-byte Chinese character in half and
+// emit invalid UTF-8 into the prompt. util.TruncateRunesByBytes keeps the
+// byte accounting exact while landing the cut on a rune boundary.
 func truncateForContext(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "\n…[truncated]"
+	return util.TruncateRunesByBytes(s, max, "\n…[truncated]")
 }
 
 // readParentJsonlTurns walks <worktree>/.claude/projects/<slug>/<sid>.jsonl

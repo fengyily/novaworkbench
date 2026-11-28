@@ -368,6 +368,72 @@ func TestFinalizeArchitectRun_ParentContextPersistence(t *testing.T) {
 		}
 	})
 
+	t.Run("numbered section heading is not treated as missing", func(t *testing.T) {
+		// The production bug: the model wrote "## 2. 主需求关联上下文", the
+		// verifier's HasPrefix did not match, and the machine appendix was
+		// appended on top of a perfectly good distilled section — 18% of the
+		// stored plan, claiming the model had written nothing.
+		const numbered = "# 技术方案\n\n## 1. 需求理解\n\n正文。\n\n## 2. 主需求关联上下文\n\n### 来源\n\n主需求标题 (req_ctx_parent)\n"
+		d := newParentCtxDB(t)
+		_, childID := seedParentChild(t, d, "# 主方案\n\n主需求方案正文。")
+		reqSvc := service.NewRequirementService(d, nil)
+		jobs := store.NewJobStore(8)
+		h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+		job := jobs.Create(childID)
+
+		req := mustGetReq(t, reqSvc, childID)
+		h.finalizeArchitectRun(
+			claudeStreamOutcome{planContent: numbered, sessionID: "sid"},
+			&designRunParams{
+				Req:         req,
+				ParentBlock: "some-block",
+				Parent:      &model.Requirement{ID: "req_ctx_parent", Title: "主需求标题", DesignDocs: "# 主方案"},
+			},
+			job, nil, "", "sid", childID, "sonnet",
+		)
+
+		got := mustGetReq(t, reqSvc, childID)
+		if strings.Contains(got.DesignDocs, "（自动附录）") {
+			t.Errorf("a numbered heading must not trigger the fallback appendix\n---\n%s", got.DesignDocs)
+		}
+		if !strings.Contains(got.DesignDocs, "## 2. 主需求关联上下文") {
+			t.Errorf("the model's own section must survive\n---\n%s", got.DesignDocs)
+		}
+		for _, l := range mustLines(t, job) {
+			if strings.Contains(l, "已自动追加附录") {
+				t.Errorf("no fallback warning expected, got: %s", l)
+			}
+		}
+	})
+
+	t.Run("re-run over a plan that already has an appendix keeps exactly one", func(t *testing.T) {
+		// The strip-before-append pairing: without it, every re-run would
+		// append another copy.
+		const withAppendix = "# 技术方案\n\n## 需求理解\n\n正文。\n\n## 主需求关联上下文（自动附录）\n\n### 主需求方案摘要（截断）\n\n主需求方案正文。\n"
+		d := newParentCtxDB(t)
+		_, childID := seedParentChild(t, d, "# 主方案\n\n主需求方案正文。")
+		reqSvc := service.NewRequirementService(d, nil)
+		jobs := store.NewJobStore(8)
+		h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+		job := jobs.Create(childID)
+
+		req := mustGetReq(t, reqSvc, childID)
+		h.finalizeArchitectRun(
+			claudeStreamOutcome{planContent: withAppendix, sessionID: "sid"},
+			&designRunParams{
+				Req:         req,
+				ParentBlock: "some-block",
+				Parent:      &model.Requirement{ID: "req_ctx_parent", Title: "主需求标题", DesignDocs: "# 主方案"},
+			},
+			job, nil, "", "sid", childID, "sonnet",
+		)
+
+		got := mustGetReq(t, reqSvc, childID)
+		if n := strings.Count(got.DesignDocs, "## 主需求关联上下文（自动附录）"); n != 1 {
+			t.Errorf("appendix count = %d, want exactly 1\n---\n%s", n, got.DesignDocs)
+		}
+	})
+
 	t.Run("no parent leaves the plan untouched", func(t *testing.T) {
 		d := newParentCtxDB(t)
 		_, childID := seedParentChild(t, d, "# 主方案")

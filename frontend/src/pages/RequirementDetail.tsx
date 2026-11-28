@@ -30,6 +30,7 @@ import RequirementSplitModal from '../components/RequirementSplitModal';
 import RequirementChildrenPanel from '../components/RequirementChildrenPanel';
 import RequirementAcceptancePanel from '../components/RequirementAcceptancePanel';
 import RequirementDependencyPanel from '../components/RequirementDependencyPanel';
+import RequirementFindingsPanel from '../components/RequirementFindingsPanel';
 import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
   StageIcon,
@@ -4462,6 +4463,9 @@ export default function RequirementDetail() {
                 {r.origin === 'parent' && (
                   <span className="req-ref-header-origin">{t('requirements.references.originParent')}</span>
                 )}
+                {r.origin === 'reverse' && (
+                  <span className="req-ref-header-origin">{t('requirements.references.originReverse')}</span>
+                )}
               </Link>
             ))}
           </span>
@@ -6185,6 +6189,17 @@ export default function RequirementDetail() {
           requirementId={req.id}
           childRequirements={splitChildren}
         />
+      )}
+
+      {/* ── 实施发现 (implementation findings) ── */}
+      {/* What the child requirements discovered while they were being designed
+          or implemented, waiting for a human verdict. Accepted findings are
+          folded into THIS requirement's plan by the refine-doc stage, so the
+          master plan stops describing the world as it looked before the
+          split. A child requirement has no queue of its own — the panel
+          renders the master's queue only. */}
+      {req.kind !== 'wiki' && hasDesign && !req.parent_id && (
+        <RequirementFindingsPanel requirementId={req.id} reloadToken={childrenReloadToken} />
       )}
 
       {/* ── 重新拆分的提示 ──

@@ -523,6 +523,14 @@ func main() {
 	// the routes register handlers that return 500 "service unavailable".
 	designRevSvc := service.NewDesignRevisionService(database)
 	wizardH.SetDesignRevisionSvc(designRevSvc)
+	// requirement_findings — the child → master 「实施发现」 channel. The
+	// wizard handler produces the findings (parsing the architect's
+	// 「与主需求的偏差」 section out of the stored plan) and exposes the
+	// review endpoints; the service owns the rows. Nil-safe: without it the
+	// findings endpoints answer "service not enabled" and the design run
+	// simply produces no findings.
+	findingSvc := service.NewRequirementFindingService(database)
+	wizardH.SetRequirementFindingSvc(findingSvc)
 	// requirement_qa_turns — the 阶段答疑 (stage Q&A) threads. The wizard
 	// handler owns the write path (fork a QA session off the design /
 	// coding session, run the turn, persist the answer); the service owns
@@ -1114,6 +1122,16 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/split/state", wizardH.GetSplitState)
 	mux.HandleFunc("GET /api/requirements/{id}/split/{job_id}/stream", wizardH.StreamSplitJob)
 	mux.HandleFunc("GET /api/requirements/{id}/children", wizardH.ListChildren)
+	// 实施发现 / 偏差 —— the child → master channel. A child requirement files
+	// what it discovered (parsed from the architect's 「与主需求的偏差」
+	// section); the master reviews each one and the accepted ones become a
+	// mandatory checklist in the master plan's refine prompt.
+	//   GET   .../findings       → the queue (master) or what this child filed
+	//   POST  .../findings       → file one by hand
+	//   PATCH .../findings/{fid} → accept / reject one
+	mux.HandleFunc("GET /api/requirements/{id}/findings", wizardH.ListRequirementFindings)
+	mux.HandleFunc("POST /api/requirements/{id}/findings", wizardH.CreateRequirementFinding)
+	mux.HandleFunc("PATCH /api/requirements/{id}/findings/{fid}", wizardH.UpdateRequirementFinding)
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)

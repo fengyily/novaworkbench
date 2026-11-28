@@ -238,8 +238,14 @@ export function RequirementReferencePicker({
           </div>
           {value.map(r => {
             const inherited = r.origin === 'parent';
+            // A REVERSE edge (the other requirement references this one) is
+            // read-only for the same reason an inherited one is: removing it
+            // here would silently break the other side's reference, which the
+            // user cannot see from this form.
+            const reverse = r.origin === 'reverse';
+            const readOnly = inherited || reverse;
             return (
-              <div key={`${r.requirement_id}-${r.origin}`} className={`req-ref-chip${inherited ? ' req-ref-chip--inherited' : ''}`}>
+              <div key={`${r.requirement_id}-${r.origin}`} className={`req-ref-chip${readOnly ? ' req-ref-chip--inherited' : ''}`}>
                 <div className="req-ref-chip-head">
                   <span className="req-ref-chip-title" title={r.title || r.requirement_id}>
                     {r.title || r.requirement_id}
@@ -247,7 +253,10 @@ export function RequirementReferencePicker({
                   {inherited && (
                     <span className="req-ref-chip-origin">{t('requirements.references.originParent')}</span>
                   )}
-                  {!inherited && (
+                  {reverse && (
+                    <span className="req-ref-chip-origin">{t('requirements.references.originReverse')}</span>
+                  )}
+                  {!readOnly && (
                     <button
                       type="button"
                       className="req-ref-chip-remove"
@@ -260,7 +269,7 @@ export function RequirementReferencePicker({
                     </button>
                   )}
                 </div>
-                {!inherited && (
+                {!readOnly && (
                   <input
                     className="form-input req-ref-note-input"
                     value={r.note}

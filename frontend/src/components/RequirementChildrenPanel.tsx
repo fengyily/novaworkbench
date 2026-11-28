@@ -199,6 +199,14 @@ export function RequirementChildrenPanel({
                       {c.split_batch_id.slice(0, 8)}
                     </span>
                   )}
+                  {c.stale && (
+                    <span
+                      className="req-child-meta-item req-child-meta-stale"
+                      title={t('requirements.findings.staleHint')}
+                    >
+                      {t('requirements.findings.staleBadge')}
+                    </span>
+                  )}
                 </div>
               </div>
             );

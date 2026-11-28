@@ -991,7 +991,15 @@ export function RequirementSplitModal({
         requirementId,
         {
           tasks,
-          references,
+          // Carry the model's own judgment (the "reason") with each pair.
+          // The split contract demands it — "写『无理由』『相关』这种废话等于
+          // 没判断" — and the backend used to replace it with a fixed string.
+          // A pair the user ticked that the model did NOT suggest has no
+          // reason; that stays empty and the backend falls back.
+          references: references.map(([a, b]) => {
+            const ai = aiRefs.find((r) => r.a === a && r.b === b);
+            return { from: a, to: b, reason: ai?.reason || undefined };
+          }),
           source_branch: sourceBranch.trim() || undefined,
           // The explicit "discard the previous batch" authorization. The
           // backend refuses a destructive confirm without it, so it goes

@@ -1205,6 +1205,48 @@ CREATE TABLE IF NOT EXISTS design_revisions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_dr_rev ON design_revisions(requirement_id, rev_no);
 CREATE INDEX IF NOT EXISTS idx_dr_req ON design_revisions(requirement_id, rev_no);
+
+-- requirement_findings: 子需求在方案/开发阶段发现的、待主需求复核的条目。
+--
+-- 为什么是表而不是 requirements 上的一列：主需求可能有 N 个子需求、每个子需求
+-- 可能有 M 条发现；而且这些行是一个**工作队列**（pending → accepted → rejected），
+-- 需要自己的生命周期与复核 API。
+--
+--   requirement_id    — 产生该发现的**子需求**（作者）。
+--   parent_id         — 这条发现要交给的**主需求**。冗余存一份，让主需求的复核
+--                       队列变成一次索引查询；'' = 作者没有主需求，该行惰性。
+--   stage             — 'design' | 'coding'（哪个阶段产出的）。
+--   severity          — 'info' | 'conflict' | 'deviation' | 'blocker'。
+--   status            — 'pending' | 'accepted' | 'rejected'（复核结论）。
+--   source_section    — 产出它的方案小节（如「与主需求的偏差」）。
+--   resolution        — 复核时写的结论（采纳理由 / 驳回理由）。
+--   parent_design_hash— 产出时主需求 design_docs 的 sha256；让 UI 能说
+--                       「这条发现是针对主需求方案的旧版本提出的」。
+--   absorbed_seq      — 被吸收进主需求方案的**吸收序号**（单调递增的自增计数，
+--                       0 = 尚未吸收）。刻意**不用** design_revision_no —— 它
+--                       只在「重新生成」路径递增，不是方案版本号。
+--   absorbed_at_rev   — 吸收当时的父需求 design_revision_no，仅供展示。
+CREATE TABLE IF NOT EXISTS requirement_findings (
+    id                  TEXT PRIMARY KEY,
+    requirement_id      TEXT NOT NULL,
+    parent_id           TEXT NOT NULL DEFAULT '',
+    stage               TEXT NOT NULL DEFAULT 'design',
+    severity            TEXT NOT NULL DEFAULT 'info',
+    status              TEXT NOT NULL DEFAULT 'pending',
+    title               TEXT NOT NULL DEFAULT '',
+    detail              TEXT NOT NULL DEFAULT '',
+    resolution          TEXT NOT NULL DEFAULT '',
+    source_section      TEXT NOT NULL DEFAULT '',
+    parent_design_hash  TEXT NOT NULL DEFAULT '',
+    absorbed_seq        INTEGER NOT NULL DEFAULT 0,
+    absorbed_at_rev     INTEGER NOT NULL DEFAULT 0,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at         DATETIME,
+    FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_req_findings_req    ON requirement_findings(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_req_findings_parent ON requirement_findings(parent_id, status);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -1511,6 +1553,21 @@ var alterColumns = []string{
 	// 与 tags / marks 完全同款。isIgnorableDDLError 吞掉"duplicate column"
 	// 以便历史库平滑升级。
 	`ALTER TABLE requirements ADD COLUMN referenced_requirements TEXT NOT NULL DEFAULT '[]'`,
+	// parent_design_hash: sha256 of the MASTER requirement's design_docs as of
+	// the last time this row was designed. Compared against the master's live
+	// hash to answer "is this child's plan built on an out-of-date parent
+	// plan?" — the master plan changes as implementation findings are
+	// absorbed, and a child that was designed before that change may now
+	// contradict it.
+	//
+	// Empty = never designed against a parent (or the parent had no plan yet)
+	// → treated as "unknown", never flagged stale.
+	//
+	// NOTE: adding a column to requirements means model.Requirement gains a
+	// field, so the two POSITIONAL select+scan lists in
+	// service/requirement.go (List at :259/:282 and Get at :485/:496) must both
+	// be updated — a mismatch panics at runtime.
+	`ALTER TABLE requirements ADD COLUMN parent_design_hash TEXT NOT NULL DEFAULT ''`,
 	// Per-stage context compression (analyst / architect / coding). When the
 	// user clicks "压缩上下文", the wizard handler asks Claude to summarize the
 	// current session via --resume and stores the result here, then clears the
@@ -2218,9 +2275,11 @@ var (
 	// idx_qa_req_stage) — the same trap, one column further down.
 	// `depends_on_id` joined the list with requirement_dependencies (indexed as
 	// part of its UNIQUE(requirement_id, depends_on_id) constraint).
+	// `parent_id` joined the list with the implementation-findings table
+	// (indexed as part of idx_req_findings_parent).
 	// `cross_requirement_id` / `phase_id` joined the list with the cross-
 	// requirement tables (indexed as part of their UNIQUE constraints).
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|cross_requirement_id|phase_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|depends_on_id|parent_id|cross_requirement_id|phase_id|review_id|sub_task_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id|stage)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// md_content holds a whole CLAUDE.md, which routinely exceeds MySQL's
 	// 64KB TEXT ceiling → MEDIUMTEXT (16MB). Applied BEFORE mysqlTextDefault

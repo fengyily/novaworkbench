@@ -1,0 +1,128 @@
+/* RequirementFindingsPanel — the 「实施发现」 block on a master requirement's
+   detail page.
+ *
+ * The pending items get the loud treatment: they are the only ones that
+ * still need a decision. Accepted items are already in the master plan's
+ * queue and rejected ones are history, so both stay quiet. */
+
+.req-findings-panel {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--color-surface, #fff);
+}
+
+.req-findings-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text, #334155);
+  margin-bottom: 8px;
+}
+
+.req-findings-count {
+  font-size: 11px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--color-active, #eef2ff);
+  color: var(--color-text-muted, #64748b);
+}
+
+.req-findings-section {
+  margin-bottom: 10px;
+}
+
+.req-findings-section-title {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+  margin-bottom: 4px;
+}
+
+.req-findings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.req-findings-item {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-md, 6px);
+  background: var(--color-surface, #fff);
+}
+
+.req-findings-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.req-findings-item-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text, #334155);
+}
+
+.req-findings-source {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+  text-decoration: none;
+}
+.req-findings-source:hover {
+  text-decoration: underline;
+}
+
+.req-findings-item-detail {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+  white-space: pre-wrap;
+}
+
+.req-findings-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+
+.req-findings-severity {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--color-active, #eef2ff);
+  color: var(--color-text-muted, #64748b);
+}
+/* A conflict is the case where the master plan actively contradicts what
+   the child had to do — it must not read like an ordinary note. */
+.req-findings-severity-conflict {
+  background: var(--color-danger-soft, #fee2e2);
+  color: var(--color-danger, #dc2626);
+}
+.req-findings-severity-deviation {
+  background: var(--color-warning-soft, #fef3c7);
+  color: var(--color-warning, #d97706);
+}
+.req-findings-severity-blocker {
+  background: var(--color-danger-soft, #fee2e2);
+  color: var(--color-danger, #dc2626);
+}
+
+.req-findings-empty,
+.req-findings-hint {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+}
+
+.req-findings-error {
+  font-size: 11px;
+  color: var(--color-danger, #dc2626);
+  margin-bottom: 6px;
+}

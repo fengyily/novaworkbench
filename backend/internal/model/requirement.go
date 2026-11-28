@@ -304,6 +304,21 @@ type Requirement struct {
 	// snapshot. Empty for legacy rows and requirements whose design stage was
 	// skipped (no remote / non-git / unborn HEAD — Skipped branch).
 	DesignBaseSHA string `json:"design_base_sha"`
+	// ParentDesignHash is the sha256 of the MASTER requirement's design_docs
+	// as of the last time this requirement was designed against it.
+	//
+	// It answers one question the design_revision_no column cannot:
+	// "is this child's plan built on an out-of-date parent plan?" The master
+	// plan changes as implementation findings are absorbed into it, and a child
+	// designed before that change may now contradict it.
+	//
+	// Empty = never designed against a parent (or the parent had no plan yet)
+	// → treated as "unknown", never flagged stale.
+	ParentDesignHash string `json:"parent_design_hash"`
+	// Stale marks a child whose recorded ParentDesignHash no longer matches
+	// the master's live plan hash. Derived by the children endpoint only —
+	// never stored.
+	Stale bool `json:"stale"`
 	// BaseBranch is the baseline branch the user picked at the design /
 	// development stage, reused by the merge + push stages. It is NOT the
 	// project's main branch — projects.default_branch is only the last

@@ -1285,6 +1285,12 @@ export interface Requirement {
   // architect-design 阶段锁定的事实基线（同步完成后 origin/<base> 的 HEAD SHA）。
   // 空字符串 = 未跑过 / 未配置 / 非 git 项目。merge 阶段把非空值塞进 PR body。
   design_base_sha?: string;
+  // 设计时读到的主需求方案内容的 sha256。与主需求当前方案比对可判断
+  // 「本子需求的上下文是否已过期」—— 主需求方案会随着子需求的实施发现被
+  // 收纳而变化。空 = 从未对着主需求设计过（视为未知，不算过期）。
+  parent_design_hash?: string;
+  // 上下文过期标记（仅 children 列表派生，不落库）。
+  stale?: boolean;
   // 设计阶段选定的基线分支。design 阶段跑过后由后端写入；coding 阶段
   // 当用户没在 dev 表单重新指定时，回退到这个值（与 wizard_coding.go
   // 里 `reqRow.BaseBranch` 优先链一致）。空 = 未跑过 design。
@@ -1411,8 +1417,10 @@ export interface RequirementReference {
   // prompt as the relevance signal.
   note: string;
   // 'direct' = picked by the user on this requirement; 'parent' = inherited
-  // from the master requirement (a child inherits its master's set).
-  origin: 'direct' | 'parent';
+  // from the master requirement (a child inherits its master's set);
+  // 'reverse' = the OTHER requirement references this one — references are
+  // undirected, so both sides must be able to see each other.
+  origin: 'direct' | 'parent' | 'reverse';
   title: string;
   status: string;
   kind?: Kind;
@@ -1741,6 +1749,52 @@ export interface RequirementDependencyEdge {
 export interface RequirementChildList {
   children: Requirement[];
   dependencies: RequirementDependencyEdge[];
+  // 子需求 id 列表：这些子需求设计方案时读到的主需求方案，已经被主需求
+  // 后续的修改（收纳子需求的实施发现）改掉了。UI 据此提示「上下文可能过期」。
+  stale_child_ids?: string[];
+}
+
+// 一条「实施发现」—— 子需求在设计 / 开发期间发现、待主需求复核的事实。
+// 镜像 backend/internal/model/requirement_finding.go。
+export interface RequirementFinding {
+  id: string;
+  // 产生该发现的子需求。
+  requirement_id: string;
+  // 该发现要交给的主需求。顶层需求的发现为空串。
+  parent_id: string;
+  // 'design' | 'coding'
+  stage: string;
+  // 'info' | 'conflict' | 'deviation' | 'blocker'
+  severity: string;
+  // 'pending' | 'accepted' | 'rejected'
+  status: string;
+  title: string;
+  detail: string;
+  // 复核时写的结论。
+  resolution: string;
+  source_section: string;
+  parent_design_hash: string;
+  absorbed_seq: number;
+  absorbed_at_rev: number;
+  created_at: string;
+  updated_at: string;
+  reviewed_at?: string;
+}
+
+export interface RequirementFindingList {
+  findings: RequirementFinding[];
+  counts: { pending: number; accepted: number; rejected: number };
+}
+
+// 拆分确认时提交的一条「互相参考」。
+//
+// reason 是模型以架构师视角给出的判断依据 —— 拆分契约明确要求它必填
+// （「写『无理由』『相关』这种废话等于没判断」），所以必须一路带到后端，
+// 不能在 HTTP 边界上被降级成只有序号的数组。
+export interface SplitReferencePair {
+  from: number;
+  to: number;
+  reason?: string;
 }
 
 export const requirementsApi = {
@@ -1851,11 +1905,25 @@ export const requirementsApi = {
   // batch. The backend refuses (SPLIT_ALREADY_SPLIT) when the requirement
   // already has children and this flag is absent, so a re-split always needs
   // the user's confirmation.
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string; replace_existing?: boolean }, signal?: AbortSignal) =>
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: SplitReferencePair[]; source_branch?: string; replace_existing?: boolean }, signal?: AbortSignal) =>
     api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body, signal ? { signal } : undefined),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>
     api.get<RequirementChildList>(`/api/requirements/${id}/children`),
+  // 实施发现 —— 子需求 → 主需求的结构化通道。
+  // listFindings: id 是主需求时返回其复核队列，是子需求时返回它自己上报的。
+  listFindings: (id: string, params?: { child_id?: string; status?: string }) => {
+    const q = new URLSearchParams();
+    Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
+    const qs = q.toString();
+    return api.get<RequirementFindingList>(`/api/requirements/${id}/findings${qs ? `?${qs}` : ''}`);
+  },
+  // updateFinding: 记录复核结论（采纳 / 驳回）。
+  updateFinding: (id: string, findingId: string, body: { status: string; resolution?: string }) =>
+    api.patch<RequirementFindingList>(`/api/requirements/${id}/findings/${findingId}`, body),
+  // createFinding: 手动补录一条发现（模型漏写契约小节时的兜底）。
+  createFinding: (id: string, body: { title: string; detail?: string; severity?: string; child_id?: string }) =>
+    api.post<RequirementFindingList>(`/api/requirements/${id}/findings`, body),
   // splitStreamUrl: the SSE endpoint for a split job. Dedicated (not the
   // shared /api/wizard/jobs/{id}/stream) because only this flow hands a
   // structured payload on the terminal frame.

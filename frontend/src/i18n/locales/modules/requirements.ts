@@ -1074,6 +1074,7 @@ export const requirements = {
     noteLabel: '引用原因',
     originDirect: '直接引用',
     originParent: '继承自主需求',
+    originReverse: '被对方引用',
     limitReached: '最多引用 {{n}} 个需求',
     moreResults: '还有 {{n}} 条，请继续输入关键词',
     count: '已引用 {{n}}/{{max}}',
@@ -1184,6 +1185,30 @@ export const requirements = {
     streamEmpty: '（暂无输出）',
   },
   // 执行顺序依赖（与「引用」是两件事：依赖是闸门，引用只是上下文）
+  // 实施发现 —— 子需求在设计/开发期间发现、待主需求复核的事实。
+  findings: {
+    title: '实施发现',
+    pendingTitle: '待复核',
+    acceptedTitle: '已采纳',
+    rejectedTitle: '已驳回',
+    pendingCount: '{{n}} 条待复核',
+    accept: '采纳',
+    reject: '驳回',
+    fromChild: '来自子需求',
+    empty: '暂无实施发现 —— 子需求在设计或开发中上报的变更会出现在这里。',
+    loading: '加载中…',
+    absorbHint: '已采纳的发现会在下一次「优化方案」时写入主需求方案。',
+    staleBadge: '⚠ 主需求方案已更新',
+    staleHint: '该子需求设计时读到的主需求方案已经被后续修改改掉了，上下文可能过期。',
+    errLoad: '加载实施发现失败：{{msg}}',
+    errUpdate: '更新实施发现失败：{{msg}}',
+    severity: {
+      info: '新事实',
+      conflict: '冲突',
+      deviation: '偏差',
+      blocker: '阻塞',
+    },
+  },
   dependency: {
     title: '前置依赖',
     postTitle: '后继任务',
