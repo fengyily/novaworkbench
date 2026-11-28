@@ -145,6 +145,15 @@ const (
 // splitFenceRe — 剥掉模型可能带上的 ```json / ``` 围栏。
 var splitFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
 
+// SplitPromptOptions tunes how the split prompt is rendered.
+type SplitPromptOptions struct {
+	// Resplit — 这是「重新拆分」：上一批子需求即将作废（方案重新生成过，
+	// 旧的拆解已经过时），提示词不要再列「已有子需求（不要重复拆这些）」——
+	// 那会让模型围着旧的拆解打转、产出一模一样的一批。它改为收到一段
+	// 「重新拆分」指令。
+	Resplit bool
+}
+
 // BuildSplitPrompt renders the split prompt.
 //
 // Inputs: the master requirement (title / kind), its design docs (the
@@ -160,7 +169,7 @@ var splitFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
 // material on exactly the old behaviour.
 //
 // Pure function — the handler owns the DB reads and the CLI invocation.
-func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildren []*model.Requirement, contextBlock string) string {
+func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildren []*model.Requirement, contextBlock string, opts SplitPromptOptions) string {
 	if req == nil {
 		return ""
 	}
@@ -180,7 +189,13 @@ func BuildSplitPrompt(req *model.Requirement, designDocs string, existingChildre
 	}
 	b.WriteString("\n")
 
-	if len(existingChildren) > 0 {
+	if opts.Resplit {
+		// 重新拆分：旧的一批即将作废，别让模型去「避开」它们。
+		b.WriteString("## 重新拆分\n")
+		b.WriteString("这是一次**重新拆分**：该需求的方案刚刚重新生成，上一次拆出的子需求将全部作废。\n")
+		b.WriteString("请**完全按当前技术方案**重新拆解，不要沿用上一次的拆法，也不要试图保留旧子需求。\n")
+		b.WriteString("\n")
+	} else if len(existingChildren) > 0 {
 		b.WriteString("## 已有子需求（不要重复拆这些）\n")
 		for _, c := range existingChildren {
 			if c == nil {

@@ -82,6 +82,10 @@ type Requirement struct {
 	// "ORDER BY created_at" degenerated into ordering by the random
 	// req_<hex> id and the children came back shuffled.
 	SplitOrder int `json:"split_order"`
+	// SplitGeneration is this row's split-round counter (0 = never split).
+	// The master increments it once per successful split batch; children stay
+	// 0. It doubles as the CAS token of the confirm transaction.
+	SplitGeneration int `json:"split_generation"`
 	// ChildCount is a read-only derived count of non-archived children,
 	// populated by List only.
 	ChildCount      int    `json:"child_count"`

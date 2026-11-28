@@ -32,7 +32,7 @@ func TestSplitJSONContract_ContainsTheHardRules(t *testing.T) {
 
 func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 	req := &model.Requirement{ID: "req_p", Title: "大需求", Kind: "requirement", Description: "描述"}
-	p := BuildSplitPrompt(req, "# 技术方案\n\n正文", nil, "")
+	p := BuildSplitPrompt(req, "# 技术方案\n\n正文", nil, "", SplitPromptOptions{})
 	if !strings.Contains(p, "大需求") {
 		t.Error("prompt is missing the master title")
 	}
@@ -42,7 +42,7 @@ func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 	if !strings.Contains(p, "json") {
 		t.Error("prompt is missing the json contract")
 	}
-	if BuildSplitPrompt(nil, "x", nil, "") != "" {
+	if BuildSplitPrompt(nil, "x", nil, "", SplitPromptOptions{}) != "" {
 		t.Error("a nil requirement must degrade to an empty prompt")
 	}
 }
@@ -52,9 +52,42 @@ func TestBuildSplitPrompt_IncludesMasterPlanAndContract(t *testing.T) {
 func TestBuildSplitPrompt_ListsExistingChildren(t *testing.T) {
 	req := &model.Requirement{ID: "req_p", Title: "大需求"}
 	existing := []*model.Requirement{{ID: "req_c1", Title: "已有子需求", Status: "draft"}}
-	p := BuildSplitPrompt(req, "docs", existing, "")
+	p := BuildSplitPrompt(req, "docs", existing, "", SplitPromptOptions{})
 	if !strings.Contains(p, "已有子需求") {
 		t.Error("prompt does not mention the existing children")
+	}
+}
+
+// A re-split must NOT tell the model to avoid the old children — they are
+// about to be discarded, and steering the model around the stale breakdown
+// would make it produce the very same set again.
+//
+// The old children are replaced by an explicit "重新拆分" instruction.
+func TestBuildSplitPrompt_ResplitReplacesTheExistingChildrenSection(t *testing.T) {
+	req := &model.Requirement{ID: "req_p", Title: "大需求"}
+	existing := []*model.Requirement{{ID: "req_c1", Title: "上一轮的子需求", Status: "done"}}
+
+	p := BuildSplitPrompt(req, "docs", existing, "", SplitPromptOptions{Resplit: true})
+	if strings.Contains(p, "已有子需求") {
+		t.Error("a re-split prompt must not list the children it is about to discard")
+	}
+	if strings.Contains(p, "上一轮的子需求") {
+		t.Error("a re-split prompt must not mention the old children's titles")
+	}
+	if !strings.Contains(p, "## 重新拆分") {
+		t.Error("a re-split prompt must carry the 重新拆分 instruction")
+	}
+}
+
+// Everything else about the prompt is unchanged by the mode: the master
+// block, the plan and the JSON contract are all still there.
+func TestBuildSplitPrompt_ResplitKeepsTheRestOfThePrompt(t *testing.T) {
+	req := &model.Requirement{ID: "req_p", Title: "大需求", Kind: "requirement", Description: "描述"}
+	p := BuildSplitPrompt(req, "# 方案", nil, "", SplitPromptOptions{Resplit: true})
+	for _, want := range []string{"## 主需求", "- 标题：大需求", "## 重新拆分", "## 技术方案", "# 方案", "json"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("a re-split prompt is missing %q", want)
+		}
 	}
 }
 
@@ -74,12 +107,12 @@ func TestBuildSplitPrompt_EmptyContextIsByteIdentical(t *testing.T) {
 		"# 方案\n\n" +
 		SplitJSONContract +
 		splitContractTail
-	got := BuildSplitPrompt(req, "# 方案", nil, "")
+	got := BuildSplitPrompt(req, "# 方案", nil, "", SplitPromptOptions{})
 	if got != want {
 		t.Errorf("the prompt changed:\ngot:\n%q\nwant:\n%q", got, want)
 	}
 	// A blank context block is the same as no context block.
-	if BuildSplitPrompt(req, "# 方案", nil, "   \n ") != want {
+	if BuildSplitPrompt(req, "# 方案", nil, "   \n ", SplitPromptOptions{}) != want {
 		t.Error("a blank context block must not change the prompt")
 	}
 }
@@ -89,7 +122,7 @@ func TestBuildSplitPrompt_EmptyContextIsByteIdentical(t *testing.T) {
 // cut up.
 func TestBuildSplitPrompt_InsertsTheContextBlock(t *testing.T) {
 	req := &model.Requirement{ID: "req_p", Title: "大需求"}
-	p := BuildSplitPrompt(req, "# 方案", nil, "## 需求上下文\n\n### 📎 已附加文件\n")
+	p := BuildSplitPrompt(req, "# 方案", nil, "## 需求上下文\n\n### 📎 已附加文件\n", SplitPromptOptions{})
 	if !strings.Contains(p, "## 需求上下文") {
 		t.Fatal("the context block is missing from the prompt")
 	}

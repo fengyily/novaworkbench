@@ -2044,6 +2044,19 @@ var alterColumns = []string{
 	// 读路径按它排序（ListChildren / 列表接口 / UnmetDependencies），
 	// 顺序才不会随进程重启或随机 id 漂移。
 	`ALTER TABLE requirements ADD COLUMN split_order INTEGER NOT NULL DEFAULT 0`,
+	// split_generation: 这一行是第几轮「方案拆分」的主体（0 = 从未拆分）。
+	// 主需求每成功落库一批子需求 +1；子需求恒为 0（拆分产物本身不再拆）。
+	//
+	// 用途：确认事务里的 CAS 令牌 —— UPDATE ... WHERE split_generation =
+	// <事务外读到的值>，0 行受影响即说明有并发确认抢跑，整批回滚。
+	// 跨项目拆分已有同款范式（cross_requirements.split_batch_id 抢占，
+	// 见 service/cross_requirement_split.go）。
+	//
+	// 不建索引：只在按主需求 id 的点查里用。
+	//
+	// alterColumns 是 append-only 清单、逐条执行且吞掉 duplicate column
+	// 错误，所以放在 split_order 之后与追加到末尾等价，这里只为可读性。
+	`ALTER TABLE requirements ADD COLUMN split_generation INTEGER NOT NULL DEFAULT 0`,
 	// 推理档位（claude CLI --effort）：该阶段**实际使用**的档位。
 	// 与 *_model 完全同语义 —— 只在成功路径落库，失败运行不覆盖上一次的好
 	// 记录；空串 = 本次运行未指定档位（不下发 --effort）。

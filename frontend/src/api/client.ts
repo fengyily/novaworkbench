@@ -1370,6 +1370,10 @@ export interface Requirement {
   // 这一列是批次顺序**唯一**的持久化落点：同一批子需求共用一个 created_at，
   // 只按创建时间排的话批内顺序是未定义的（实际退化成按随机 id 排，顺序会乱）。
   split_order?: number;
+  // 这一行是第几轮「方案拆分」的主体（0 = 从未拆分）。主需求每成功落库一批
+  // 子需求 +1，子需求恒为 0。它同时是后端确认事务的 CAS 令牌 ——
+  // 并发确认时条件 UPDATE 匹配不到行，整批回滚。
+  split_generation?: number;
   // 开发权已下放给子需求（true）时，本需求不再自己写代码 —— coding 闸门会
   // 拒绝它进入开发，主需求改为「全部子需求完成后才能标记完成」。
   dev_delegated?: boolean;
@@ -1717,6 +1721,10 @@ export interface SplitConfirmResult {
   stack_base?: string;
   // 栈底分支是否已推送到远端。堆叠 PR 的 base 必须在 origin 上存在。
   pushed?: boolean;
+  // 本次被作废的旧子需求数（重新拆分时 > 0）。未发生替换时为空 / 0。
+  replaced_count?: number;
+  // 本轮之后的拆分代数（第几轮）。0 = 该需求从未拆分过。
+  split_generation?: number;
 }
 
 // 一条依赖边。requirement_id 依赖 depends_on_id。
@@ -1838,7 +1846,12 @@ export const requirementsApi = {
   // signal — optional AbortSignal. The confirm prepares the stack-bottom
   // branch and PUSHES it to origin, so the request can take a while on a slow
   // or unreachable remote; the caller aborts it instead of spinning forever.
-  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string }, signal?: AbortSignal) =>
+  //
+  // replace_existing — explicit authorization to discard the previous split
+  // batch. The backend refuses (SPLIT_ALREADY_SPLIT) when the requirement
+  // already has children and this flag is absent, so a re-split always needs
+  // the user's confirmation.
+  confirmSplit: (id: string, body: { tasks: SplitTaskCandidate[]; references?: [number, number][]; source_branch?: string; replace_existing?: boolean }, signal?: AbortSignal) =>
     api.post<SplitConfirmResult>(`/api/requirements/${id}/split/confirm`, body, signal ? { signal } : undefined),
   // listChildren: the requirement's sub-requirements + their dependency edges.
   listChildren: (id: string) =>

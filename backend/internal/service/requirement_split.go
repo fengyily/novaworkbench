@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -37,6 +39,14 @@ import (
 
 // ErrDependencyCycle — 依赖边成环。
 var ErrDependencyCycle = errors.New("requirement dependency cycle detected")
+
+// ErrSplitConflict — 并发确认：CAS 没抢到（另一个确认已经把 master 的
+// split_generation 推进了），整批回滚 —— 一个子需求都不会写进去。
+var ErrSplitConflict = errors.New("split: concurrent confirmation detected")
+
+// ErrChildInProgress — 旧批次里有子需求正在开发（status='developing'），
+// 那一行背后有活的开发 job，删行会打断正在进行的工作，所以拒绝替换。
+var ErrChildInProgress = errors.New("split: an existing sub-requirement is still developing")
 
 // OrderSplitTasks 把候选子需求整理成**展示顺序**，并把序号归一成连续的
 // 1..N（批次内序号空间）。
@@ -123,6 +133,14 @@ type SplitCreateOpts struct {
 	// 调用方（handler）在拆分时已经把这个分支创建出来并推送到了远端，
 	// 所以这里显式传下来，避免服务层再推导一次推导出另一条线。
 	BaseBranch string
+	// ReplaceExisting — 重新拆分：作废上一批拆分产出的子需求（只删
+	// split_batch_id 非空的那些 —— 人工挂载的子需求不动），并与新批次
+	// 在同一个事务里落库。
+	//
+	// CAS 的期望代数不作为 opt 传入，直接用 parent.SplitGeneration ——
+	// handler 在 ConfirmSplit 开头 Get 到的最新值就是「调用方在事务外读到
+	// 的值」，少一个字段就少一个「调用方忘传」的坑。
+	ReplaceExisting bool
 }
 
 // splitMaxTasks — 单次拆分的子需求数量上限。契约里写死 2–12，超出截断。
@@ -201,6 +219,86 @@ func (s *RequirementService) CreateChildren(
 	defer tx.Rollback()
 
 	now := time.Now()
+
+	// ① CAS — 抢占本轮拆分的名额。
+	//
+	// 条件是「master 的 split_generation 仍是我在事务外读到的那个值」。
+	// 两个并发确认读到同一个值，只有一个能把代数推进；后到的那条 0 行
+	// 受影响 ⇒ ErrSplitConflict ⇒ 整批回滚（一个子需求都不会写进去）。
+	//
+	// dev_delegated 也在这一条里置位（开发权下放给子需求，coding 闸门
+	// 拒绝它自己进入开发）。**这一条必须是事务的第一条语句** —— 它是
+	// 整个确认路径里唯一的并发仲裁点。
+	//
+	// split_generation 每次必变（+1），所以 MySQL 的 RowsAffected
+	// 「变了的行数」语义在这里与「匹配的行数」等价：0 行就一定是不匹配。
+	claim, err := tx.Exec(
+		`UPDATE requirements SET dev_delegated=1, split_generation=split_generation+1, updated_at=?
+		 WHERE id=? AND split_generation=?`,
+		now, parent.ID, parent.SplitGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("split: claim split round: %w", err)
+	}
+	claimed, cErr := claim.RowsAffected()
+	if cErr != nil {
+		return nil, fmt.Errorf("split: claim split round: %w", cErr)
+	}
+	if claimed == 0 {
+		// 名额被别人抢走了（并发确认）—— 整批回滚。
+		return nil, ErrSplitConflict
+	}
+
+	// ② 重新拆分：作废上一批拆分产物。
+	//
+	// 替换范围 = parent_id = 主需求 AND split_batch_id <> ''。人工挂载的
+	// 子需求（split_batch_id 为空，SetParent 不写该列）不属于任何拆分
+	// 批次，原样保留。
+	//
+	// 旧子需求的 sub_task id 要在**删除前**查出来 —— purgeRequirementRows
+	// 会把 sub_tasks 行删掉，而事务外的知识库清理需要这些 id。
+	var purgedIDs []string
+	var purgedSubTaskIDs []string
+	if opts.ReplaceExisting {
+		oldRows, err := tx.Query(
+			`SELECT id, status FROM requirements WHERE parent_id=? AND split_batch_id<>''`,
+			parent.ID)
+		if err != nil {
+			return nil, fmt.Errorf("split: list previous batch: %w", err)
+		}
+		var oldIDs []string
+		for oldRows.Next() {
+			var oldID, oldStatus string
+			if sErr := oldRows.Scan(&oldID, &oldStatus); sErr != nil {
+				oldRows.Close()
+				return nil, fmt.Errorf("split: list previous batch: %w", sErr)
+			}
+			// 正在开发的旧子需求背后有活的开发 job，删行会打断正在进行
+			// 的工作 —— 拒绝替换。
+			if oldStatus == "developing" {
+				oldRows.Close()
+				return nil, ErrChildInProgress
+			}
+			oldIDs = append(oldIDs, oldID)
+		}
+		oldRows.Close()
+		if rowsErr := oldRows.Err(); rowsErr != nil {
+			return nil, fmt.Errorf("split: list previous batch: %w", rowsErr)
+		}
+
+		for _, oldID := range oldIDs {
+			subIDs, err := listSubTaskIDs(tx, oldID)
+			if err != nil {
+				return nil, fmt.Errorf("split: list sub-tasks of %s: %w", oldID, err)
+			}
+			purgedSubTaskIDs = append(purgedSubTaskIDs, subIDs...)
+			if err := s.purgeRequirementRows(tx, oldID); err != nil {
+				return nil, fmt.Errorf("split: purge previous sub-requirement %s: %w", oldID, err)
+			}
+			purgedIDs = append(purgedIDs, oldID)
+		}
+	}
+
+	// ③ 插入新子需求。
 	for i, task := range tasks {
 		criteria := "[]"
 		if len(task.Acceptance) > 0 {
@@ -218,6 +316,7 @@ func (s *RequirementService) CreateChildren(
 		}
 	}
 
+	// ④ 插入依赖边。
 	for _, edge := range deps {
 		if edge.RequirementID == "" || edge.DependsOnID == "" {
 			continue
@@ -232,21 +331,23 @@ func (s *RequirementService) CreateChildren(
 		}
 	}
 
-	// Topology check BEFORE the master's dev_delegated flip: a cycle must
-	// abort the whole batch, not leave a half-committed split behind.
+	// 拓扑检查：成环 ⇒ 整批回滚。
+	//
+	// dev_delegated 由 ① 的 CAS 先行置位，成环时靠**整体回滚**撤销 ——
+	// 半截的拆分比不拆分更糟，所以这里不是「先查再置位」而是「置位了
+	// 再靠回滚兜底」。
 	if err := checkDependencyAcyclic(ids, deps); err != nil {
 		return nil, err
 	}
 
-	// Development is handed down to the children from now on. The coding
-	// gate refuses to promote this requirement into "developing".
-	if _, err := tx.Exec("UPDATE requirements SET dev_delegated=1, updated_at=? WHERE id=?", now, parent.ID); err != nil {
-		return nil, fmt.Errorf("split: flag master dev_delegated: %w", err)
-	}
-
+	// ⑤ 提交。
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+
+	// 事务外的知识库 best-effort 清理（照抄 Delete 的口径）：删行后知识库
+	// 里留一条孤儿条目不影响功能，失败也不该让整个请求失败。
+	s.cleanupPurgedKnowledge(purgedIDs, purgedSubTaskIDs)
 
 	out := make([]*model.Requirement, 0, len(ids))
 	for _, id := range ids {
@@ -257,6 +358,61 @@ func (s *RequirementService) CreateChildren(
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// listSubTaskIDs returns the ids of the sub-tasks that belong to a
+// requirement.
+//
+// It must run BEFORE purgeRequirementRows deletes the sub_tasks rows —
+// the knowledge cleanup afterwards needs those ids, and the rows are gone
+// by then.
+//
+// The query runs on the caller's transaction so it sees the same snapshot
+// the purge will act on.
+func listSubTaskIDs(tx *db.Tx, requirementID string) ([]string, error) {
+	rows, err := tx.Query("SELECT id FROM sub_tasks WHERE requirement_id=?", requirementID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// cleanupPurgedKnowledge drops the knowledge rows that referenced the
+// sub-requirements a re-split discarded.
+//
+// It mirrors RequirementService.Delete's口径 (dev_report by requirement id,
+// subtask_report by sub-task id) but runs AFTER the transaction committed:
+// the knowledge table lives outside the transaction, and an orphan entry
+// left behind by a failed cleanup is harmless — it points at a row that
+// no longer exists.
+//
+// Best-effort by design: the rows are already gone, so a cleanup failure
+// must not fail the request that already succeeded.
+func (s *RequirementService) cleanupPurgedKnowledge(requirementIDs, subTaskIDs []string) {
+	if s.archiveSvc == nil {
+		// archiveSvc is optional (nil) for unit tests; the same nil-guard
+		// pattern lives on RequirementService.Delete.
+		return
+	}
+	for _, id := range requirementIDs {
+		if err := s.archiveSvc.DeleteBySourceRefs(SourceTypeDevReport, []string{id}); err != nil {
+			log.Printf("[split] cleanup dev_report knowledge for %s: %v", id, err)
+		}
+	}
+	if len(subTaskIDs) > 0 {
+		if err := s.archiveSvc.DeleteBySourceRefs(SourceTypeSubtaskReport, subTaskIDs); err != nil {
+			log.Printf("[split] cleanup subtask_report knowledge: %v", err)
+		}
+	}
 }
 
 // buildSplitDescription assembles a child's description **deterministically**

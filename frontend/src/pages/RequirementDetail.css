@@ -3999,3 +3999,31 @@ allowed so the row collapses cleanly on every viewport. */
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* ── 「重新拆分」提示 ──────────────────────────────────────────────────
+   Shown after the technical plan was regenerated on a requirement that had
+   already been split: the children were cut from the previous plan, so they
+   may no longer match it.
+
+   It reuses the warning token family of .dev-delegated-notice above — the
+   same "something about the children needs your attention" semantics — and
+   keeps the CTA on the page so the re-split is one click away instead of
+   something the user has to discover inside the split dialog. */
+.req-resplit-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-warning, #f59e0b);
+  border-radius: 8px;
+  background: var(--color-warning-soft, #fef3c7);
+  color: var(--color-warning-deep, #b45309);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.req-resplit-hint-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
